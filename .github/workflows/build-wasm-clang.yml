@@ -107,9 +107,13 @@ jobs:
       # Stage 2: cross-compile clang + lld to wasm32-wasi with wasi-sdk.
       - name: Configure cross build (-> wasm32-wasi)
         run: |
+          # shim: LLVM's bit.h falls to BSD-style <machine/endian.h> on wasi
+          # (clang defines __wasi__, not __linux__); redirect it to <endian.h>.
+          mkdir -p /mnt/build/shims/machine
+          echo '#include <endian.h>' > /mnt/build/shims/machine/endian.h
           WASI="$PWD/wasi-sdk"
           SYSROOT="$WASI/share/wasi-sysroot"
-          CFLAGS_W="--target=wasm32-wasi --sysroot=$SYSROOT -fwasm-exceptions -D_WASI_EMULATED_SIGNAL -D_WASI_EMULATED_PROCESS_CLOCKS -D_WASI_EMULATED_GETPID -D_WASI_EMULATED_MMAN"
+          CFLAGS_W="--target=wasm32-wasi --sysroot=$SYSROOT -I/mnt/build/shims -fwasm-exceptions -D_WASI_EMULATED_SIGNAL -D_WASI_EMULATED_PROCESS_CLOCKS -D_WASI_EMULATED_GETPID -D_WASI_EMULATED_MMAN"
           cmake -S llvm-src/llvm -B build-wasm -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_C_COMPILER="$WASI/bin/clang" \
