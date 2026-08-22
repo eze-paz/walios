@@ -117,7 +117,7 @@ jobs:
             -DCMAKE_C_FLAGS="$CFLAGS_W" \
             -DCMAKE_CXX_FLAGS="$CFLAGS_W" \
             -DCMAKE_EXE_LINKER_FLAGS="-lwasi-emulated-signal -lwasi-emulated-process-clocks -lwasi-emulated-getpid -lwasi-emulated-mman -Wl,--max-memory=4294967296 -Wl,-z,stack-size=8388608" \
-            -DCMAKE_SYSTEM_NAME=WASI \
+            -DCMAKE_SYSTEM_NAME=Linux \
             -DCMAKE_CROSSCOMPILING=ON \
             -DLLVM_ENABLE_PROJECTS="clang;lld" \
             -DLLVM_TARGETS_TO_BUILD="WebAssembly" \
