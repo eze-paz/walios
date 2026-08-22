@@ -19,6 +19,8 @@
   <button id="bbsh">hush script</button>
   <button id="cc">compile in-browser (microcc)</button>
   <button id="wasi">run real wasi binary (clang-built)</button>
+  <button id="realcc">compile C with REAL clang in-tab → run (wasi)</button>
+  <button id="waliCC">compile C → WALI target in-tab → run as OS process</button>
 </div>
 <div id="status">idle — COI: <span id="coi"></span></div>
 <div id="term"></div>
@@ -49,10 +51,11 @@ function freshWorker() {
 
 function run(cfg) {
   if (running) { log('\n[already running]\n', true); return; }
-  running = true; term.textContent = ''; status.textContent = 'loading...';
+  running = true; if (!cfg.keepTerm) term.textContent = ''; status.textContent = 'loading...';
   Atomics.store(ctl, 0, 0);
   freshWorker();
-  worker.postMessage({ t: 'run', ...cfg });
+  const { keepTerm, ...msg } = cfg;
+  worker.postMessage({ t: 'run', ...msg });
 }
 
 const PYENV = { PYTHONHOME: '/py', PYTHONPATH: '/py/Lib', PYTHONDONTWRITEBYTECODE: '1', HOME: '/', LC_ALL: 'C.UTF-8' };
@@ -91,6 +94,85 @@ document.getElementById('cc').onclick = () => run({
 
 document.getElementById('wasi').onclick = () => run({
   wasm: 'wt.wasm', manifest: MANIFEST, argv: ['wt', 'in-the-browser'] });
+
+// REAL clang (LLVM 22, @yowasp/clang) compiling C in the tab, then our OS runs it.
+let runClangFn = null;
+document.getElementById('realcc').onclick = async () => {
+  if (running) { log('\n[already running]\n', true); return; }
+  term.textContent = ''; status.textContent = 'loading clang.wasm (73MB + 29MB resources, first time)...';
+  try {
+    if (!runClangFn) ({ runClang: runClangFn } = await import('./yowasp/gen/bundle.js'));
+    const src = `#include <stdio.h>
+int main(){
+  printf("Hello from C, compiled by REAL clang running in this browser tab.\\n");
+  long a=0,b=1; for(int i=0;i<30;i++){long t=a+b;a=b;b=t;}
+  printf("fib(30)=%ld\\n", a);
+  return 0;
+}`;
+    status.textContent = 'compiling prog.c with clang.wasm (LLVM 22) ...';
+    let ccerr = '';
+    const files = await runClangFn(['clang', '-O2', 'prog.c', '-o', 'prog.wasm'],
+      { 'prog.c': src },
+      { stderr: (bb) => { if (bb) ccerr += new TextDecoder().decode(bb); }, decodeASCII: true });
+    if (!files['prog.wasm']) { log('clang failed:\n' + ccerr, true); status.textContent = 'clang failed'; return; }
+    log(`[clang.wasm] compiled prog.wasm — ${files['prog.wasm'].length} bytes, in the tab\n`);
+    log(`[os] running it on our WASI host:\n`);
+    run({ vfsMain: '/prog.wasm', blobs: { '/prog.wasm': files['prog.wasm'] }, argv: ['prog'], keepTerm: true });
+  } catch (e) { log('error: ' + (e.stack || e), true); status.textContent = 'error'; }
+};
+
+// fetch a .tar.gz and parse it into a YoWASP file Tree (nested object)
+async function fetchTarTree(url) {
+  const ds = new DecompressionStream('gzip');
+  const buf = new Uint8Array(await new Response((await fetch(url)).body.pipeThrough(ds)).arrayBuffer());
+  const root = {}; const td = new TextDecoder(); let off = 0;
+  const put = (path, data) => { const parts = path.replace(/^\.\//, '').split('/').filter(Boolean);
+    let cur = root; for (let i = 0; i < parts.length - 1; i++) cur = (cur[parts[i]] ||= {});
+    cur[parts[parts.length - 1]] = data; };
+  while (off + 512 <= buf.length) {
+    const h = buf.subarray(off, off + 512); if (h.every(b => b === 0)) break;
+    let name = td.decode(h.subarray(0, 100)).replace(/\0.*$/, '');
+    const pfx = td.decode(h.subarray(345, 500)).replace(/\0.*$/, ''); if (pfx) name = pfx + '/' + name;
+    const size = parseInt(td.decode(h.subarray(124, 136)).trim(), 8) || 0;
+    const type = String.fromCharCode(h[156] || 48); off += 512;
+    if ((type === '0' || type === '\0') && name) put(name, buf.slice(off, off + size));
+    off += Math.ceil(size / 512) * 512;
+  }
+  return root;
+}
+
+// Compile C to a WALI binary in-tab (real clang), run as a native OS process.
+let waliSysroot = null;
+document.getElementById('waliCC').onclick = async () => {
+  if (running) { log('\n[already running]\n', true); return; }
+  term.textContent = ''; status.textContent = 'loading clang.wasm + wali sysroot...';
+  try {
+    if (!runClangFn) ({ runClang: runClangFn } = await import('./yowasp/gen/bundle.js'));
+    if (!waliSysroot) waliSysroot = await fetchTarTree('./wali-sysroot.tar.gz');
+    const src = `#include <stdio.h>
+int main(){
+  printf("Compiled to the WALI target by clang IN THE TAB; running as an OS process.\\n");
+  long a=0,b=1; for(int i=0;i<32;i++){long t=a+b;a=b;b=t;}
+  printf("fib(32)=%ld\\n", a);
+  return 0;
+}`;
+    status.textContent = 'compiling prog.c -> wasm32-wali with clang.wasm ...';
+    let ccerr = '';
+    const args = ['clang', '--target=wasm32-unknown-linux-muslwali', '--sysroot=/sysroot',
+      '-O2', '-mllvm', '-wasm-enable-sjlj', '-fwasm-exceptions', '-matomics', '-mbulk-memory',
+      '-mexception-handling', '-L/sysroot/lib', '-nodefaultlibs',
+      'prog.c', '-lc', '/sysroot/lib/libclang_rt.builtins.a', '-o', 'prog.wasm',
+      '-Wl,--shared-memory,--export-memory,--max-memory=2147483648,-z,stack-size=8388608'];
+    const files = await runClangFn(args, { sysroot: waliSysroot, 'prog.c': src },
+      { stderr: (bb) => { if (bb) ccerr += new TextDecoder().decode(bb); }, decodeASCII: true });
+    if (!files['prog.wasm']) { log('clang failed:\n' + ccerr, true); status.textContent = 'clang failed'; return; }
+    const mod = await WebAssembly.compile(files['prog.wasm']);
+    const imp = [...new Set(WebAssembly.Module.imports(mod).map(i => i.module))].join(',');
+    log(`[clang.wasm] compiled a WALI binary — ${files['prog.wasm'].length} bytes, imports: ${imp}\n`);
+    log(`[os] running it as a native WALI process:\n`);
+    run({ vfsMain: '/prog.wasm', blobs: { '/prog.wasm': files['prog.wasm'] }, argv: ['prog'], keepTerm: true });
+  } catch (e) { log('error: ' + (e.stack || e), true); status.textContent = 'error'; }
+};
 
 document.getElementById('stdinForm').onsubmit = (e) => {
   e.preventDefault();

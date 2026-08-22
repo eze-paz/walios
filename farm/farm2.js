@@ -11,14 +11,9 @@ const FARM = path.join(HOME, 'wali-farm');
 const OVERLAY = path.join(FARM, 'overlay');
 const APORTS = 'https://git.alpinelinux.org/aports/plain';
 
-// Seed set: a mix that exercises intra-set deps (grep→pcre2, git-ish→zlib, etc.)
-const SEED = [
-  // leaf libraries
-  'zlib', 'bzip2', 'xz', 'pcre2', 'sqlite', 'libedit', 'oniguruma',
-  // text/util executables (some depend on the libs above)
-  'sed', 'grep', 'gawk', 'diffutils', 'patch', 'findutils',
-  'gzip', 'tar', 'jq', 'file', 'less', 'which', 'bc', 'm4', 'cpio',
-];
+// Seed = DEPENDENTS ONLY. The closure crawler discovers and orders their
+// libraries automatically (grep→pcre2, jq→oniguruma, less→ncurses, file→zlib...).
+const SEED = ['grep', 'jq', 'file', 'less', 'tar', 'sed', 'bc'];
 
 fs.mkdirSync(path.join(FARM, 'log'), { recursive: true });
 fs.mkdirSync(path.join(OVERLAY, 'usr', 'lib'), { recursive: true });
@@ -26,28 +21,44 @@ fs.mkdirSync(path.join(OVERLAY, 'usr', 'include'), { recursive: true });
 
 function sh(cmd) { return execSync(cmd, { encoding: 'utf8', timeout: 60000 }); }
 
-// ---- fetch APKBUILDs and parse deps ----
-console.log(`[farm] fetching ${SEED.length} recipes...`);
+// host-provided build tools / virtuals / non-buildable deps — pruned from the
+// closure (we don't cross-compile these; the CI host supplies them).
+const DENY = new Set(['autoconf', 'automake', 'libtool', 'pkgconf', 'pkgconfig', 'make', 'cmake',
+  'meson', 'ninja', 'samurai', 'bison', 'flex', 'gettext', 'gettext-tiny', 'gettext-dev', 'texinfo',
+  'perl', 'python3', 'py3-setuptools', 'linux-headers', 'musl-dev', 'gcc', 'g++', 'clang', 'llvm',
+  'bsd-compat-headers', 'utmps', 'byacc', 'gperf', 'help2man', 'doxygen', 'groff', 'scdoc', 'asciidoc',
+  'coreutils', 'grep', 'sed', 'gzip', 'xz', 'zstd', 'brotli', 'go', 'rust', 'cargo', 'ca-certificates',
+  'openrc', 'lang', 'bash', 'sh']);
+const MAXPKGS = 50; // bound the closure so it doesn't drag in half of Alpine
+const clean = (d) => d.replace(/[<>=].*$/, '').replace(/-dev$/, '');
+const skip = (d) => !d || d.includes(':') || d.startsWith('!') || d.startsWith('$') || DENY.has(d) ||
+  /-doc$|-lang$|-openrc$|-static$|-bash-completion$/.test(d);
+
+// ---- transitive dependency closure (BFS over real APKBUILDs) ----
+console.log(`[farm] resolving dependency closure from ${SEED.length} seeds (cap ${MAXPKGS})...`);
 const meta = {};
-for (const pkg of SEED) {
+const worklist = [...SEED]; const seen = new Set(SEED);
+while (worklist.length && Object.keys(meta).length < MAXPKGS) {
+  const pkg = worklist.shift();
   let txt = null;
   for (const sub of ['main', 'community']) {
     try { txt = sh(`curl -sSfL --max-time 20 "${APORTS}/${sub}/${pkg}/APKBUILD"`); break; } catch {}
   }
   if (!txt) { meta[pkg] = { missing: true, deps: [] }; console.log(`  ${pkg}: NO RECIPE`); continue; }
-  // extract depends/makedepends by sourcing the APKBUILD text we already have
-  const tmp = path.join(FARM, 'log', `_apk_${pkg}`);
-  fs.writeFileSync(tmp, txt);
+  const tmp = path.join(FARM, 'log', `_apk_${pkg}`); fs.writeFileSync(tmp, txt);
   let deps = '';
   try { deps = sh(`bash -c 'source "${tmp}" 2>/dev/null; echo "$depends $makedepends"'`); } catch {}
   const ver = (txt.match(/^pkgver=(\S+)/m) || [])[1] || '?';
-  const names = deps.split(/\s+/).map(d => d.replace(/[<>=].*$/, '').replace(/-dev$/, '')).filter(Boolean);
+  const names = [...new Set(deps.split(/\s+/).map(clean).filter(d => !skip(d)))];
   meta[pkg] = { ver, deps: names };
-  console.log(`  ${pkg} ${ver}: deps(in-set)=[${names.filter(n => SEED.includes(n)).join(', ')}]`);
+  const fresh = names.filter(d => !seen.has(d));
+  fresh.forEach(d => { seen.add(d); if (Object.keys(meta).length + worklist.length < MAXPKGS) worklist.push(d); });
+  console.log(`  ${pkg} ${ver}: deps=[${names.join(', ') || '-'}]${fresh.length ? ` (+pulled: ${fresh.join(', ')})` : ''}`);
 }
+console.log(`[farm] closure = ${Object.keys(meta).length} packages (from ${SEED.length} seeds)`);
 
-// ---- build dependency graph restricted to the seed set, topo-sort (Kahn) ----
-const inset = new Set(SEED.filter(p => !meta[p].missing));
+// ---- build dependency graph over the whole closure, topo-sort (Kahn) ----
+const inset = new Set(Object.keys(meta).filter(p => !meta[p].missing));
 const edges = {}, indeg = {};
 for (const p of inset) { edges[p] = []; indeg[p] = 0; }
 for (const p of inset) for (const d of meta[p].deps) {

@@ -7,6 +7,48 @@
 const { parentPort, workerData } = require('worker_threads');
 const net = require('net');
 const dgram = require('dgram');
+const dns = require('dns');
+
+// Parse the QNAME from a DNS query (offset 12) and answer it via node's resolver,
+// returning a synthetic DNS response. Reliable + browser-portable (a DoH relay
+// would slot in here); avoids depending on raw UDP reaching a nameserver.
+function parseQName(buf, off) {
+  const labels = [];
+  while (buf[off] !== 0) { const len = buf[off]; labels.push(buf.subarray(off + 1, off + 1 + len).toString('ascii')); off += 1 + len; }
+  return { name: labels.join('.'), end: off + 1 };
+}
+async function answerDns(query) {
+  const id = query.subarray(0, 2);
+  const { name, end } = parseQName(query, 12);
+  const qtype = query.readUInt16BE(end);
+  const question = query.subarray(12, end + 4); // qname + qtype + qclass
+  let ips = [];
+  try { // DNS-over-HTTPS (rides TCP; system UDP resolver is unreachable here + no UDP in browsers)
+    const t = qtype === 28 ? 'AAAA' : 'A';
+    const r = await fetch(`https://1.1.1.1/dns-query?name=${encodeURIComponent(name)}&type=${t}`, { headers: { accept: 'application/dns-json' } });
+    const j = await r.json();
+    ips = (j.Answer || []).filter(a => a.type === qtype).map(a => a.data);
+    console.error(`[dns] ${name} type=${qtype} -> ${ips.join(',') || '(none)'}`);
+  } catch (e) { console.error(`[dns] ${name} FAILED: ${e.message}`); }
+  const header = Buffer.alloc(12);
+  id.copy(header, 0);
+  header.writeUInt16BE(0x8180, 2);   // response, recursion available
+  header.writeUInt16BE(1, 4);        // qdcount
+  header.writeUInt16BE(ips.length, 6); // ancount
+  const answers = ips.map((ip) => {
+    const isV6 = ip.includes(':');
+    const rd = isV6 ? Buffer.from(ip.split(':').flatMap(h => { const n = parseInt(h || '0', 16); return [n >> 8, n & 0xff]; })) : Buffer.from(ip.split('.').map(Number));
+    const a = Buffer.alloc(12 + rd.length);
+    a.writeUInt16BE(0xC00C, 0);       // name -> pointer to offset 12
+    a.writeUInt16BE(isV6 ? 28 : 1, 2); // type
+    a.writeUInt16BE(1, 4);            // class IN
+    a.writeUInt32BE(60, 6);           // ttl
+    a.writeUInt16BE(rd.length, 10);   // rdlength
+    rd.copy(a, 12);
+    return a;
+  });
+  return Buffer.concat([header, question, ...answers]);
+}
 
 // SAB layout (Int32 indexed):
 //  ctl[0] = request seq (main increments, then notifies)
@@ -82,6 +124,12 @@ async function handle(op) {
     const addr = Buffer.from(data.subarray(a1, a1 + a2)).toString('utf8');
     const [ip, portStr] = addr.split('|');
     const payload = Buffer.from(data.subarray(0, a1));
+    if (+portStr === 53) { // DNS: resolve host-side (await so the reply is queued
+      // before RECVFROM runs — the worker blocks in Atomics.wait between ops, so
+      // a fire-and-forget fetch would never progress).
+      try { const resp = await answerDns(payload); st.rxq.push(resp); } catch {}
+      return finish(a1);
+    }
     st.udp.send(payload, +portStr, ip);
     return finish(a1);
   }

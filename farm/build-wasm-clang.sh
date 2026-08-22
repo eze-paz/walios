@@ -36,7 +36,7 @@ cmake -S "$SRC/llvm" -B build-native -G Ninja \
 ninja -C build-native llvm-tblgen clang-tblgen llvm-config
 
 # 2. CROSS build to wasm32-wasi using wasi-sdk as the compiler + sysroot.
-CFLAGS_W="--target=wasm32-wasi --sysroot=$WASI_SDK/share/wasi-sysroot -pthread -fwasm-exceptions -D_WASI_EMULATED_SIGNAL -D_WASI_EMULATED_PROCESS_CLOCKS -D_WASI_EMULATED_GETPID -D_WASI_EMULATED_MMAN"
+CFLAGS_W="--target=wasm32-wasi --sysroot=$WASI_SDK/share/wasi-sysroot -I$ROOT/shims -fwasm-exceptions -D_WASI_EMULATED_SIGNAL -D_WASI_EMULATED_PROCESS_CLOCKS -D_WASI_EMULATED_GETPID -D_WASI_EMULATED_MMAN"
 cmake -S "$SRC/llvm" -B build-wasm -G Ninja \
   -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_C_COMPILER="$WASI_SDK/bin/clang" \
@@ -44,14 +44,14 @@ cmake -S "$SRC/llvm" -B build-wasm -G Ninja \
   -DCMAKE_C_FLAGS="$CFLAGS_W" \
   -DCMAKE_CXX_FLAGS="$CFLAGS_W" \
   -DCMAKE_EXE_LINKER_FLAGS="-lwasi-emulated-signal -lwasi-emulated-process-clocks -lwasi-emulated-getpid -lwasi-emulated-mman -Wl,--max-memory=4294967296 -Wl,-z,stack-size=8388608" \
-  -DCMAKE_SYSTEM_NAME=WASI \
+  -DCMAKE_SYSTEM_NAME=Linux \
   -DCMAKE_CROSSCOMPILING=ON \
   -DLLVM_ENABLE_PROJECTS="clang;lld" \
   -DLLVM_TARGETS_TO_BUILD="WebAssembly" \
   -DLLVM_TABLEGEN="$ROOT/build-native/bin/llvm-tblgen" \
   -DCLANG_TABLEGEN="$ROOT/build-native/bin/clang-tblgen" \
   -DLLVM_CONFIG_PATH="$ROOT/build-native/bin/llvm-config" \
-  -DLLVM_ENABLE_THREADS=OFF \
+  -DLLVM_ENABLE_THREADS=OFF -DLLVM_ENABLE_PIC=OFF -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON -DLLVM_BUILD_LLVM_DYLIB=OFF -DLLVM_BUILD_LLVM_C_DYLIB=OFF -DCLANG_LINK_CLANG_DYLIB=OFF \
   -DLLVM_ENABLE_UNWIND_TABLES=OFF \
   -DLLVM_BUILD_TOOLS=OFF \
   -DLLVM_INCLUDE_TESTS=OFF -DLLVM_INCLUDE_BENCHMARKS=OFF \

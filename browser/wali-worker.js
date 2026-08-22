@@ -524,13 +524,24 @@ self.onmessage = async (ev) => {
     for (const [url, prefix] of m.tars || []) await loadTar(url, prefix);
     if (m.opfs) { const n = await mountOpfs(m.opfs); if (n >= 0) post(`[host] OPFS mounted at ${m.opfs}: ${n} files\n`, 2); }
     manifest = m.manifest || {};
-    for (const key of new Set([m.wasm, ...Object.values(manifest)])) {
-      if (!modCache.has(key)) modCache.set(key, await WebAssembly.compileStreaming(fetch(key)));
+    // seed VFS with inline binaries (e.g. wasm just produced by clang.wasm)
+    if (m.blobs) for (const [p, buf] of Object.entries(m.blobs)) addFile(norm(p, '/'), new Uint8Array(buf));
+    // compile URL-based modules (root + manifest); skip when running a VFS binary
+    for (const key of new Set([m.vfsMain ? null : m.wasm, ...Object.values(manifest)])) {
+      if (key && !modCache.has(key)) modCache.set(key, await WebAssembly.compileStreaming(fetch(key)));
+    }
+    let rootKey = m.wasm;
+    if (m.vfsMain) { // run a wasm sitting in the VFS as the root process
+      const vp = norm(m.vfsMain, '/'); const f = files.get(vp);
+      if (!f) throw new Error('vfsMain not found: ' + vp);
+      rootKey = 'vfs:' + vp;
+      const bytes = f.opfs ? fileRead(f, 0, f.size) : f.data.subarray(0, f.size);
+      if (!modCache.has(rootKey)) modCache.set(rootKey, new WebAssembly.Module(bytes.slice()));
     }
     const rootFds = new Map([[0, { std: 0 }], [1, { std: 1 }], [2, { std: 2 }]]);
     const env = Object.entries(m.env || {}).map(([k, v]) => k + '=' + v);
     nextPid = 100; syscallTotal = 0; procCount = 0;
-    const root = new Process(m.wasm, m.argv, env, rootFds, m.cwd || '/');
+    const root = new Process(rootKey, m.argv, env, rootFds, m.cwd || '/');
     self.postMessage({ t: 'boot', ms: performance.now() - boot0 });
     const t0 = performance.now();
     const code = root.run();

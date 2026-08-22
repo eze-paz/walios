@@ -1,0 +1,119 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>WALI aports — Alpine packages in the browser</title>
+<style>
+  :root { --bg:#0d1117; --panel:#161b22; --border:#30363d; --fg:#c9d1d9; --dim:#8b949e; --accent:#2f81f7; --ok:#3fb950; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px system-ui,sans-serif; background:var(--bg); color:var(--fg); height:100vh; display:flex; flex-direction:column; }
+  header { padding:10px 16px; border-bottom:1px solid var(--border); display:flex; gap:12px; align-items:center; }
+  header h1 { font-size:15px; margin:0; font-weight:600; }
+  header .sub { color:var(--dim); font-size:12px; }
+  #search { flex:1; max-width:420px; padding:7px 10px; background:var(--panel); border:1px solid var(--border); border-radius:6px; color:var(--fg); font:inherit; }
+  #coi { font-size:11px; color:var(--dim); }
+  main { flex:1; display:flex; min-height:0; }
+  #list { width:44%; overflow-y:auto; border-right:1px solid var(--border); }
+  .row { padding:8px 16px; border-bottom:1px solid #21262d; cursor:pointer; display:flex; gap:10px; align-items:baseline; }
+  .row:hover { background:var(--panel); }
+  .row.sel { background:#1f2937; }
+  .row .nm { font-weight:600; }
+  .row .ds { color:var(--dim); font-size:12px; flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .badge { font-size:10px; padding:1px 6px; border-radius:10px; border:1px solid var(--border); color:var(--dim); }
+  .badge.wasm { color:var(--ok); border-color:var(--ok); }
+  #right { flex:1; display:flex; flex-direction:column; min-width:0; }
+  #runbar { padding:10px 16px; border-bottom:1px solid var(--border); display:flex; gap:8px; align-items:center; }
+  #runbar .pkg { font-weight:600; }
+  #args { flex:1; padding:6px 9px; background:var(--panel); border:1px solid var(--border); border-radius:6px; color:var(--fg); font:12px monospace; }
+  button { padding:6px 14px; background:var(--accent); color:#fff; border:0; border-radius:6px; font:inherit; cursor:pointer; }
+  button:disabled { opacity:.5; cursor:default; }
+  #term { flex:1; overflow-y:auto; padding:12px 16px; font:12px/1.4 monospace; white-space:pre-wrap; color:#d7f0d7; }
+  #term .err { color:#f7a5a5; }
+  #status { padding:6px 16px; border-top:1px solid var(--border); color:var(--dim); font-size:12px; }
+  .hint { color:var(--dim); padding:16px; font-size:13px; }
+</style>
+<header>
+  <h1>WALI aports</h1>
+  <span class="sub">Alpine packages as native wasm — <span id="count"></span></span>
+  <input id="search" placeholder="search 1600+ packages… (try: sed, grep, tar, python)">
+  <span id="coi"></span>
+</header>
+<main>
+  <div id="list"></div>
+  <div id="right">
+    <div id="runbar"><span class="pkg" id="pkgname">select a runnable package →</span>
+      <input id="args" placeholder="arguments (e.g. --version)" disabled>
+      <button id="run" disabled>Run</button></div>
+    <div id="term"><div class="hint">Pick a package with a green <b>wasm</b> badge on the left, then Run.
+Runnable now: sed, grep, tar, gzip, bc, m4, patch, diffutils, findutils, cpio, which, bzip2, python, busybox, ssh.
+Everything else is in the catalog as <b>vm-only</b> (not yet built to wasm).</div></div>
+    <div id="status">idle · COI <span id="coi2"></span></div>
+  </div>
+</main>
+<form id="stdinForm" style="display:none"></form>
+<script>
+const $ = s => document.querySelector(s);
+const term = $('#term'), statusEl = $('#status');
+$('#coi').textContent = crossOriginIsolated ? '● isolated' : '○ not isolated';
+$('#coi2').textContent = crossOriginIsolated;
+function log(s, err){ const sp=document.createElement('span'); if(err) sp.className='err'; sp.textContent=s; term.appendChild(sp); term.scrollTop=term.scrollHeight; }
+
+let CAT = [], sel = null, running = false, worker = null;
+const sab = new SharedArrayBuffer(16+4096), ctl = new Int32Array(sab,0,4), data = new Uint8Array(sab,16);
+
+// per-package run config (env/tars for the special ones)
+const PYENV = { PYTHONHOME:'/py', PYTHONPATH:'/py/Lib', PYTHONDONTWRITEBYTECODE:'1', HOME:'/', LC_ALL:'C.UTF-8' };
+const PYTARS = [['pylib.tar.gz','/py']];
+function runCfg(pkg, args){
+  const argv = [pkg.name, ...args];
+  if (pkg.name==='python') return { wasm:pkg.wasm, argv:['python',...args], env:PYENV, tars:PYTARS };
+  if (pkg.name==='busybox') return { wasm:pkg.wasm, argv:['busybox',...args] };
+  return { wasm:pkg.wasm, argv };
+}
+
+fetch('aports-catalog.json').then(r=>r.json()).then(c=>{ CAT=c; $('#count').textContent=`${c.length} packages, ${c.filter(p=>p.tier==='wasm').length} runnable`; render(''); });
+
+function render(q){
+  q=q.toLowerCase();
+  const wasm = CAT.filter(p=>p.tier==='wasm' && p.name.includes(q));
+  const vm = CAT.filter(p=>p.tier!=='wasm' && p.name.includes(q));
+  const show = [...wasm, ...vm].slice(0, 300);
+  const list = $('#list'); list.innerHTML='';
+  for(const p of show){
+    const d=document.createElement('div'); d.className='row'+(sel&&sel.name===p.name?' sel':'');
+    d.innerHTML=`<span class="nm">${p.name}</span><span class="ds">${p.desc||''}</span><span class="badge ${p.tier==='wasm'?'wasm':''}">${p.tier}</span>`;
+    d.onclick=()=>select(p); list.appendChild(d);
+  }
+  if(wasm.length+vm.length>300){ const m=document.createElement('div'); m.className='hint'; m.textContent=`… ${wasm.length+vm.length-300} more (refine search)`; list.appendChild(m); }
+}
+$('#search').oninput = e => render(e.target.value);
+
+function select(p){
+  sel=p; render($('#search').value);
+  $('#pkgname').textContent = p.name + (p.tier==='wasm' ? '' : '  (vm-only — not built to wasm yet)');
+  const run=p.tier==='wasm';
+  $('#args').disabled=!run; $('#run').disabled=!run;
+  $('#args').value = run ? (p.name==='python'?'-c \'print(2**64)\'':'--version') : '';
+  if(!run){ term.innerHTML=`<div class="hint"><b>${p.name}</b> is in the Alpine catalog but hasn't been built to wasm yet.
+It would run in the emulated VM tier. Build it with the farm to promote it to the wasm tier.</div>`; }
+  else term.innerHTML=`<div class="hint">Ready to run <b>${p.name}</b>. Edit the arguments and hit Run.</div>`;
+}
+
+function freshWorker(){
+  if(worker) worker.terminate();
+  worker=new Worker('wali-worker.js'); worker.postMessage({t:'stdin-sab',sab});
+  worker.onmessage=ev=>{ const m=ev.data;
+    if(m.t==='out') log(m.s, m.fd===2);
+    else if(m.t==='boot') statusEl.textContent=`booted ${m.ms.toFixed(0)}ms · running ${sel.name}…`;
+    else if(m.t==='exit'){ running=false; $('#run').disabled=false;
+      statusEl.textContent=`${sel.name}: exit=${m.code} · ${(m.ms/1000).toFixed(2)}s · ${m.syscalls} syscalls`;
+      log(`\n[exit ${m.code}]\n`, m.code!==0); } };
+}
+function doRun(){
+  if(running||!sel||sel.tier!=='wasm') return;
+  running=true; $('#run').disabled=true; term.textContent=''; statusEl.textContent='loading…';
+  Atomics.store(ctl,0,0); freshWorker();
+  const args = ($('#args').value.match(/'[^']*'|"[^"]*"|\S+/g)||[]).map(a=>a.replace(/^['"]|['"]$/g,''));
+  worker.postMessage({ t:'run', ...runCfg(sel, args) });
+}
+$('#run').onclick = doRun;
+$('#args').addEventListener('keydown', e=>{ if(e.key==='Enter') doRun(); });
+</script>

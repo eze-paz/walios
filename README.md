@@ -45,12 +45,32 @@ Get it via the WALI repo (`make compiler SLIM=1` + `make libc`), then apply
 
 ## Status
 
-Shipped: compute (76x), browser host, process model, sockets (real TCP), build farm
-(14/22 seed aports green, dependency-ordered), in-tab compiler mechanics (microcc),
-WASI execution in-tab. Pending: `clang.wasm` artifact (run `ci/build-wasm-clang.yml`
-on a ≥32 GB runner — the BUILD needs the RAM; the resulting clang RUNS in a normal
-browser), browser WISP sockets, openssh/openssl, farm scale-out.
+Shipped & verified:
+- **Compute** ~76x faster than the emulated RISC-V VM on CPython (same script,
+  byte-identical output).
+- **Browser host** — CPython/busybox/lua run in a tab (in-memory VFS + OPFS +
+  SAB stdin); **process model** (fork/execve/wait4/pipes) so a shell runs pipelines
+  and launches other programs.
+- **Sockets** — real TCP (node bridge) + **DNS via DoH** (getaddrinfo + `wget`
+  a hostname work end to end).
+- **Real clang IN THE BROWSER** — the prebuilt `@yowasp/clang` (LLVM 22, wasm) runs
+  in a tab and compiles C; output runs in the OS. Emits both `wasm32-wasi` and, with
+  the 2.8 MB wali sysroot mounted, native **WALI** binaries. (see `browser/wali-test.html`)
+- **OpenSSH 9.9p1** cross-compiled to WALI (`ssh`/`sshd` wasm) and runs (`ssh -V`).
+- **Build farm** — takes real Alpine aports, resolves a **transitive dependency
+  closure**, topo-sorts, builds each to wasm against a shared overlay sysroot, smoke-
+  tests, and gates pass→wasm / fail→vm-only (`farm/farm2.js`).
+- **Searchable aports browser** — `browser/aports.html`: 1600+ Alpine packages
+  searchable, the built ones runnable click-to-run in a terminal.
+
+Genuinely remaining (not faked): browser **raw-TCP sockets** need a WISP relay (the
+node bridge proves the syscall contract; browsers have no TCP); **PTY** layer for
+interactive `sshd`; and a few per-package source walls (oniguruma st.h, ncurses
+native `tic`). The `clang.wasm` from-scratch build recipe is in `ci/` + `farm/` but
+is moot now that a maintained prebuilt exists.
 
 Not a from-scratch build: this rides the WALI project (github.com/arjunr2/WALI) for
-the toolchain/ABI. This repo is the OS layer, browser port, process model, farm, and
-in-browser-compiler work built on top.
+the toolchain/ABI, and @yowasp/clang for the in-browser compiler. This repo is the
+OS layer, browser port, process model, farm, DNS, and the aports browser on top.
+`browser/pkgs/*.wasm` (the runnable packages) and `browser/yowasp/` (the 73 MB
+clang) are produced by the farm / fetched from npm — not committed here.

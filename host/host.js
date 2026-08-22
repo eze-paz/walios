@@ -41,6 +41,25 @@ function sysErr(e) {
   const m = { EPERM:E.PERM, ENOENT:E.NOENT, EBADF:E.BADF, EACCES:E.ACCES, EEXIST:E.EXIST, ENOTDIR:E.NOTDIR, EISDIR:E.ISDIR, EINVAL:E.INVAL, ENOTEMPTY:E.NOTEMPTY, EMFILE:E.MFILE, ESPIPE:E.SPIPE, EAGAIN:E.AGAIN };
   return err(m[e.code] ?? E.INVAL);
 }
+// parse sockaddr_in (AF_INET=2) / sockaddr_in6 (AF_INET6=10) -> {ip, port}
+function readSockaddr(S, p) {
+  S.refresh();
+  const fam = S.dv.getUint16(p, true);
+  const port = S.dv.getUint16(p + 2, false);
+  let ip;
+  if (fam === 10) { const g = []; for (let i = 0; i < 16; i += 2) g.push(S.dv.getUint16(p + 8 + i, false).toString(16)); ip = g.join(':'); }
+  else ip = `${S.u8[p+4]}.${S.u8[p+5]}.${S.u8[p+6]}.${S.u8[p+7]}`;
+  return { ip, port };
+}
+// write a sockaddr_in (AF_INET) into guest memory; returns bytes written (16)
+function writeSockaddr(S, p, dest) {
+  S.refresh(); S.u8.fill(0, p, p + 16);
+  S.dv.setUint16(p, 2, true);                 // AF_INET
+  S.dv.setUint16(p + 2, dest.port, false);    // port (network order)
+  const o = dest.ip.split('.').map(Number);
+  S.u8[p + 4] = o[0]; S.u8[p + 5] = o[1]; S.u8[p + 6] = o[2]; S.u8[p + 7] = o[3];
+  return 16;
+}
 
 // ---- global kernel state (shared across processes) ----
 let nextPid = 100;
@@ -312,50 +331,73 @@ class Process {
       case 'getrusage': { S.refresh(); S.u8.fill(0, a[1], a[1] + 144); return 0n; }
       case 'sysinfo': { S.refresh(); S.u8.fill(0, a[0], a[0] + 112); S.i64(a[0], 1000n); S.i64(a[0] + 32, 4294967296n); S.i64(a[0] + 40, 2147483648n); return 0n; }
       case 'getrandom': { const b = require('crypto').randomBytes(Math.min(a[1], 65536)); S.wbytes(a[0], b); return BigInt(b.length); }
-      case 'poll': { S.refresh(); for (let i = 0; i < a[1]; i++) { const ev = S.dv.getInt16(a[0] + i * 8 + 4, true); S.dv.setInt16(a[0] + i * 8 + 6, ev & 5, true); } return BigInt(a[1]); }
+      case 'poll': { S.refresh(); let ready = 0; // pollfd: fd(i32) events(i16) revents(i16), stride 8
+        for (let i = 0; i < a[1]; i++) {
+          const fd = S.r32(a[0] + i * 8), ev = S.dv.getInt16(a[0] + i * 8 + 4, true);
+          const h = S.fds.get(fd); let re = 0;
+          if (h && h.sock && h.sock.id) { const pk = initSockBridge().call(initSockBridge().OP.POLL, h.sock.id, 0, 0);
+            if ((ev & 1) && pk.res > 0) re |= 1; if (ev & 4) re |= 4; } // POLLIN if data, POLLOUT always
+          else re = ev & 5; // stdio/pipe/file: ready
+          S.dv.setInt16(a[0] + i * 8 + 6, re, true); if (re) ready++;
+        }
+        return BigInt(ready); }
       case 'select': case 'pselect6': return 1n;
       case 'socket': { // AF_INET(2)/AF_INET6(10); SOCK_STREAM(1) or SOCK_DGRAM(2)
-        const dom = a[0] & 0xff, type = a[1] & 0xff;
+        const dom = a[0] & 0xff, type = a[1] & 0xff; const nonblock = !!(a[1] & 0x800); // SOCK_NONBLOCK
         if (dom !== 2 && dom !== 10) return err(E.NOSYS);
-        if (type === 2) { const br = initSockBridge(); const r = br.call(br.OP.UDP, 0, 0, 0); if (r.res < 0) return BigInt(r.res); const g = S.nextFd++; S.fds.set(g, { sock: { id: r.res, dom, udp: true } }); return BigInt(g); }
-        const g = S.nextFd++; S.fds.set(g, { sock: { id: 0, dom } }); return BigInt(g); }
+        if (type === 2) { const br = initSockBridge(); const r = br.call(br.OP.UDP, 0, 0, 0); if (r.res < 0) return BigInt(r.res); const g = S.nextFd++; S.fds.set(g, { sock: { id: r.res, dom, udp: true, nonblock } }); return BigInt(g); }
+        const g = S.nextFd++; S.fds.set(g, { sock: { id: 0, dom, nonblock } }); return BigInt(g); }
+      case 'bind': return 0n; // no server binding; UDP auto-binds ephemeral in the bridge
       case 'connect': { const h = S.fds.get(a[0]); if (!h || !h.sock) return err(E.BADF);
         S.refresh();
-        // sockaddr_in: family(2) port(2 BE) addr(4)  |  sockaddr_in6: family(2) port(2 BE) flow(4) addr(16)
-        const fam = S.dv.getUint16(a[1], true);
-        let ip, port = S.dv.getUint16(a[1] + 2, false);
-        if (fam === 2) ip = `${S.u8[a[1]+4]}.${S.u8[a[1]+5]}.${S.u8[a[1]+6]}.${S.u8[a[1]+7]}`;
-        else { const p = []; for (let i = 0; i < 16; i += 2) p.push(S.dv.getUint16(a[1]+8+i, false).toString(16)); ip = p.join(':'); }
+        const dst = readSockaddr(S, a[1]);
+        if (h.sock.udp) { h.sock.dest = dst; return 0n; } // UDP connect = remember peer, no TCP
         const br = initSockBridge();
-        const spec = Buffer.from(`${ip}|${port}`, 'utf8');
+        const spec = Buffer.from(`${dst.ip}|${dst.port}`, 'utf8');
         const r = br.call(br.OP.CONNECT, spec.length, 0, 0, spec);
         if (r.res < 0) return BigInt(r.res);
         h.sock.id = r.res; return 0n; }
       case 'sendto': case 'sendmsg': case 'write_sock': {
         const h = S.fds.get(a[0]); if (!h || !h.sock) return err(E.BADF);
         const br = initSockBridge(); S.refresh();
-        if (h.sock.udp && name === 'sendto') { // sendto(fd, buf, len, flags, dest, addrlen)
-          const dp = a[4], ip = `${S.u8[dp+4]}.${S.u8[dp+5]}.${S.u8[dp+6]}.${S.u8[dp+7]}`, port = S.dv.getUint16(dp + 2, false);
-          const payload = S.u8.slice(a[1], a[1] + a[2]);
-          const addr = Buffer.from(`${ip}|${port}`, 'utf8');
+        // gather payload + destination
+        let payload, dest = h.sock.dest;
+        if (name === 'sendmsg') {
+          const nameptr = S.r32(a[1]); if (nameptr) dest = readSockaddr(S, nameptr);
+          const iov = S.r32(a[1] + 8), iovn = S.r32(a[1] + 12); const parts = [];
+          for (let i = 0; i < iovn; i++) { const p = S.r32(iov + i * 8), l = S.r32(iov + i * 8 + 4); if (l) parts.push(S.u8.slice(p, p + l)); }
+          payload = Buffer.concat(parts.map(Buffer.from));
+        } else { // sendto(fd, buf, len, flags, dest, addrlen)
+          payload = Buffer.from(S.u8.slice(a[1], a[1] + a[2]));
+          if (a[4]) dest = readSockaddr(S, a[4]);
+        }
+        if (process.env.WALI_DBG) process.stderr.write(`[dbg] ${name} udp=${!!h.sock.udp} dest=${JSON.stringify(dest)} qid=${payload.slice(0,2).toString('hex')} q=${payload.slice(0,Math.min(payload.length,32)).toString('hex')}\n`);
+        if (h.sock.udp) {
+          if (!dest) return err(E.INVAL);
+          h.sock.lastDest = dest; // remember peer so recvmsg can report the source (musl checks it)
+          const addr = Buffer.from(`${dest.ip}|${dest.port}`, 'utf8');
           const packed = new Uint8Array(payload.length + addr.length); packed.set(payload, 0); packed.set(addr, payload.length);
           const r = br.call(br.OP.SENDTO, h.sock.id, payload.length, addr.length, packed);
           return BigInt(r.res);
         }
-        if (name === 'sendmsg') { // msghdr: iov at +8, iovlen at +16
-          const iov = S.r32(a[1] + 8), iovn = S.r32(a[1] + 16); let sent = 0;
-          for (let i = 0; i < iovn; i++) { const p = S.r32(iov + i * 8), l = S.r32(iov + i * 8 + 4); if (!l) continue;
-            const r = br.call(br.OP.SEND, h.sock.id, l, 0, S.u8.slice(p, p + l)); if (r.res < 0) return sent || BigInt(r.res); sent += r.res; }
-          return BigInt(sent);
-        }
-        const r = br.call(br.OP.SEND, h.sock.id, a[2], 0, S.u8.slice(a[1], a[1] + a[2]));
+        const r = br.call(br.OP.SEND, h.sock.id, payload.length, 0, payload);
         return BigInt(r.res); }
-      case 'recvmsg': { const h = S.fds.get(a[0]); if (!h || !h.sock) return err(E.BADF);
+      case 'recvmsg': case 'recvfrom': { const h = S.fds.get(a[0]); if (!h || !h.sock) return err(E.BADF);
         const br = initSockBridge();
-        const iov = S.r32(a[1] + 8), iovn = S.r32(a[1] + 16); let total = 0;
+        const op = h.sock.udp ? br.OP.RECVFROM : br.OP.RECV;
+        // nonblocking socket: don't block the bridge — peek readiness, EAGAIN if empty
+        if (h.sock.nonblock) { const pk = br.call(br.OP.POLL, h.sock.id, 0, 0); if (pk.res <= 0) return err(E.AGAIN); }
+        if (name === 'recvfrom') { const r = br.call(op, h.sock.id, a[2], 0); if (r.res <= 0) return BigInt(r.res); S.wbytes(a[1], r.data.subarray(0, r.res));
+          if (a[4] && h.sock.lastDest) { const n = writeSockaddr(S, a[4], h.sock.lastDest); if (a[5]) S.i32(a[5], n); }
+          return BigInt(r.res); }
+        // recvmsg: fill msg_name (source addr) so musl's anti-spoof check passes
+        const nameptr = S.r32(a[1]); if (nameptr && h.sock.lastDest) { const n = writeSockaddr(S, nameptr, h.sock.lastDest); S.i32(a[1] + 4, n); }
+        const iov = S.r32(a[1] + 8), iovn = S.r32(a[1] + 12); let total = 0;
         for (let i = 0; i < iovn; i++) { const p = S.r32(iov + i * 8), l = S.r32(iov + i * 8 + 4); if (!l) continue;
-          const r = br.call(br.OP.RECV, h.sock.id, l, 0); if (r.res < 0) return total || BigInt(r.res);
-          if (r.res === 0) break; S.wbytes(p, r.data.subarray(0, r.res)); total += r.res; if (r.res < l) break; }
+          const r = br.call(op, h.sock.id, l, 0); if (r.res < 0) return total || BigInt(r.res);
+          if (r.res === 0) break;
+          if (process.env.WALI_DBG) process.stderr.write(`[dbg] recv ${r.res}B resp=${Buffer.from(r.data.subarray(0,Math.min(r.res,16))).toString('hex')}\n`);
+          S.wbytes(p, r.data.subarray(0, r.res)); total += r.res; if (r.res < l) break; }
         return BigInt(total); }
       case 'setsockopt': case 'getsockname': case 'getpeername': case 'shutdown': return 0n;
       default:
