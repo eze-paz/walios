@@ -1,0 +1,4 @@
+#!/bin/sh
+args=""
+for a in "$@"; do [ "$a" = "-nostdlib" ] || args="$args $a"; done
+exec $HOME/wali/build/llvm/bin/wasm-ld $args

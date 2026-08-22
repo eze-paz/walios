@@ -1,0 +1,11 @@
+*.wasm
+*.tar.gz
+*.o
+*.a
+build/
+build-*/
+src/
+repo/
+overlay/
+log/
+node_modules/

@@ -1,0 +1,122 @@
+diff --git a/Makefile b/Makefile
+index 34b6928..802ca53 100644
+--- a/Makefile
++++ b/Makefile
+@@ -45,7 +45,7 @@ LDFLAGS =
+ LDFLAGS_AUTO =
+ LIBCC = -lgcc
+ CPPFLAGS =
+-CFLAGS = --target=wasm32-linux-muslwali -mbulk-memory -matomics
++CFLAGS = --target=wasm32-linux-muslwali -mbulk-memory -matomics -mexception-handling -mllvm -wasm-enable-sjlj -D__WALI_LIBC_INTERNAL
+ CFLAGS_AUTO = -O3 -pipe
+ CFLAGS_C99FSE = -std=c99 -ffreestanding -nostdinc -Wno-implicit-function-declaration -Wno-int-conversion -Wno-incompatible-pointer-types
+ 
+diff --git a/include/limits.h b/include/limits.h
+index 53a27b9..f3e1b26 100644
+--- a/include/limits.h
++++ b/include/limits.h
+@@ -50,7 +50,11 @@
+ #define IOV_MAX 1024
+ #define SYMLOOP_MAX 40
+ #define WORD_BIT 32
++#if defined(__wasm32__)
++#define SSIZE_MAX INT_MAX
++#else
+ #define SSIZE_MAX LONG_MAX
++#endif
+ #define TZNAME_MAX 6
+ #define TTY_NAME_MAX 32
+ #define HOST_NAME_MAX 255
+diff --git a/include/setjmp.h b/include/setjmp.h
+index 48b37b8..379494b 100644
+--- a/include/setjmp.h
++++ b/include/setjmp.h
+@@ -21,39 +21,28 @@ typedef struct __jmp_buf_tag {
+ #define __setjmp_attr
+ #endif
+ 
++/* wasm32-wali: real setjmp/longjmp via LLVM wasm-EH SJLJ lowering
++ * (-mllvm -wasm-enable-sjlj). Calls are rewritten at compile time; the
++ * runtime lives in src/setjmp/wasm32/rt.c. sigsetjmp/_setjmp map to the
++ * plain forms (no signal mask on this platform). */
++
++int setjmp (jmp_buf) __setjmp_attr;
++_Noreturn void longjmp (jmp_buf, int);
++
+ #if defined(_POSIX_SOURCE) || defined(_POSIX_C_SOURCE) \
+  || defined(_XOPEN_SOURCE) || defined(_GNU_SOURCE) \
+  || defined(_BSD_SOURCE)
+ typedef jmp_buf sigjmp_buf;
+-int sigsetjmp (sigjmp_buf, int) __setjmp_attr __attribute((
+-  __import_module__("wali"),
+-  __import_name__("sigsetjmp")
+-));
+-_Noreturn void siglongjmp (sigjmp_buf, int);
++#define sigsetjmp(buf, save) setjmp(buf)
++#define siglongjmp(buf, val) longjmp(buf, val)
+ #endif
+ 
+ #if defined(_XOPEN_SOURCE) || defined(_GNU_SOURCE) \
+  || defined(_BSD_SOURCE)
+-int _setjmp (jmp_buf) __setjmp_attr __attribute((
+-  __import_module__("wali"),
+-  __import_name__("_setjmp")
+-));
+-_Noreturn void _longjmp (jmp_buf, int) __attribute((
+-  __import_module__("wali"),
+-  __import_name__("_longjmp")
+-));
++#define _setjmp(buf) setjmp(buf)
++#define _longjmp(buf, val) longjmp(buf, val)
+ #endif
+ 
+-int setjmp (jmp_buf) __setjmp_attr __attribute((
+-  __import_module__("wali"),
+-  __import_name__("setjmp")
+-));
+-
+-_Noreturn void longjmp (jmp_buf, int) __attribute((
+-  __import_module__("wali"),
+-  __import_name__("longjmp")
+-));
+-
+ #define setjmp setjmp
+ 
+ #undef __setjmp_attr
+diff --git a/include/unistd.h b/include/unistd.h
+index 9a44b42..577ca82 100644
+--- a/include/unistd.h
++++ b/include/unistd.h
+@@ -87,6 +87,20 @@ unsigned sleep(unsigned);
+ int pause(void);
+ 
+ pid_t fork(void);
++/* vfork is a macro on wasm32-wali */
++/* wasm32-wali: fork/vfork as statement-expression macros so the setjmp that
++ * anchors the child-branch return lives in the CALLER frame (wasm-EH SJLJ
++ * cannot longjmp into a frame that has already returned). Child branch runs
++ * in-place with vfork semantics; execve/_Exit return control here. */
++#ifndef __WALI_LIBC_INTERNAL
++#include <setjmp.h>
++long __wali_fork_begin(void);
++void *__wali_fork_jbuf(void);
++long __wali_fork_finish(void);
++#define vfork() __extension__({ 	long __wf_pid = __wali_fork_begin(); 	pid_t __wf_ret; 	if (__wf_pid < 0) __wf_ret = (pid_t)-1; 	else if (setjmp(*(jmp_buf *)__wali_fork_jbuf())) __wf_ret = (pid_t)__wali_fork_finish(); 	else __wf_ret = 0; 	__wf_ret; })
++#define fork() vfork()
++#endif /* !__WALI_LIBC_INTERNAL */
++
+ pid_t _Fork(void);
+ int execve(const char *, char *const [], char *const []);
+ int execv(const char *, char *const []);
+@@ -163,10 +177,7 @@ unsigned ualarm(unsigned, unsigned);
+ #define L_XTND 2
+ int brk(void *);
+ void *sbrk(intptr_t);
+-pid_t vfork(void) __attribute((
+-  __import_module__("wali"),
+-  __import_name__("vfork")
+-));
++/* vfork is a macro on wasm32-wali */
+ int vhangup(void);
+ int chroot(const char *);
+ int getpagesize(void);

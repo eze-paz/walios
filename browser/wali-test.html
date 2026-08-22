@@ -1,0 +1,105 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>WALI browser host</title>
+<style>
+  body { font: 14px system-ui; margin: 16px; background: #111; color: #ddd; }
+  button { margin: 0 6px 8px 0; padding: 6px 14px; font: inherit; }
+  #term { background: #000; color: #cfc; font: 12px/1.35 monospace; padding: 10px;
+          height: 60vh; overflow-y: auto; white-space: pre-wrap; border: 1px solid #333; }
+  #term .err { color: #f99; }
+  #status { margin: 8px 0; color: #9cf; }
+  input { width: 60%; font: 12px monospace; padding: 4px; background:#222; color:#eee; border:1px solid #444; }
+</style>
+<h3>WALI wasm-OS — browser syscall host</h3>
+<div>
+  <button id="lua">lua test.lua</button>
+  <button id="pyver">python -c version</button>
+  <button id="bench">python GasN2 bench</button>
+  <button id="bb">busybox ls /</button>
+  <button id="bbsh">hush script</button>
+  <button id="cc">compile in-browser (microcc)</button>
+  <button id="wasi">run real wasi binary (clang-built)</button>
+</div>
+<div id="status">idle — COI: <span id="coi"></span></div>
+<div id="term"></div>
+<form id="stdinForm"><input id="stdinLine" placeholder="stdin line (Enter sends)"><button>send</button></form>
+<script>
+const term = document.getElementById('term'), status = document.getElementById('status');
+document.getElementById('coi').textContent = crossOriginIsolated;
+function log(s, err) { const sp = document.createElement('span'); if (err) sp.className = 'err';
+  sp.textContent = s; term.appendChild(sp); term.scrollTop = term.scrollHeight; }
+
+let worker = null, running = false;
+const sab = new SharedArrayBuffer(16 + 4096);
+const ctl = new Int32Array(sab, 0, 4), data = new Uint8Array(sab, 16);
+
+function freshWorker() {
+  if (worker) worker.terminate();
+  worker = new Worker('wali-worker.js');
+  worker.postMessage({ t: 'stdin-sab', sab });
+  worker.onmessage = (ev) => {
+    const m = ev.data;
+    if (m.t === 'out') log(m.s, m.fd === 2);
+    else if (m.t === 'boot') status.textContent = `booted in ${m.ms.toFixed(0)}ms, running...`;
+    else if (m.t === 'exit') { running = false;
+      status.textContent = `exit=${m.code}  wall=${(m.ms/1000).toFixed(2)}s  syscalls=${m.syscalls}`;
+      log(`\n[exit=${m.code} wall=${(m.ms/1000).toFixed(2)}s syscalls=${m.syscalls}]\n`, m.code !== 0); }
+  };
+}
+
+function run(cfg) {
+  if (running) { log('\n[already running]\n', true); return; }
+  running = true; term.textContent = ''; status.textContent = 'loading...';
+  Atomics.store(ctl, 0, 0);
+  freshWorker();
+  worker.postMessage({ t: 'run', ...cfg });
+}
+
+const PYENV = { PYTHONHOME: '/py', PYTHONPATH: '/py/Lib', PYTHONDONTWRITEBYTECODE: '1', HOME: '/', LC_ALL: 'C.UTF-8' };
+const PYTARS = [['pylib.tar.gz', '/py'], ['bench.tar.gz', '/bench']];
+
+document.getElementById('lua').onclick = () => run({
+  wasm: 'lua.wasm', argv: ['lua', '/test.lua'], tars: [['luafile.tar.gz', '/']] });
+document.getElementById('pyver').onclick = () => run({
+  wasm: 'python.wasm', argv: ['python', '-c', 'import sys; print("WALI CPython in the browser:", sys.version); print("platform:", sys.platform); print(2**100)'],
+  env: PYENV, tars: PYTARS });
+document.getElementById('bench').onclick = () => run({
+  wasm: 'python.wasm', argv: ['python', '/bench/time_baseline_wasi.py', '--data', '/bench/data', '--today', '2026-08-12', '--days', '2026-08-11'],
+  env: PYENV, tars: PYTARS, opfs: '/files' });
+document.getElementById('bb').onclick = () => run({
+  wasm: 'busybox.wasm', argv: ['busybox', 'ls', '-la', '/'], tars: PYTARS, opfs: '/files' });
+const MANIFEST = { 'busybox': 'busybox.wasm', 'sh': 'busybox.wasm', 'hush': 'busybox.wasm', 'python*': 'python.wasm', 'microcc': 'microcc.wasm' };
+document.getElementById('bbsh').onclick = () => run({
+  wasm: 'busybox.wasm', manifest: MANIFEST, env: PYENV, tars: PYTARS, opfs: '/files',
+  argv: ['busybox', 'hush', '-c',
+    'echo == external commands:; busybox uname -m; ' +
+    'echo == pipeline: ; ls /bench/data | wc -l; ' +
+    'echo == redirect:; echo persisted > /tmp2.txt; cat /tmp2.txt; ' +
+    'echo == subshell pipe:; (echo S1; echo S2) | wc -l; ' +
+    'echo == python in pipeline:; python -c "print(\'WALI \' * 3)" | wc -w; ' +
+    'echo == all done'] });
+
+document.getElementById('cc').onclick = () => run({
+  wasm: 'busybox.wasm', manifest: MANIFEST,
+  argv: ['busybox', 'hush', '-c',
+    'echo 7*6-9 > /prog.src; ' +
+    'echo [shell] compiling /prog.src with microcc, a wasm compiler running in this tab...; ' +
+    'microcc /prog.src /prog.wasm; ' +
+    'echo [shell] running the emitted wasm binary...; ' +
+    '/prog.wasm; ' +
+    'echo [shell] 7*6-9 = $? computed by freshly-compiled wasm, no native code'] });
+
+document.getElementById('wasi').onclick = () => run({
+  wasm: 'wt.wasm', manifest: MANIFEST, argv: ['wt', 'in-the-browser'] });
+
+document.getElementById('stdinForm').onsubmit = (e) => {
+  e.preventDefault();
+  const v = document.getElementById('stdinLine').value + '\n';
+  document.getElementById('stdinLine').value = '';
+  const bytes = new TextEncoder().encode(v);
+  data.set(bytes.subarray(0, 4000), 0);
+  Atomics.store(ctl, 1, Math.min(bytes.length, 4000));
+  Atomics.store(ctl, 0, 1);
+  Atomics.notify(ctl, 0);
+};
+</script>
