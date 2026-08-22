@@ -109,7 +109,7 @@ jobs:
         run: |
           WASI="$PWD/wasi-sdk"
           SYSROOT="$WASI/share/wasi-sysroot"
-          CFLAGS_W="--target=wasm32-wasi --sysroot=$SYSROOT -pthread -fwasm-exceptions -D_WASI_EMULATED_SIGNAL -D_WASI_EMULATED_PROCESS_CLOCKS -D_WASI_EMULATED_GETPID -D_WASI_EMULATED_MMAN"
+          CFLAGS_W="--target=wasm32-wasi --sysroot=$SYSROOT -fwasm-exceptions -D_WASI_EMULATED_SIGNAL -D_WASI_EMULATED_PROCESS_CLOCKS -D_WASI_EMULATED_GETPID -D_WASI_EMULATED_MMAN"
           cmake -S llvm-src/llvm -B build-wasm -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_C_COMPILER="$WASI/bin/clang" \
