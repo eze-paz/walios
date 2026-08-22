@@ -124,7 +124,7 @@ jobs:
             -DLLVM_TABLEGEN="$PWD/build-native/bin/llvm-tblgen" \
             -DCLANG_TABLEGEN="$PWD/build-native/bin/clang-tblgen" \
             -DLLVM_CONFIG_PATH="$PWD/build-native/bin/llvm-config" \
-            -DLLVM_ENABLE_THREADS=OFF \
+            -DLLVM_ENABLE_THREADS=OFF -DLLVM_ENABLE_PIC=OFF -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON -DLLVM_BUILD_LLVM_DYLIB=OFF -DLLVM_BUILD_LLVM_C_DYLIB=OFF -DCLANG_LINK_CLANG_DYLIB=OFF \
             -DLLVM_ENABLE_UNWIND_TABLES=OFF \
             -DLLVM_BUILD_TOOLS=OFF \
             -DLLVM_INCLUDE_TESTS=OFF -DLLVM_INCLUDE_BENCHMARKS=OFF \
