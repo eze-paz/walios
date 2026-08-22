@@ -4,7 +4,7 @@
 *.a
 build/
 build-*/
-src/
+/farm/src/
 repo/
 overlay/
 log/
