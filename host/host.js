@@ -522,13 +522,15 @@ class Process {
           }
           return 0n;
         } catch (e) { return sysErr(e); } }
-      case 'readlink': { const p = S.rpath(S.cstr(a[0]));
-        if (p === '/proc/self/exe') return BigInt(S.wstr(a[1], S.modPath, a[2] + 1));
+      case 'readlink': case 'readlinkat': { const p = name === 'readlink' ? S.rpath(S.cstr(a[0])) : S.atPath(a[0], S.cstr(a[1]));
+        const bp = name === 'readlink' ? a[1] : a[2], bl = name === 'readlink' ? a[2] : a[3];
+        // readlink: copy at most bl bytes, NO NUL terminator, return the count
+        const put = (str) => { const b = Buffer.from(str, 'utf8'); const n = Math.min(b.length, bl); S.wbytes(bp, b.subarray(0, n)); return BigInt(n); };
+        if (p === '/proc/self/exe') return put(S.modPath);
         let m2; if ((m2 = p.match(/^\/proc\/self\/fd\/(\d+)$/))) { // ttyname_r reads this
           const h = S.fds.get(+m2[1]); if (!h) return err(E.BADF);
-          const tgt = h.pty !== undefined ? (h.master ? '/dev/ptmx' : '/dev/pts/' + h.pty) : h.path ? h.path : h.std !== undefined ? '/dev/tty' : '/dev/null';
-          return BigInt(S.wstr(a[1], tgt, a[2] + 1)); }
-        try { return BigInt(S.wstr(a[1], fs.readlinkSync(p), a[2] + 1)); } catch (e) { return sysErr(e); } }
+          return put(h.pty !== undefined ? (h.master ? '/dev/ptmx' : '/dev/pts/' + h.pty) : h.path ? h.path : h.std !== undefined ? '/dev/tty' : '/dev/null'); }
+        try { return put(fs.readlinkSync(p)); } catch (e) { return sysErr(e); } }
       case 'utimensat': case 'utimes': case 'futimesat': { // touch & friends set file times
         const UTIME_OMIT = 0x3ffffffe;
         const p = name === 'utimes' ? S.rpath(S.cstr(a[0])) : S.atPath(a[0], S.cstr(a[1]));
