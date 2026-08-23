@@ -58,6 +58,8 @@ async function resolveHost(host) {
 // --- WISP handling ---
 function handleWisp(sock) {
   const streams = new Map();
+  const listeners = new Map();       // listen-request id -> net.Server
+  let serverStreamNext = 1;          // relay-owned (pushed) stream ids: high bit set
   const state = { buf: Buffer.alloc(0) };
   const sendFrame = (type, id, payload = Buffer.alloc(0)) => {
     const f = Buffer.alloc(5 + payload.length); f[0] = type; f.writeUInt32LE(id >>> 0, 1); payload.copy(f, 5); wsSend(sock, f);
@@ -81,6 +83,30 @@ function handleWisp(sock) {
       });
     } else if (type === 0x02) { const st = streams.get(id); if (st) { if (st.sock && st.sock.writable) st.sock.write(payload); else st.pending.push(payload); } }
     else if (type === 0x04) { const st = streams.get(id); if (st) { st.closed = true; if (st.sock) st.sock.destroy(); } streams.delete(id); }
+    else if (type === 0xf3) { // LISTEN (our extension): payload [port:u16le]. Inbound conns
+      // become relay-pushed streams announced with 0xf4 (id = new stream id,
+      // payload [lport:u16][ip:4][pport:u16]); reply here is 0xf5 [status][actualPort:u16].
+      const wantPort = payload.readUInt16LE(0);
+      const srv = net.createServer((c) => {
+        const sid = (0x80000000 | (serverStreamNext++ & 0x7fffffff)) >>> 0;
+        const st = { sock: c, pending: [], closed: false }; streams.set(sid, st);
+        const ann = Buffer.alloc(8); ann.writeUInt16LE(srv.address().port, 0);
+        const oct = (c.remoteAddress || '0.0.0.0').replace(/^::ffff:/, '').split('.').map(Number);
+        for (let i = 0; i < 4; i++) ann[2 + i] = oct[i] | 0;
+        ann.writeUInt16LE(c.remotePort || 0, 6);
+        sendFrame(0xf4, sid, ann);
+        c.on('data', (b) => sendFrame(0x02, sid, b));
+        c.on('close', () => { sendFrame(0x04, sid, Buffer.from([0x02])); streams.delete(sid); });
+        c.on('error', () => { sendFrame(0x04, sid, Buffer.from([0x03])); streams.delete(sid); });
+      });
+      srv.on('error', () => { const r = Buffer.alloc(3); r[0] = 1; sendFrame(0xf5, id, r); });
+      srv.listen(wantPort, () => {
+        console.error(`[relay] LISTEN ${id} on :${srv.address().port}`);
+        listeners.set(id, srv);
+        const r = Buffer.alloc(3); r[0] = 0; r.writeUInt16LE(srv.address().port, 1);
+        sendFrame(0xf5, id, r);
+      });
+    }
     else if (type === 0xf1) { // PING (ICMP echo): [dst:4][timeout:u16]. Real ICMP needs root;
       const ip = `${payload[0]}.${payload[1]}.${payload[2]}.${payload[3]}`;   // proxy reachability via a quick TCP probe.
       const probe = net.connect({ host: ip, port: 443 }); let done = false;
@@ -88,6 +114,6 @@ function handleWisp(sock) {
       probe.on('connect', () => reply(0)); probe.on('error', () => reply(1)); setTimeout(() => reply(1), 3000);
     }
   }, state));
-  sock.on('close', () => { for (const s of streams.values()) if (s.sock) s.sock.destroy(); });
+  sock.on('close', () => { for (const s of streams.values()) if (s.sock) s.sock.destroy(); for (const l of listeners.values()) l.close(); });
   sock.on('error', () => {});
 }

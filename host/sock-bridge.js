@@ -158,6 +158,7 @@ async function handle(op) {
   }
   if (op === OP.ACCEPT) { // a0 = listener id, a1 = probe (1: EAGAIN instead of block)
     if (!st.server) return finish(EINVAL);
+    await new Promise(r => setImmediate(r)); // pump pending connection events
     while (!st.pendq.length && !st.err) {
       if (a1) return finish(EAGAIN);
       await new Promise(r => setTimeout(r, 5));
@@ -176,7 +177,8 @@ async function handle(op) {
     return finish(id);
   }
   if (op === OP.CLOSE) { if (st.sock) st.sock.destroy(); if (st.udp) st.udp.close(); if (st.server) st.server.close(); socks.delete(a0); return finish(0); }
-  if (op === OP.POLL) { return finish((st.server ? st.pendq.length : st.rxq.length || st.eof) ? 1 : 0); }
+  if (op === OP.POLL) { await new Promise(r => setImmediate(r)); // pump: the worker blocks in Atomics.wait between ops, so socket events only fire inside one
+    return finish((st.server ? st.pendq.length : st.rxq.length || st.eof) ? 1 : 0); }
   finish(EINVAL);
 }
 

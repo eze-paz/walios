@@ -3,7 +3,10 @@
 // TCP -> WISP frames over the WebSocket; DNS -> DoH fetch. Mirrors the node
 // sock-bridge op protocol so wali-worker.js uses the same call shape.
 'use strict';
-const OP = { CONNECT: 1, SEND: 2, RECV: 3, CLOSE: 4, POLL: 5, UDP: 6, SENDTO: 7, RECVFROM: 8, PING: 9 };
+const OP = { CONNECT: 1, SEND: 2, RECV: 3, CLOSE: 4, POLL: 5, UDP: 6, SENDTO: 7, RECVFROM: 8, PING: 9, LISTEN: 10, ACCEPT: 11 };
+const listenReqs = new Map();     // listen stream id -> {status, port} (0xf5 reply)
+const listeners = new Map();      // listener id -> bound relay port
+const acceptQs = new Map();       // relay port -> [{sid, ip, port}] pending inbound conns
 const EAGAIN = -11, ECONNREFUSED = -111, EPIPE = -32, EBADF = -9, EINVAL = -22;
 // WISP v1 + the riscv-vm's ICMP extension (see riscv-vm/web/wisp-egress.js)
 const F = { CONNECT: 0x01, DATA: 0x02, CONTINUE: 0x03, CLOSE: 0x04, PING: 0xf1, PONG: 0xf2 };
@@ -26,6 +29,13 @@ function connectWS() {
     const b = new Uint8Array(ev.data); if (b.length < 5) return;
     const type = b[0], id = new DataView(b.buffer, b.byteOffset).getUint32(1, true), payload = b.subarray(5);
     if (type === F.PONG) { const p = pings.get(id); if (p) p.status = payload[0]; return; } // ICMP reply
+    if (type === 0xf5) { const r = listenReqs.get(id); if (r) { r.status = payload[0]; r.port = payload[1] | (payload[2] << 8); } return; } // LISTEN reply
+    if (type === 0xf4) { // relay-pushed inbound connection: [lport:u16][ip:4][pport:u16]
+      const lport = payload[0] | (payload[1] << 8);
+      streams.set(id, { rxq: [], closed: false });
+      let q = acceptQs.get(lport); if (!q) { q = []; acceptQs.set(lport, q); }
+      q.push({ sid: id, ip: `${payload[2]}.${payload[3]}.${payload[4]}.${payload[5]}`, port: payload[6] | (payload[7] << 8) });
+      return; }
     const s = streams.get(id);
     if (type === F.DATA) { if (s) s.rxq.push(payload.slice()); }         // DATA
     else if (type === F.CLOSE) { if (s) s.closed = true; }               // CLOSE
@@ -93,6 +103,31 @@ async function handle(op) {
     const st = pings.get(id).status; pings.delete(id);
     return finish(st === 0 ? 0 : -1); // 0 = reachable
   }
+  if (op === OP.LISTEN) { // a0 = wanted port -> res = listener id, ctl[7] = actual relay port
+    while (!wsReady && !wsErr) await sleep(2);
+    if (wsErr) return finish(ECONNREFUSED);
+    const id = nextStream++;
+    const req = { status: -1, port: 0 }; listenReqs.set(id, req);
+    const pl = new Uint8Array(2); pl[0] = a0 & 0xff; pl[1] = (a0 >> 8) & 0xff;
+    wispSend(0xf3, id, pl);
+    for (let i = 0; i < 1500 && req.status === -1; i++) await sleep(2);
+    listenReqs.delete(id);
+    if (req.status !== 0) return finish(-98); // EADDRINUSE
+    listeners.set(id, req.port);
+    if (!acceptQs.has(req.port)) acceptQs.set(req.port, []);
+    ctl[7] = req.port;
+    return finish(id);
+  }
+  if (op === OP.ACCEPT) { // a0 = listener id, a1 = probe
+    const lp = listeners.get(a0); if (lp === undefined) return finish(EINVAL);
+    await sleep(0); // pump inbound-connection frames
+    const q = acceptQs.get(lp);
+    while (!q.length) { if (a1) return finish(EAGAIN); await sleep(5); }
+    const c = q.shift();
+    const peer = new TextEncoder().encode(`${c.ip}|${c.port}`);
+    data.set(peer, 0); ctl[7] = peer.length;
+    return finish(c.sid);
+  }
   if (op === OP.UDP) { const id = nextUdp++; udpSocks.set(id, { rxq: [] }); return finish(id); }
   if (op === OP.SENDTO) { // DNS only (port 53); a1=payloadlen a2=addrlen
     const addr = new TextDecoder().decode(data.slice(a1, a1 + a2)); const [, portStr] = addr.split('|');
@@ -112,7 +147,9 @@ async function handle(op) {
     data.set(out.subarray(0, k), 0); if (k < out.length) s.rxq.unshift(out.subarray(k));
     return finish(k);
   }
-  if (op === OP.POLL) { if (s) return finish(s.rxq.length || s.closed ? 1 : 0); const u = udpSocks.get(a0); return finish(u && u.rxq.length ? 1 : 0); }
+  if (op === OP.POLL) { await sleep(0); const lp = listeners.get(a0); // pump WS events (worker blocks in Atomics.wait between ops)
+    if (lp !== undefined) { const q = acceptQs.get(lp); return finish(q && q.length ? 1 : 0); }
+    if (s) return finish(s.rxq.length || s.closed ? 1 : 0); const u = udpSocks.get(a0); return finish(u && u.rxq.length ? 1 : 0); }
   if (op === OP.CLOSE) { if (s) { wispSend(0x04, a0, new Uint8Array([0])); streams.delete(a0); } udpSocks.delete(a0); return finish(0); }
   finish(EINVAL);
 }
