@@ -88,11 +88,28 @@ Shipped & verified:
   empty pipes and were resumed by the concurrent upstream). Default stays the
   synchronous model; opt in with `WALI_JSPI=1` (node) / `jspi:true` (browser).
 
-Genuinely remaining (not faked): wiring interactive `sshd` on top of the PTY +
-scheduler; async stdin under JSPI (still SAB-blocking); a few per-package source
-walls (oniguruma `st.h`, ncurses native `tic`); farm scale-out. The `clang.wasm`
-from-scratch build recipe is in `ci/` + `farm/` but is moot now that a maintained
-prebuilt exists.
+Toward interactive `sshd` (in progress): real OpenSSH 9.9 `sshd`+`sshd-session`
+speak the SSH-2 wire protocol over a socketpair loopback here — the syscall gaps it
+needed are now filled generally (`socketpair(AF_UNIX)` as cross-connected fifos;
+honest `O_NONBLOCK`/`EAGAIN` on pipes+socketpairs so poll-driven event loops work —
+this was also a real bug in the JSPI scheduler; `setgroups`/`chroot` stubs;
+`execve` made suspend-capable so a re-exec chain runs concurrently). The one hard
+wall is **privilege separation**: `fork()`-without-`exec` needs the monitor and
+child running *concurrently in a copy of the same memory*, which the JSPI scheduler
+cannot do (a live wasm stack can't be cloned). Rather than patch OpenSSH, we're
+building the **general fork substrate** with Asyncify: at `fork()` the live call
+stack is unwound into linear memory, the whole memory is copied to a fresh instance,
+and *both* instances are rewound to the fork point (parent←pid, child←0) and
+scheduled concurrently. `host/asyncify-fork-proof.mjs` (+ `.c`) proves it end to
+end: parent and child run interleaved on independent copied memories. Remaining to
+land it: real `fork()` in musl (drop the vfork-macro), Asyncify over *actual*
+wasm-EH try/catch (SJLJ) — the key open risk — and copy-on-fork performance, then
+unmodified privsep `sshd` runs.
+
+Also remaining: async stdin under JSPI (still SAB-blocking); a few per-package
+source walls (oniguruma `st.h`, ncurses native `tic`); farm scale-out. The
+`clang.wasm` from-scratch build recipe is in `ci/` + `farm/` but is moot now that a
+maintained prebuilt exists.
 
 Not a from-scratch build: this rides the WALI project (github.com/arjunr2/WALI) for
 the toolchain/ABI, and @yowasp/clang for the in-browser compiler. This repo is the
