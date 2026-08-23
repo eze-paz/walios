@@ -81,6 +81,7 @@ const JSPI = !!process.env.WALI_JSPI && typeof WebAssembly.Suspending === 'funct
 if (process.env.WALI_JSPI && !JSPI) process.stderr.write('[wali-host] WALI_JSPI set but JSPI unavailable (need node 24 + --experimental-wasm-jspi); using synchronous model\n');
 // syscalls that may block -> wrapped as WebAssembly.Suspending in JSPI mode
 const BLOCKING = new Set(['read', 'readv', 'wait4', 'poll', 'ppoll', 'nanosleep', 'clock_nanosleep', 'execve']);
+const ASYNC_PAGES = 16;               // 1MB asyncify unwind buffer (grown at first fork)
 const inflight = new Set();           // live child task promises (keeps event loop alive)
 let pipeSuspends = 0, waitSuspends = 0; // JSPI concurrency evidence: times a process actually suspended
 
@@ -182,6 +183,8 @@ class Process {
     this.reaped = new Map();         // pid -> exit code, awaiting wait4
     this.childTasks = new Map();     // JSPI: pid -> in-flight concurrent task promise
     this.waitWaiters = [];           // JSPI: resolvers for a process suspended in wait4
+    this.forkState = 'none';         // Asyncify fork: 'none' | 'unwinding' | 'rewinding'
+    this.asyncifyBuf = 0; this.forkRet = 0n;
     this.syscalls = 0;
   }
 
@@ -661,6 +664,10 @@ class Process {
     const wali = {};
     const S = this;
     const extra = {};
+    // Asyncify-capable module (has the unwind/rewind controls wasm-opt --asyncify adds)?
+    // If so, SYS_fork is implemented by unwinding the live stack into linear memory,
+    // copying that memory into a child instance, and rewinding both to the fork point.
+    S._asyncifyCap = WebAssembly.Module.exports(mod).some(e => e.name === 'asyncify_start_unwind');
     const needWasi = WebAssembly.Module.imports(mod).some(i => i.module === 'wasi_snapshot_preview1');
     const wasi = needWasi ? this.makeWasi() : null;
     for (const im of WebAssembly.Module.imports(mod)) {
@@ -693,7 +700,19 @@ class Process {
       else if (name.startsWith('SYS_')) {
         const sysname = name.slice(4);
         const map = (a2) => a2.map(x => typeof x === 'bigint' && sysname !== 'mmap' ? Number(x) : x);
-        if (JSPI && BLOCKING.has(sysname)) { // suspend-capable: yields to the scheduler while blocked
+        if (JSPI && S._asyncifyCap && sysname === 'fork') { // real fork() via Asyncify (returns twice)
+          wali[name] = () => {
+            S.syscalls++; syscallTotal++;
+            if (S.forkState === 'rewinding') { S.inst.exports.asyncify_stop_rewind(); S.forkState = 'none'; return S.forkRet; }
+            if (!S.asyncifyBuf) { const old = S.memory.buffer.byteLength; S.memory.grow(ASYNC_PAGES); S.asyncifyBuf = old; S.refresh(); }
+            const d = new DataView(S.memory.buffer);
+            d.setUint32(S.asyncifyBuf, S.asyncifyBuf + 8, true);              // current
+            d.setUint32(S.asyncifyBuf + 4, S.asyncifyBuf + ASYNC_PAGES * PAGE, true); // end
+            S.inst.exports.asyncify_start_unwind(S.asyncifyBuf);
+            S.forkState = 'unwinding';
+            return 0n; // dummy; the wasm now unwinds to _start
+          };
+        } else if (JSPI && BLOCKING.has(sysname)) { // suspend-capable: yields to the scheduler while blocked
           wali[name] = new WebAssembly.Suspending(async (...a2) => {
             S.syscalls++; syscallTotal++;
             const r = await S.sysAsync(sysname, map(a2));
@@ -769,19 +788,57 @@ class Process {
     }
   }
 
-  // JSPI: run _start as a promising export so its blocking syscalls can suspend
+  // JSPI: run _start as a promising export so its blocking syscalls can suspend.
   async runAsync() {
     procCount++;
     const mod = getModule(this.modPath);
-    const inst = new WebAssembly.Instance(mod, this.makeImports(mod));
-    this.memory = inst.exports.memory; this.membuf = null; this.refresh();
-    const start = WebAssembly.promising(inst.exports._start);
-    try { await start(); return 0; }
-    catch (e) {
-      if (e instanceof ExitError) return e.code & 0xff;
-      process.stderr.write(`[wali-host] trap in pid ${this.pid}: ${e.stack || e}\n`);
-      return 139;
+    this.inst = new WebAssembly.Instance(mod, this.makeImports(mod));
+    this.memory = this.inst.exports.memory; this.membuf = null; this.refresh();
+    return this._drive(false);
+  }
+
+  // the run loop: each time _start returns we check whether it was a real exit or an
+  // Asyncify fork-unwind; on a fork we spawn the child (a memory copy) and rewind.
+  async _drive(rewind) {
+    const start = WebAssembly.promising(this.inst.exports._start);
+    if (rewind) this.inst.exports.asyncify_start_rewind(this.asyncifyBuf);
+    for (;;) {
+      try { await start(); }
+      catch (e) {
+        if (e instanceof ExitError) return e.code & 0xff;
+        process.stderr.write(`[wali-host] trap in pid ${this.pid}: ${e.stack || e}\n`);
+        return 139;
+      }
+      if (this.forkState !== 'unwinding') return 0; // genuine _start return
+      this.inst.exports.asyncify_stop_unwind();
+      const childPid = nextPid++;
+      const child = this.spawnForkChild(childPid);
+      const ctask = child._drive(true).then((code) => { this.reaped.set(childPid, code); this.childTasks.delete(childPid); wakeWaiters(this); });
+      inflight.add(ctask); ctask.finally(() => inflight.delete(ctask));
+      this.childTasks.set(childPid, ctask);
+      this.forkRet = BigInt(childPid); this.forkState = 'rewinding';       // parent gets the child pid
+      this.inst.exports.asyncify_start_rewind(this.asyncifyBuf);
+      // loop: re-enter _start, which rewinds to the fork point and SYS_fork returns childPid
     }
+  }
+
+  // fork: a child Process on a fresh instance whose memory is a byte copy of ours,
+  // rewound to the same fork point (SYS_fork will return 0 in the child).
+  spawnForkChild(childPid) {
+    const mod = getModule(this.modPath);
+    const child = new Process(this.modPath, this.argv, this.env, new Map(), this.cwd.p);
+    child.pid = childPid;
+    child.fds = new Map([...this.fds].map(([k, v]) => [k, { ...v, shared: true }])); // COW-ish: share handle objects
+    for (const v of child.fds.values()) child.bumpFifo(v);
+    child.nextFd = this.nextFd; child.heapBrk = this.heapBrk; child.ctty = this.ctty;
+    child.inst = new WebAssembly.Instance(mod, child.makeImports(mod));
+    child.memory = child.inst.exports.memory; child.membuf = null; child.refresh();
+    const need = this.memory.buffer.byteLength - child.memory.buffer.byteLength;
+    if (need > 0) child.memory.grow(Math.ceil(need / PAGE));
+    new Uint8Array(child.memory.buffer).set(new Uint8Array(this.memory.buffer)); // inherit parent memory (incl. asyncify stack)
+    child.membuf = null; child.refresh();
+    child.asyncifyBuf = this.asyncifyBuf; child.forkState = 'rewinding'; child.forkRet = 0n;
+    return child;
   }
 }
 class ExitError extends Error { constructor(code) { super('exit'); this.code = code; } }
