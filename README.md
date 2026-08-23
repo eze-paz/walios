@@ -129,3 +129,12 @@ the toolchain/ABI, and @yowasp/clang for the in-browser compiler. This repo is t
 OS layer, browser port, process model, farm, DNS, and the aports browser on top.
 `browser/pkgs/*.wasm` (the runnable packages) and `browser/yowasp/` (the 73 MB
 clang) are produced by the farm / fetched from npm — not committed here.
+
+## Tests
+
+`tests/run.sh` — regression suite. Each `tests/src/*.c` is compiled with the WALI
+clang (`tests/cc.sh`) and run under `host/host.js`; a test passes if it exits 0 and
+its last stdout line is `PASS`. `tests/src-jspi/*.c` additionally exercise the JSPI
+concurrent scheduler and Asyncify fork (needs node >= 24; fork tests are built with
+`-D__WALI_ASYNCIFY_FORK` and post-processed with `wasm-opt --asyncify`).
+Override `HOST=` to point the suite at any host build.
