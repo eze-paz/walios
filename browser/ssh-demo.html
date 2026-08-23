@@ -1,0 +1,65 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>WALI — interactive OpenSSH in a browser tab</title>
+<style>
+  body { font: 14px system-ui; margin: 16px; background: #111; color: #ddd; }
+  button { margin: 0 6px 8px 0; padding: 6px 14px; font: inherit; }
+  #term { background: #000; color: #cfc; font: 12px/1.35 monospace; padding: 10px;
+          height: 60vh; overflow-y: auto; white-space: pre-wrap; border: 1px solid #333; }
+  #term .err { color: #f99; }
+  #status { margin: 8px 0; color: #9cf; }
+  code { color:#fc9; }
+</style>
+<h3>Interactive OpenSSH 9.9 (unmodified, privsep) over WALI — in this tab</h3>
+<p>Real <code>ssh -o ProxyCommand="sshd -i" me@localhost</code>: the ssh client, sshd,
+sshd-session, the privsep monitor+child, and the login shell are all WALI wasm processes.
+Real <code>fork()</code> comes from the Asyncify substrate. COI: <span id="coi"></span> · JSPI: <span id="jspi"></span></p>
+<div>
+  <button id="run">run interactive session</button>
+  <button id="runcmd">run one command (uname -a)</button>
+</div>
+<div id="status">idle</div>
+<div id="term"></div>
+<script>
+const term = document.getElementById('term'), status = document.getElementById('status');
+document.getElementById('coi').textContent = crossOriginIsolated;
+document.getElementById('jspi').textContent = (typeof WebAssembly.Suspending === 'function') ? 'supported' : 'UNAVAILABLE';
+function log(s, err) { const sp = document.createElement('span'); if (err) sp.className = 'err'; sp.textContent = s; term.appendChild(sp); term.scrollTop = term.scrollHeight; }
+
+const MANIFEST = { 'ssh': 'ssh.wasm', 'sshd': 'sshd.wasm', 'sshd-session': 'sshd-session.wasm',
+                   'sh': 'busybox.wasm', 'hush': 'busybox.wasm', 'busybox': 'busybox.wasm' };
+let worker = null, running = false;
+
+function start(argv, stdinScript) {
+  if (running) { log('\n[already running]\n', true); return; }
+  running = true; term.textContent = ''; status.textContent = 'booting...';
+  if (worker) worker.terminate();
+  worker = new Worker('wali-worker.js');
+  worker.onmessage = (ev) => {
+    const m = ev.data;
+    if (m.t === 'out') log(m.s, m.fd === 2);
+    else if (m.t === 'boot') status.textContent = `booted in ${m.ms.toFixed(0)}ms — session running...`;
+    else if (m.t === 'exit') { running = false;
+      const j = m.jspi ? `  [jspi] suspends=${m.pipeSuspends}pipe/${m.waitSuspends}wait` : '';
+      status.textContent = `exit=${m.code}  wall=${(m.ms/1000).toFixed(2)}s  syscalls=${m.syscalls}${j}`;
+      log(`\n[session closed: exit=${m.code}${j}]\n`, m.code !== 0); }
+  };
+  worker.postMessage({ t: 'run', wasm: 'ssh.wasm', manifest: MANIFEST,
+    tars: [['sshvfs.tar.gz', '/']], env: { HOME: '/root', TERM: 'xterm' },
+    cwd: '/root', argv, jspi: true });
+  // feed stdin like a user typing (async stdin over postMessage)
+  if (stdinScript) {
+    let t = 800;
+    for (const line of stdinScript) { setTimeout(() => { if (running) worker.postMessage({ t: 'stdin', data: line + '\n' }); }, t); t += 1500; }
+    setTimeout(() => { if (running) worker.postMessage({ t: 'stdin-eof' }); }, t + 500);
+  }
+}
+
+document.getElementById('run').onclick = () => start(
+  ['ssh', '-tt', '-F', '/etc/ssh/ssh_config', 'me@localhost'],
+  ['echo INTERACTIVE_SESSION_IN_A_TAB', 'uname -a', 'pwd', 'echo user=$USER tty=$SSH_TTY', 'exit']);
+
+document.getElementById('runcmd').onclick = () => start(
+  ['ssh', '-F', '/etc/ssh/ssh_config', 'me@localhost', 'echo IT_WORKS_OVER_SSH; uname -a; id 2>/dev/null || echo "(no id applet)"'],
+  null);
+</script>

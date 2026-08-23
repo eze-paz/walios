@@ -6,6 +6,7 @@
 
 const PAGE = 65536;
 const CHILD_DONE = 0x7e57n;
+try { self.addEventListener('unhandledrejection', (e) => { try { self.postMessage({ t: 'out', fd: 2, s: '[host] UNHANDLED: ' + ((e.reason && e.reason.stack) || e.reason) + '\n' }); } catch {} }); } catch {}
 const E = { PERM:1, NOENT:2, BADF:9, CHILD:10, AGAIN:11, NOMEM:12, ACCES:13, EXIST:17, NOTDIR:20, ISDIR:21, INVAL:22, NOTTY:25, SPIPE:29, NOSYS:38, NOTEMPTY:39 };
 const err = (e) => BigInt(-e);
 const td = new TextDecoder(), te = new TextEncoder();
@@ -51,9 +52,10 @@ async function loadTar(url, prefix) {
     const pfx = td.decode(hdr.subarray(345, 500)).replace(/\0.*$/, '');
     if (pfx) name = pfx + '/' + name;
     const size = parseInt(td.decode(hdr.subarray(124, 136)).trim(), 8) || 0;
+    const tmode = parseInt(td.decode(hdr.subarray(100, 108)).trim(), 8) || 0o644; // preserve perms (sshd checks host-key 0600)
     const type = String.fromCharCode(hdr[156] || 48);
     off += 512;
-    if (type === '0' || type === '\0') addFile(norm(prefix + '/' + name, '/'), buf.slice(off, off + size));
+    if (type === '0' || type === '\0') addFile(norm(prefix + '/' + name, '/'), buf.slice(off, off + size), 0o100000 | (tmode & 0o7777));
     else if (type === '5') mkdirp(norm(prefix + '/' + name, '/'));
     off += Math.ceil(size / 512) * 512;
   }
@@ -174,9 +176,15 @@ const modCache = new Map();   // key -> WebAssembly.Module
 // sessions (a shell driving a running pipeline, sshd) instead of run-at-wait4.
 let JSPI = false;
 const jspiAvailable = typeof WebAssembly.Suspending === 'function' && typeof WebAssembly.promising === 'function';
-const BLOCKING = new Set(['read', 'readv', 'wait4', 'poll', 'ppoll', 'nanosleep', 'clock_nanosleep']);
+const BLOCKING = new Set(['read', 'readv', 'wait4', 'poll', 'ppoll', 'nanosleep', 'clock_nanosleep', 'execve', 'recvmsg']);
+const ASYNC_PAGES = 16;       // 1MB asyncify unwind buffer (grown at first fork)
 const inflight = new Set();   // live child task promises
 let pipeSuspends = 0, waitSuspends = 0; // JSPI concurrency evidence
+// async stdin (JSPI): page posts {t:'stdin'} msgs; stdin reads suspend, not block
+let stdinChunks = [], stdinEOF = false, stdinWaiters = [];
+function pushStdin(u8) { stdinChunks.push(u8); const w = stdinWaiters; stdinWaiters = []; for (const f of w) f(); }
+function concatU8(arr) { let n = 0; for (const a of arr) n += a.length; const o = new Uint8Array(n); let k = 0; for (const a of arr) { o.set(a, k); k += a.length; } return o; }
+function drainStdinAsync(max) { if (stdinChunks.length) { let b = concatU8(stdinChunks); const take = b.subarray(0, max); const rest = b.subarray(take.length); stdinChunks = rest.length ? [rest.slice()] : []; return take.slice(); } if (stdinEOF) return new Uint8Array(0); return null; }
 let manifest = {};            // basename -> module key (url)
 function resolveModuleKey(p, selfKey) {
   if (p === '/proc/self/exe') return selfKey;
@@ -193,23 +201,29 @@ function defaultTermios() { const t = new Uint8Array(60); const dv = new DataVie
   dv.setUint32(0, ICRNL | 0x400, true); dv.setUint32(4, OPOST | ONLCR, true);
   dv.setUint32(8, 0xbf, true); dv.setUint32(12, ISIG | ICANON | ECHO | 0x10, true);
   t[17] = 3; t[19] = 21; t[19] = 21; t[17 + 2] = 127; t[17 + 4] = 4; t[17 + 6] = 1; return t; }
-function newPty() { const id = nextPtyId++; ptys.set(id, { toSlave: [], toMaster: [], line: [], termios: defaultTermios(), rows: 24, cols: 80, pgrp: 0 }); return id; }
+function newPty() { const id = nextPtyId++; ptys.set(id, { toSlave: [], toMaster: [], line: [], termios: defaultTermios(), rows: 24, cols: 80, pgrp: 0, slaveWaiters: [], masterWaiters: [] }); return id; }
+function wakePty(list) { if (list && list.length) { const w = list.splice(0); for (const f of w) f(); } }
+function ptyStatObj(id, master) { return { size: 0, mode: 0o020620, nlink: 1, uid: 1000, gid: 5, dev: 6, ino: master ? 2 : 1000 + id, rdev: master ? ((5 << 8) | 2) : ((136 << 8) | id) }; }
 const tflag = (p, off) => new DataView(p.termios.buffer).getUint32(off, true);
 function ptyMasterWrite(p, bytes) { const lf = tflag(p, 12), canon = lf & ICANON, echo = lf & ECHO, icrnl = tflag(p, 0) & ICRNL;
   for (let c of bytes) { if (canon) {
       if (c === 0x7f || c === 0x08) { if (p.line.length) { p.line.pop(); if (echo) p.toMaster.push(8, 32, 8); } continue; }
       if (c === 0x0d && icrnl) c = 0x0a; p.line.push(c); if (echo) p.toMaster.push(c);
       if (c === 0x0a) { for (const x of p.line) p.toSlave.push(x); p.line = []; }
-    } else { p.toSlave.push(c); if (echo) p.toMaster.push(c); } } }
+    } else { p.toSlave.push(c); if (echo) p.toMaster.push(c); } }
+  if (p.toSlave.length) wakePty(p.slaveWaiters); if (p.toMaster.length) wakePty(p.masterWaiters); }
 function ptySlaveWrite(p, bytes) { const of = tflag(p, 4), onlcr = (of & OPOST) && (of & ONLCR);
-  for (const c of bytes) { if (onlcr && c === 0x0a) p.toMaster.push(0x0d, 0x0a); else p.toMaster.push(c); } }
+  for (const c of bytes) { if (onlcr && c === 0x0a) p.toMaster.push(0x0d, 0x0a); else p.toMaster.push(c); }
+  if (p.toMaster.length) wakePty(p.masterWaiters); }
 
 // writers/readers are refcounts (bumped on fork/dup of an end, dropped on close);
 // in JSPI mode a reader on an empty pipe suspends until a write wakes it or the
 // last writer closes (writers==0 => EOF). readWaiters holds suspend resolvers.
 function mkPipe() { return { chunks: [], writers: 1, readers: 1, readWaiters: [] }; }
 function wakePipe(fifo) { if (fifo.readWaiters && fifo.readWaiters.length) { const w = fifo.readWaiters; fifo.readWaiters = []; for (const f of w) f(); } }
-function releaseFds(fdMap) { for (const h of fdMap.values()) { if (h && h.fifo) { if (h.end === 'w') { if (--h.fifo.writers <= 0) wakePipe(h.fifo); } else if (h.end === 'r') h.fifo.readers--; } } }
+function releaseFds(fdMap) { for (const h of fdMap.values()) {
+  if (h && h.fifo) { if (h.end === 'w') { if (--h.fifo.writers <= 0) wakePipe(h.fifo); } else if (h.end === 'r') h.fifo.readers--; }
+  else if (h && h.spair) { if (--h.spair.wr.writers <= 0) wakePipe(h.spair.wr); h.spair.rd.readers--; } } }
 function wakeWaiters(S) { if (S.waitWaiters.length) { const w = S.waitWaiters; S.waitWaiters = []; for (const f of w) f(); } }
 function pipeRead(fifo, n) {
   if (!fifo.chunks.length) return new Uint8Array(0);
@@ -291,8 +305,12 @@ class Process {
     this.reaped = new Map();
     this.childTasks = new Map();     // JSPI: pid -> in-flight concurrent task
     this.waitWaiters = [];           // JSPI: resolvers for a process suspended in wait4
+    this.forkState = 'none';         // Asyncify fork: 'none' | 'unwinding' | 'rewinding'
+    this.asyncifyBuf = 0; this.forkRet = 0n;
     this.syscalls = 0;
   }
+  allocFd() { let g = 0; while (this.fds.has(g)) g++; return g; } // POSIX lowest-free fd
+  bumpFifo(h) { if (h && h.fifo) { if (h.end === 'w') h.fifo.writers++; else if (h.end === 'r') h.fifo.readers++; } else if (h && h.spair) { h.spair.wr.writers++; h.spair.rd.readers++; } }
   refresh() { if (this.membuf !== this.memory.buffer) { this.membuf = this.memory.buffer; this.u8 = new Uint8Array(this.membuf); this.dv = new DataView(this.membuf); } }
   cstr(p) { this.refresh(); let e = p; while (this.u8[e] !== 0) e++; return td.decode(this.u8.slice(p, e)); }
   wbytes(p, b) { this.refresh(); this.u8.set(b, p); }
@@ -309,8 +327,9 @@ class Process {
   }
   putStat(p, o) {
     this.refresh(); this.u8.fill(0, p, p + 144);
-    this.i64(p, 1n); this.i64(p + 8, 1n); this.i64(p + 16, 1n);
-    this.i32(p + 24, o.mode); this.i32(p + 28, 1000); this.i32(p + 32, 1000);
+    this.i64(p, BigInt(o.dev || 1)); this.i64(p + 8, BigInt(o.ino || 1)); this.i64(p + 16, BigInt(o.nlink || 1));
+    this.i32(p + 24, o.mode); this.i32(p + 28, o.uid ?? 1000); this.i32(p + 32, o.gid ?? 1000);
+    this.i64(p + 40, BigInt(o.rdev || 0));
     this.i64(p + 48, BigInt(o.size)); this.i64(p + 56, 4096n); this.i64(p + 64, BigInt(Math.ceil(o.size / 512)));
     const t = (off, ms) => { this.i64(p + off, BigInt(Math.floor(ms / 1000))); this.i64(p + off + 8, BigInt(Math.floor((ms % 1000) * 1e6))); };
     t(72, o.mtimeMs || Date.now()); t(88, o.mtimeMs || Date.now()); t(104, o.mtimeMs || Date.now());
@@ -325,12 +344,12 @@ class Process {
   }
   openAt(path2, flags, mode) {
     const O_CREAT = 0o100, O_TRUNC = 0o1000, O_APPEND = 0o2000, O_DIRECTORY = 0o200000, O_EXCL = 0o200;
-    if (path2 === '/proc/self/exe') { const g = this.nextFd++; this.fds.set(g, { exe: true }); return BigInt(g); }
+    if (path2 === '/proc/self/exe') { const g = this.allocFd(); this.fds.set(g, { exe: true }); return BigInt(g); }
     opfsFault(path2);
-    if (path2 === '/dev/ptmx') { const id = newPty(); const g = this.nextFd++; this.fds.set(g, { pty: id, master: true }); return BigInt(g); }
-    if (path2 === '/dev/null') { const g = this.nextFd++; this.fds.set(g, { devnull: true }); return BigInt(g); }
-    { const m = path2.match(/^\/dev\/pts\/(\d+)$/); if (m) { const id = +m[1]; if (!ptys.has(id)) return err(E.NOENT); const g = this.nextFd++; this.fds.set(g, { pty: id, master: false }); return BigInt(g); } }
-    if (dirs.has(path2)) { const g = this.nextFd++; this.fds.set(g, { path: path2, dir: true }); return BigInt(g); }
+    if (path2 === '/dev/ptmx') { const id = newPty(); const g = this.allocFd(); this.fds.set(g, { pty: id, master: true }); return BigInt(g); }
+    if (path2 === '/dev/null') { const g = this.allocFd(); this.fds.set(g, { devnull: true }); return BigInt(g); }
+    { const m = path2.match(/^\/dev\/pts\/(\d+)$/); if (m) { const id = +m[1]; if (!ptys.has(id)) return err(E.NOENT); const g = this.allocFd(); this.fds.set(g, { pty: id, master: false }); return BigInt(g); } }
+    if (dirs.has(path2)) { const g = this.allocFd(); this.fds.set(g, { path: path2, dir: true }); return BigInt(g); }
     if (flags & O_DIRECTORY) return err(E.NOTDIR);
     let f = files.get(path2);
     if (!f) {
@@ -344,7 +363,7 @@ class Process {
       else f.data = new Uint8Array(0);
       f.size = 0;
     }
-    const g = this.nextFd++;
+    const g = this.allocFd();
     this.fds.set(g, { path: path2, file: f, pos: (flags & O_APPEND) ? f.size : 0, append: !!(flags & O_APPEND) });
     return BigInt(g);
   }
@@ -361,8 +380,11 @@ class Process {
     switch (name) {
       case 'read': {
         const h = S.fds.get(a[0]); if (!h) return err(E.BADF);
-        if (h.std !== undefined) { if (h.std !== 0) return err(E.BADF); const b = readStdin(a[2]); S.wbytes(a[1], b); return BigInt(b.length); }
-        if (h.fifo) { const b = pipeRead(h.fifo, a[2]); S.wbytes(a[1], b); return BigInt(b.length); }
+        if (h.std !== undefined) { if (h.std !== 0) return err(E.BADF);
+          if (JSPI) { const b = drainStdinAsync(a[2]); if (b === null) return h.nonblock ? err(E.AGAIN) : 0n; S.wbytes(a[1], b); return BigInt(b.length); }
+          const b = readStdin(a[2]); S.wbytes(a[1], b); return BigInt(b.length); }
+        if (h.fifo) { if (!h.fifo.chunks.length && h.nonblock && h.fifo.writers > 0) return err(E.AGAIN); const b = pipeRead(h.fifo, a[2]); S.wbytes(a[1], b); return BigInt(b.length); }
+        if (h.spair) { if (!h.spair.rd.chunks.length && h.nonblock && h.spair.rd.writers > 0) return err(E.AGAIN); const b = pipeRead(h.spair.rd, a[2]); S.wbytes(a[1], b); return BigInt(b.length); }
         if (h.devnull) return 0n;
         if (h.pty !== undefined) { const p = ptys.get(h.pty); const q = h.master ? p.toMaster : p.toSlave;
           if (!q.length) return err(E.AGAIN); const k = Math.min(q.length, a[2]); S.wbytes(a[1], Uint8Array.from(q.splice(0, k))); return BigInt(k); }
@@ -375,6 +397,7 @@ class Process {
         S.refresh();
         if (h.std !== undefined) { post(td.decode(S.u8.slice(a[1], a[1] + a[2])), h.std === 0 ? 1 : h.std); return BigInt(a[2]); }
         if (h.fifo) { h.fifo.chunks.push(S.u8.slice(a[1], a[1] + a[2])); wakePipe(h.fifo); return BigInt(a[2]); }
+        if (h.spair) { h.spair.wr.chunks.push(S.u8.slice(a[1], a[1] + a[2])); wakePipe(h.spair.wr); return BigInt(a[2]); }
         if (h.devnull) return BigInt(a[2]);
         if (h.pty !== undefined) { const p = ptys.get(h.pty); const b = S.u8.slice(a[1], a[1] + a[2]); if (h.master) ptyMasterWrite(p, b); else ptySlaveWrite(p, b); return BigInt(a[2]); }
         if (h.sock) { const br = initWisp(); const r = br.call(br.OP.SEND, h.sock.id, a[2], 0, S.u8.slice(a[1], a[1] + a[2])); return BigInt(r.res); }
@@ -387,6 +410,7 @@ class Process {
       case 'openat': return S.openAt(S.atPath(a[0], S.cstr(a[1])), a[2], a[3]);
       case 'close': { const h = S.fds.get(a[0]); if (!h) return err(E.BADF);
         if (h.fifo) { if (h.end === 'w') { if (--h.fifo.writers <= 0) wakePipe(h.fifo); } else if (h.end === 'r') h.fifo.readers--; S.fds.delete(a[0]); return 0n; }
+        if (h.spair) { if (--h.spair.wr.writers <= 0) wakePipe(h.spair.wr); h.spair.rd.readers--; S.fds.delete(a[0]); return 0n; }
         if (h.sock && h.sock.id) initWisp().call(initWisp().OP.CLOSE, h.sock.id, 0, 0);
         S.fds.delete(a[0]); S.dirState.delete(a[0]); return 0n; }
       case 'lseek': { const h = S.fds.get(a[0]); if (!h) return err(E.BADF);
@@ -395,11 +419,16 @@ class Process {
         h.pos = a[2] === 0 ? Number(a[1]) : a[2] === 1 ? (h.pos || 0) + Number(a[1]) : size + Number(a[1]);
         return BigInt(h.pos); }
       case 'fstat': { const h = S.fds.get(a[0]); if (!h) return err(E.BADF);
-        if (h.pty !== undefined || h.devnull) { S.putStat(a[1], { size: 0, mode: 0o020620 }); return 0n; }
-        if (h.std !== undefined || h.fifo || h.sock) { S.putStat(a[1], { size: 0, mode: (h.fifo || h.sock) ? 0o010600 : 0o020620 }); return 0n; }
+        if (h.pty !== undefined) { S.putStat(a[1], ptyStatObj(h.pty, h.master)); return 0n; }
+        if (h.devnull) { S.putStat(a[1], { size: 0, mode: 0o020620 }); return 0n; }
+        if (h.std !== undefined || h.fifo || h.sock || h.spair) { S.putStat(a[1], { size: 0, mode: (h.fifo || h.sock || h.spair) ? 0o010600 : 0o020620 }); return 0n; }
         if (h.exe) { S.putStat(a[1], { size: 1, mode: 0o100755 }); return 0n; }
         return S.statPath(h.path, a[1]); }
-      case 'stat': case 'lstat': return S.statPath(S.atPath(-100, S.cstr(a[0])), a[1]);
+      case 'stat': case 'lstat': { const p = S.atPath(-100, S.cstr(a[0])); let m;
+        if (p === '/dev/ptmx') { S.putStat(a[1], ptyStatObj(0, true)); return 0n; }
+        if ((m = p.match(/^\/dev\/pts\/(\d+)$/))) { if (!ptys.has(+m[1])) return err(E.NOENT); S.putStat(a[1], ptyStatObj(+m[1], false)); return 0n; }
+        if (p === '/dev/null' || p === '/dev/tty') { S.putStat(a[1], { size: 0, mode: 0o020666 }); return 0n; }
+        return S.statPath(p, a[1]); }
       case 'newfstatat': { const s = S.cstr(a[1]); return s === '' ? S.sys('fstat', [a[0], a[2]]) : S.statPath(S.atPath(a[0], s), a[2]); }
       case 'access': case 'faccessat': case 'faccessat2': {
         const p = name === 'access' ? S.atPath(-100, S.cstr(a[0])) : S.atPath(a[0], S.cstr(a[1]));
@@ -408,6 +437,9 @@ class Process {
         return (files.has(p) || dirs.has(p)) ? 0n : err(E.NOENT); }
       case 'readlink': { const p = S.atPath(-100, S.cstr(a[0]));
         if (p === '/proc/self/exe') return BigInt(S.wstr(a[1], '/bin/' + (S.argv[0] || 'wasm'), a[2] + 1));
+        let m2; if ((m2 = p.match(/^\/proc\/self\/fd\/(\d+)$/))) { const h = S.fds.get(+m2[1]); if (!h) return err(E.BADF);
+          const tgt = h.pty !== undefined ? (h.master ? '/dev/ptmx' : '/dev/pts/' + h.pty) : h.path ? h.path : h.std !== undefined ? '/dev/tty' : '/dev/null';
+          return BigInt(S.wstr(a[1], tgt, a[2] + 1)); }
         return err(E.INVAL); }
       case 'unlink': { const p = S.atPath(-100, S.cstr(a[0])); opfsFault(p); if (!files.has(p)) return err(E.NOENT);
         const f = files.get(p);
@@ -446,15 +478,23 @@ class Process {
       case 'getcwd': return BigInt(S.wstr(a[0], S.cwd.p, a[1]) + 1);
       case 'chmod': case 'fchmod': case 'chown': return 0n;
       case 'umask': return 0o22n;
-      case 'dup': { const h = S.fds.get(a[0]); if (!h) return err(E.BADF); const g = S.nextFd++; S.fds.set(g, { ...h }); S.bumpFifo(h); return BigInt(g); }
+      case 'dup': { const h = S.fds.get(a[0]); if (!h) return err(E.BADF); const g = S.allocFd(); S.fds.set(g, { ...h }); S.bumpFifo(h); return BigInt(g); }
       case 'dup2': case 'dup3': { const h = S.fds.get(a[0]); if (!h) return err(E.BADF);
-        if (a[0] !== a[1]) { const old = S.fds.get(a[1]); if (old && old.fifo) { if (old.end === 'w') { if (--old.fifo.writers <= 0) wakePipe(old.fifo); } else old.fifo.readers--; } // dup2 closes target first
+        if (a[0] !== a[1]) { const old = S.fds.get(a[1]);
+          if (old && old.fifo) { if (old.end === 'w') { if (--old.fifo.writers <= 0) wakePipe(old.fifo); } else old.fifo.readers--; }
+          else if (old && old.spair) { if (--old.spair.wr.writers <= 0) wakePipe(old.spair.wr); old.spair.rd.readers--; }
           S.fds.set(a[1], { ...h }); S.bumpFifo(h); } return BigInt(a[1]); }
       case 'pipe': case 'pipe2': {
+        const nb = name === 'pipe2' && !!(a[1] & 0x800);
         const fifo = mkPipe();
-        const r = S.nextFd++, w = S.nextFd++;
-        S.fds.set(r, { fifo, end: 'r' }); S.fds.set(w, { fifo, end: 'w' });
+        const r = S.allocFd(); S.fds.set(r, { fifo, end: 'r', nonblock: nb });
+        const w = S.allocFd(); S.fds.set(w, { fifo, end: 'w', nonblock: nb });
         S.i32(a[0], r); S.i32(a[0] + 4, w); return 0n; }
+      case 'socketpair': { const nb = !!(a[1] & 0x800);
+        const f1 = mkPipe(), f2 = mkPipe();
+        const A = S.allocFd(); S.fds.set(A, { spair: { rd: f2, wr: f1 }, nonblock: nb });
+        const B = S.allocFd(); S.fds.set(B, { spair: { rd: f1, wr: f2 }, nonblock: nb });
+        S.i32(a[3], A); S.i32(a[3] + 4, B); return 0n; }
 
       case 'fork': case 'vfork': {
         const pid = nextPid++;
@@ -543,7 +583,7 @@ class Process {
             case 0x540e: S.ctty = h.pty; return 0n;
             case 0x540f: S.i32(a[2], p.pgrp || S.pid); return 0n;
             case 0x5410: p.pgrp = S.r32(a[2]); return 0n;
-            case 0x40045441: { const g = S.nextFd++; S.fds.set(g, { pty: h.pty, master: false }); return BigInt(g); }
+            case 0x40045441: { const g = S.allocFd(); S.fds.set(g, { pty: h.pty, master: false }); return BigInt(g); }
             default: return 0n;
           } }
         if (h.std === undefined) return err(E.NOTTY);
@@ -552,19 +592,20 @@ class Process {
         return 0n; }
       case 'fcntl': { const h = S.fds.get(a[0]); if (!h) return err(E.BADF);
         if (a[1] === 0 || a[1] === 1030) {
-          const min = Number(a[2]) || 0;
-          let g = Math.max(S.nextFd, min); while (S.fds.has(g)) g++;
-          S.nextFd = Math.max(S.nextFd, g + 1);
+          const min = Number(a[2]) || 0; let g = min; while (S.fds.has(g)) g++;
           S.fds.set(g, { ...h }); S.bumpFifo(h); return BigInt(g);
         }
-        if (a[1] === 3) return 2n; return 0n; }
+        if (a[1] === 3) return BigInt(2 | (h.nonblock ? 0x800 : 0));
+        if (a[1] === 4) { h.nonblock = !!(Number(a[2]) & 0x800); return 0n; }
+        return 0n; }
       case 'clock_gettime': { if (a[0] === 1 || a[0] === 4) { const ms = performance.now(); S.i64(a[1], BigInt(Math.floor(ms / 1000))); S.i64(a[1] + 8, BigInt(Math.floor((ms % 1000) * 1e6))); return 0n; }
         const ms = Date.now(); S.i64(a[1], BigInt(Math.floor(ms / 1000))); S.i64(a[1] + 8, BigInt((ms % 1000) * 1e6)); return 0n; }
       case 'gettimeofday': { const ms = Date.now(); S.i64(a[0], BigInt(Math.floor(ms / 1000))); S.i64(a[0] + 8, BigInt((ms % 1000) * 1000)); return 0n; }
       case 'nanosleep': case 'clock_nanosleep': return 0n;
       case 'uname': { ['Linux', 'wali', '6.1.0-wali', '#1 WALI-browser', 'wasm32', ''].forEach((s, i) => S.wstr(a[0] + i * 65, s, 65)); return 0n; }
       case 'getuid': case 'geteuid': case 'getgid': case 'getegid': return 1000n;
-      case 'setuid': case 'setgid': case 'setreuid': case 'setregid': case 'setresuid': case 'setresgid': case 'getgroups': return 0n;
+      case 'setuid': case 'setgid': case 'setreuid': case 'setregid': case 'setresuid': case 'setresgid': case 'getgroups': case 'setgroups': return 0n;
+      case 'chroot': return 0n;
       case 'getpid': return BigInt(S.inChild() ? S.childStack[S.childStack.length - 1].pid : S.pid);
       case 'getppid': return 1n; case 'gettid': return BigInt(S.pid);
       case 'getpgid': return BigInt(S.pid); case 'setpgid': case 'setsid': return 0n;
@@ -592,15 +633,27 @@ class Process {
       case 'socket': { const dom = a[0] & 0xff, type = a[1] & 0xff, nonblock = !!(a[1] & 0x800);
         if (dom !== 2 && dom !== 10) return err(E.NOSYS);
         const br = initWisp();
-        if (type === 2) { const r = br.call(br.OP.UDP, 0, 0, 0); if (r.res < 0) return BigInt(r.res); const g = S.nextFd++; S.fds.set(g, { sock: { id: r.res, udp: true, nonblock } }); return BigInt(g); }
-        const g = S.nextFd++; S.fds.set(g, { sock: { id: 0, dom, nonblock } }); return BigInt(g); }
+        if (type === 2) { const r = br.call(br.OP.UDP, 0, 0, 0); if (r.res < 0) return BigInt(r.res); const g = S.allocFd(); S.fds.set(g, { sock: { id: r.res, udp: true, nonblock } }); return BigInt(g); }
+        const g = S.allocFd(); S.fds.set(g, { sock: { id: 0, dom, nonblock } }); return BigInt(g); }
       case 'bind': return 0n;
       case 'connect': { const h = S.fds.get(a[0]); if (!h || !h.sock) return err(E.BADF); S.refresh();
         const dst = readSockaddr(S, a[1]);
         if (h.sock.udp) { h.sock.dest = dst; return 0n; }
         const br = initWisp(); const spec = te.encode(`${dst.ip}|${dst.port}`);
         const r = br.call(br.OP.CONNECT, spec.length, 0, 0, spec); if (r.res < 0) return BigInt(r.res); h.sock.id = r.res; return 0n; }
-      case 'sendto': case 'sendmsg': { const h = S.fds.get(a[0]); if (!h || !h.sock) return err(E.BADF);
+      case 'sendto': case 'sendmsg': { const h = S.fds.get(a[0]); if (!h) return err(E.BADF);
+        if (h.spair) { S.refresh(); let payload;
+          if (name === 'sendmsg') {
+            const iov = S.r32(a[1] + 8), iovn = S.r32(a[1] + 12); const parts = [];
+            for (let i = 0; i < iovn; i++) { const p = S.r32(iov + i * 8), l = S.r32(iov + i * 8 + 4); if (l) parts.push(S.u8.slice(p, p + l)); }
+            payload = concatU8(parts);
+            const ctl = S.r32(a[1] + 20), ctllen = S.r32(a[1] + 24);
+            if (ctl && ctllen >= 16) { const clen = S.r32(ctl), lvl = S.r32(ctl + 8), typ = S.r32(ctl + 12);
+              if (lvl === 1 && typ === 1) { const nf = (clen - 16) >> 2; h.spair.wr.fds = h.spair.wr.fds || [];
+                for (let i = 0; i < nf; i++) { const fd = S.r32(ctl + 16 + i * 4); const hh = S.fds.get(fd); if (hh) { h.spair.wr.fds.push({ ...hh, shared: true }); S.bumpFifo(hh); } } } }
+          } else payload = S.u8.slice(a[1], a[1] + a[2]);
+          h.spair.wr.chunks.push(payload); wakePipe(h.spair.wr); return BigInt(payload.length); }
+        if (!h.sock) return err(E.BADF);
         const br = initWisp(); S.refresh(); let payload, dest = h.sock.dest;
         if (name === 'sendmsg') { const np = S.r32(a[1]); if (np) dest = readSockaddr(S, np);
           const iov = S.r32(a[1] + 8), iovn = S.r32(a[1] + 12); const parts = [];
@@ -611,7 +664,17 @@ class Process {
           const addr = te.encode(`${dest.ip}|${dest.port}`); const packed = new Uint8Array(payload.length + addr.length); packed.set(payload, 0); packed.set(addr, payload.length);
           const r = br.call(br.OP.SENDTO, h.sock.id, payload.length, addr.length, packed); return BigInt(r.res); }
         const r = br.call(br.OP.SEND, h.sock.id, payload.length, 0, payload); return BigInt(r.res); }
-      case 'recvmsg': case 'recvfrom': { const h = S.fds.get(a[0]); if (!h || !h.sock) return err(E.BADF);
+      case 'recvmsg': case 'recvfrom': { const h = S.fds.get(a[0]); if (!h) return err(E.BADF);
+        if (h.spair) { S.refresh();
+          if (!h.spair.rd.chunks.length && (!h.spair.rd.fds || !h.spair.rd.fds.length)) { if (h.spair.rd.writers <= 0) return 0n; if (h.nonblock) return err(E.AGAIN); }
+          const iov = S.r32(a[1] + 8), iovn = S.r32(a[1] + 12); let total = 0;
+          for (let i = 0; i < iovn; i++) { const p = S.r32(iov + i * 8), l = S.r32(iov + i * 8 + 4); if (!l) continue; const b = pipeRead(h.spair.rd, l); if (!b.length) break; S.wbytes(p, b); total += b.length; if (b.length < l) break; }
+          const ctl = S.r32(a[1] + 20), ctllen = S.r32(a[1] + 24);
+          if (ctl && ctllen >= 16 && h.spair.rd.fds && h.spair.rd.fds.length) { const hh = h.spair.rd.fds.shift(); const g = S.allocFd(); S.fds.set(g, hh);
+            S.i32(ctl, 20); S.i32(ctl + 8, 1); S.i32(ctl + 12, 1); S.i32(ctl + 16, g); S.i32(a[1] + 24, 20);
+          } else if (ctl) S.i32(a[1] + 24, 0);
+          return BigInt(total); }
+        if (!h.sock) return err(E.BADF);
         const br = initWisp(); const op = h.sock.udp ? br.OP.RECVFROM : br.OP.RECV;
         if (h.sock.nonblock) { const pk = br.call(br.OP.POLL, h.sock.id, 0, 0); if (pk.res <= 0) return err(E.AGAIN); }
         if (name === 'recvfrom') { const r = br.call(op, h.sock.id, a[2], 0); if (r.res <= 0) return BigInt(r.res); S.wbytes(a[1], r.data.subarray(0, r.res));
@@ -628,16 +691,31 @@ class Process {
     }
   }
 
-  bumpFifo(h) { if (h && h.fifo) { if (h.end === 'w') h.fifo.writers++; else if (h.end === 'r') h.fifo.readers++; } }
-
   // ---- JSPI: async syscall path (only the blocking ones; the rest delegate to sys) ----
   async sysAsync(name, a) {
     const S = this;
     switch (name) {
       case 'read': case 'readv': {
         const h = S.fds.get(a[0]);
-        if (h && h.fifo) { while (!h.fifo.chunks.length && h.fifo.writers > 0) { pipeSuspends++; await new Promise(res => h.fifo.readWaiters.push(res)); } return S.sys(name, a); }
+        if (h && h.std === 0 && !h.nonblock) { while (!stdinChunks.length && !stdinEOF) { pipeSuspends++; await new Promise(res => stdinWaiters.push(res)); } return S.sys(name, a); }
+        if (h && h.pty !== undefined && !h.nonblock) { const p = ptys.get(h.pty); const q = () => h.master ? p.toMaster : p.toSlave; const wl = h.master ? p.masterWaiters : p.slaveWaiters;
+          while (!q().length) { pipeSuspends++; await new Promise(res => wl.push(res)); } return S.sys(name, a); }
+        if (h && h.fifo && !h.nonblock) { while (!h.fifo.chunks.length && h.fifo.writers > 0) { pipeSuspends++; await new Promise(res => h.fifo.readWaiters.push(res)); } return S.sys(name, a); }
+        if (h && h.spair && !h.nonblock) { while (!h.spair.rd.chunks.length && h.spair.rd.writers > 0) { pipeSuspends++; await new Promise(res => h.spair.rd.readWaiters.push(res)); } return S.sys(name, a); }
         return S.sys(name, a);
+      }
+      case 'recvmsg': {
+        const h = S.fds.get(a[0]);
+        if (h && h.spair && !h.nonblock) { while (!h.spair.rd.chunks.length && (!h.spair.rd.fds || !h.spair.rd.fds.length) && h.spair.rd.writers > 0) { pipeSuspends++; await new Promise(res => h.spair.rd.readWaiters.push(res)); } }
+        return S.sys(name, a);
+      }
+      case 'execve': {
+        const p = S.cstr(a[0]); const argv = S.rPtrArray(a[1]); const envp = a[2] ? S.rPtrArray(a[2]) : [];
+        if (!S.inChild()) { const code = await runProgramAsync(p, argv, envp, S.fds, S.cwd.p, S.modKey); if (code === null) return err(E.NOENT); throw new ExitError(code); }
+        const fdsnap = S.fds; const ctx = S.childStack.pop(); S.fds = ctx.savedFds; const childPid = ctx.pid;
+        const task = runProgramAsync(p, argv, envp, fdsnap, S.cwd.p, S.modKey).then((code) => { S.reaped.set(childPid, code === null ? 127 : code); releaseFds(fdsnap); S.childTasks.delete(childPid); wakeWaiters(S); });
+        inflight.add(task); task.finally(() => inflight.delete(task)); S.childTasks.set(childPid, task);
+        return CHILD_DONE;
       }
       case 'nanosleep': case 'clock_nanosleep': {
         const tp = name === 'nanosleep' ? a[0] : a[2];
@@ -667,17 +745,19 @@ class Process {
   async pollAsync(name, a) {
     const S = this; const nfds = a[1];
     const timeout = name === 'poll' ? (a[2] | 0) : -1;
-    const evalReady = () => { S.refresh(); let ready = 0; const waitFifos = [];
+    const evalReady = () => { S.refresh(); let ready = 0; const waitFifos = []; const waitPtys = []; let waitStdin = false;
       for (let i = 0; i < nfds; i++) {
         const fd = S.r32(a[0] + i * 8), ev = S.dv.getInt16(a[0] + i * 8 + 4, true);
         const h = S.fds.get(fd); let re = 0;
-        if (h && h.fifo) { const rdy = h.fifo.chunks.length || h.fifo.writers <= 0; if ((ev & 1) && rdy) re |= 1; if (ev & 4) re |= 4; if (!rdy) waitFifos.push(h.fifo); }
+        if (h && h.std === 0) { const rdy = stdinChunks.length || stdinEOF; if ((ev & 1) && rdy) re |= 1; if (ev & 4) re |= 4; if (!rdy) waitStdin = true; }
+        else if (h && h.fifo) { const rdy = h.fifo.chunks.length || h.fifo.writers <= 0; if ((ev & 1) && rdy) re |= 1; if (ev & 4) re |= 4; if (!rdy) waitFifos.push(h.fifo); }
+        else if (h && h.spair) { const rdy = h.spair.rd.chunks.length || h.spair.rd.writers <= 0; if ((ev & 1) && rdy) re |= 1; if (ev & 4) re |= 4; if (!rdy) waitFifos.push(h.spair.rd); }
         else if (h && h.sock && h.sock.id) { const pk = initWisp().call(initWisp().OP.POLL, h.sock.id, 0, 0); if ((ev & 1) && pk.res > 0) re |= 1; if (ev & 4) re |= 4; }
-        else if (h && h.pty !== undefined) { const p = ptys.get(h.pty); const q = h.master ? p.toMaster : p.toSlave; if ((ev & 1) && q.length) re |= 1; if (ev & 4) re |= 4; }
+        else if (h && h.pty !== undefined) { const p = ptys.get(h.pty); const q = h.master ? p.toMaster : p.toSlave; if ((ev & 1) && q.length) re |= 1; if (ev & 4) re |= 4; if (!q.length) waitPtys.push(h.master ? p.masterWaiters : p.slaveWaiters); }
         else re = ev & 5;
         S.dv.setInt16(a[0] + i * 8 + 6, re, true); if (re) ready++;
       }
-      return { ready, waitFifos };
+      return { ready, waitFifos, waitPtys, waitStdin };
     };
     for (;;) {
       const r = evalReady();
@@ -685,8 +765,10 @@ class Process {
       if (timeout === 0) return 0n;
       const woke = await new Promise(res => { let done = false; const fin = (v) => { if (!done) { done = true; res(v); } };
         for (const f of r.waitFifos) f.readWaiters.push(() => fin(true));
+        for (const wl of r.waitPtys) wl.push(() => fin(true));
+        if (r.waitStdin) stdinWaiters.push(() => fin(true));
         if (timeout > 0) setTimeout(() => fin(false), timeout);
-        else if (!r.waitFifos.length) setTimeout(() => fin(false), 50);
+        else if (!r.waitFifos.length && !r.waitPtys.length && !r.waitStdin) setTimeout(() => fin(false), 50);
       });
       if (timeout > 0 && woke === false) return BigInt(evalReady().ready);
     }
@@ -695,6 +777,7 @@ class Process {
   makeImports(mod) {
     const wali = {}; const extra = {};
     const S = this;
+    S._asyncifyCap = WebAssembly.Module.exports(mod).some(e => e.name === 'asyncify_start_unwind'); // real fork() via Asyncify
     const needWasi = WebAssembly.Module.imports(mod).some(i => i.module === 'wasi_snapshot_preview1');
     const wasi = needWasi ? this.makeWasi() : null;
     for (const im of WebAssembly.Module.imports(mod)) {
@@ -723,7 +806,16 @@ class Process {
       else if (name.startsWith('SYS_')) {
         const sysname = name.slice(4);
         const map = (a2) => a2.map(x => typeof x === 'bigint' && sysname !== 'mmap' ? Number(x) : x);
-        if (JSPI && BLOCKING.has(sysname)) { // suspend-capable: yields to the scheduler while blocked
+        if (JSPI && S._asyncifyCap && sysname === 'fork') { // real fork() via Asyncify (returns twice)
+          wali[name] = () => {
+            S.syscalls++; syscallTotal++;
+            if (S.forkState === 'rewinding') { S.inst.exports.asyncify_stop_rewind(); S.forkState = 'none'; return S.forkRet; }
+            if (!S.asyncifyBuf) { const old = S.memory.buffer.byteLength; S.memory.grow(ASYNC_PAGES); S.asyncifyBuf = old; S.refresh(); }
+            const d = new DataView(S.memory.buffer);
+            d.setUint32(S.asyncifyBuf, S.asyncifyBuf + 8, true); d.setUint32(S.asyncifyBuf + 4, S.asyncifyBuf + ASYNC_PAGES * PAGE, true);
+            S.inst.exports.asyncify_start_unwind(S.asyncifyBuf); S.forkState = 'unwinding'; return 0n;
+          };
+        } else if (JSPI && BLOCKING.has(sysname)) { // suspend-capable: yields to the scheduler while blocked
           wali[name] = new WebAssembly.Suspending(async (...a2) => { S.syscalls++; syscallTotal++; return await S.sysAsync(sysname, map(a2)); });
         } else {
           wali[name] = (...a2) => { S.syscalls++; syscallTotal++; return S.sys(sysname, map(a2)); };
@@ -798,25 +890,53 @@ class Process {
     procCount++;
     const mod = modCache.get(this.modKey);
     if (!mod) { post(`[host] no module for ${this.modKey}\n`, 2); return 127; }
-    const inst = new WebAssembly.Instance(mod, this.makeImports(mod));
-    this.memory = inst.exports.memory; this.membuf = null; this.refresh();
-    const start = WebAssembly.promising(inst.exports._start);
-    try { await start(); return 0; }
-    catch (e) {
-      if (e instanceof ExitError) return e.code & 0xff;
-      post(`[host] trap in pid ${this.pid}: ${e.stack || e}\n`, 2);
-      return 139;
+    this.inst = new WebAssembly.Instance(mod, this.makeImports(mod));
+    this.memory = this.inst.exports.memory; this.membuf = null; this.refresh();
+    return this._drive(false);
+  }
+
+  async _drive(rewind) {
+    const start = WebAssembly.promising(this.inst.exports._start);
+    if (rewind) this.inst.exports.asyncify_start_rewind(this.asyncifyBuf);
+    for (;;) {
+      try { await start(); }
+      catch (e) { if (e instanceof ExitError) return e.code & 0xff; post(`[host] trap in pid ${this.pid}: ${e.stack || e}\n`, 2); return 139; }
+      if (this.forkState !== 'unwinding') return 0;
+      this.inst.exports.asyncify_stop_unwind();
+      const childPid = nextPid++;
+      const child = this.spawnForkChild(childPid);
+      const ctask = child._drive(true).then((code) => { releaseFds(child.fds); this.reaped.set(childPid, code); this.childTasks.delete(childPid); wakeWaiters(this); });
+      inflight.add(ctask); ctask.finally(() => inflight.delete(ctask));
+      this.childTasks.set(childPid, ctask);
+      this.forkRet = BigInt(childPid); this.forkState = 'rewinding';
+      this.inst.exports.asyncify_start_rewind(this.asyncifyBuf);
     }
+  }
+
+  spawnForkChild(childPid) {
+    const mod = modCache.get(this.modKey);
+    const child = new Process(this.modKey, this.argv, this.env, new Map(), this.cwd.p);
+    child.pid = childPid;
+    child.fds = new Map([...this.fds].map(([k, v]) => [k, { ...v, shared: true }]));
+    for (const v of child.fds.values()) child.bumpFifo(v);
+    child.heapBrk = this.heapBrk; child.ctty = this.ctty;
+    child.inst = new WebAssembly.Instance(mod, child.makeImports(mod));
+    child.memory = child.inst.exports.memory; child.membuf = null; child.refresh();
+    const need = this.memory.buffer.byteLength - child.memory.buffer.byteLength;
+    if (need > 0) child.memory.grow(Math.ceil(need / PAGE));
+    new Uint8Array(child.memory.buffer).set(new Uint8Array(this.memory.buffer));
+    child.membuf = null; child.refresh();
+    child.asyncifyBuf = this.asyncifyBuf; child.forkState = 'rewinding'; child.forkRet = 0n;
+    return child;
   }
 }
 
-function resolveExecKey(p, cwd, selfKey) {
+function runProgram(p, argv, envp, fdTable, cwd, selfKey) {
   let key = resolveModuleKey(p, selfKey);
   if (!key) {
     // not in the manifest — maybe it's a wasm binary sitting in the VFS
-    // (e.g. one microcc just emitted, or a file under the OPFS mount).
+    // (e.g. one microcc just emitted). Compile it from its bytes and run.
     const vp = p.startsWith('/') ? norm(p, '/') : norm(p, cwd);
-    opfsFault(vp);
     const f = files.get(vp);
     if (f) {
       const bytes = f.br !== undefined ? fileRead(f, 0, f.size) : f.data.subarray(0, f.size);
@@ -826,24 +946,26 @@ function resolveExecKey(p, cwd, selfKey) {
       }
     }
   }
-  // busybox multi-call fallback (same as the node host): any still-unresolved
-  // name runs busybox, which dispatches on argv[0].
-  if ((!key || !modCache.has(key)) && manifest['busybox']) key = manifest['busybox'];
   if (!key || !modCache.has(key)) { post(`[host] execve: cannot resolve ${p}\n`, 2); return null; }
-  return key;
-}
-
-function runProgram(p, argv, envp, fdTable, cwd, selfKey) {
-  const key = resolveExecKey(p, cwd, selfKey);
-  if (!key) return null;
   const proc = new Process(key, argv, envp, fdTable, cwd);
   return proc.run();
 }
 
 // JSPI variant: run the child concurrently (its blocking syscalls suspend, not stall)
 async function runProgramAsync(p, argv, envp, fdTable, cwd, selfKey) {
-  const key = resolveExecKey(p, cwd, selfKey);
-  if (!key) return null;
+  let key = resolveModuleKey(p, selfKey);
+  if (!key) {
+    const vp = p.startsWith('/') ? norm(p, '/') : norm(p, cwd);
+    const f = files.get(vp);
+    if (f) {
+      const bytes = f.br !== undefined ? fileRead(f, 0, f.size) : f.data.subarray(0, f.size);
+      if (bytes[0] === 0 && bytes[1] === 0x61 && bytes[2] === 0x73 && bytes[3] === 0x6d) {
+        key = 'vfs:' + vp;
+        if (!modCache.has(key)) modCache.set(key, new WebAssembly.Module(bytes.slice()));
+      }
+    }
+  }
+  if (!key || !modCache.has(key)) { post(`[host] execve: cannot resolve ${p}\n`, 2); return null; }
   const proc = new Process(key, argv, envp, fdTable, cwd);
   return await proc.runAsync();
 }
@@ -854,6 +976,8 @@ self.onmessage = async (ev) => {
   if (m.t === 'stdin-sab') { stdinCtl = new Int32Array(m.sab, 0, 4); stdinData = new Uint8Array(m.sab, 16); return; }
   if (m.t === 'wisp-sab') { wispSab = m.sab; return; }
   if (m.t === 'opfs-sab') { opfsSab = m.sab; return; }
+  if (m.t === 'stdin') { pushStdin(typeof m.data === 'string' ? te.encode(m.data) : new Uint8Array(m.data)); return; } // async stdin (JSPI)
+  if (m.t === 'stdin-eof') { stdinEOF = true; const w = stdinWaiters; stdinWaiters = []; for (const f of w) f(); return; }
   if (m.t !== 'run') return;
   try {
     const boot0 = performance.now();
@@ -881,7 +1005,7 @@ self.onmessage = async (ev) => {
     }
     const rootFds = new Map([[0, { std: 0 }], [1, { std: 1 }], [2, { std: 2 }]]);
     const env = Object.entries(m.env || {}).map(([k, v]) => k + '=' + v);
-    nextPid = 100; syscallTotal = 0; procCount = 0;
+    nextPid = 100; syscallTotal = 0; procCount = 0; stdinChunks = []; stdinEOF = false; stdinWaiters = [];
     JSPI = !!m.jspi && jspiAvailable;
     if (m.jspi && !jspiAvailable) post('[host] jspi requested but unavailable in this browser; using synchronous model\n', 2);
     pipeSuspends = 0; waitSuspends = 0;
