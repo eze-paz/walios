@@ -24,9 +24,9 @@ function initSockBridge() {
     const prev = Atomics.load(ctl, 1);
     Atomics.add(ctl, 0, 1); Atomics.notify(ctl, 0);
     while (Atomics.load(ctl, 1) === prev) Atomics.wait(ctl, 1, prev);
-    return { res: ctl[6], data };
+    return { res: ctl[6], aux: ctl[7], data };
   };
-  sockBridge = { call, OP: { CONNECT: 1, SEND: 2, RECV: 3, CLOSE: 4, POLL: 5, UDP: 6, SENDTO: 7, RECVFROM: 8 } };
+  sockBridge = { call, OP: { CONNECT: 1, SEND: 2, RECV: 3, CLOSE: 4, POLL: 5, UDP: 6, SENDTO: 7, RECVFROM: 8, LISTEN: 9, ACCEPT: 10 } };
   return sockBridge;
 }
 
@@ -80,7 +80,7 @@ const JSPI = !!process.env.WALI_JSPI && typeof WebAssembly.Suspending === 'funct
           && typeof WebAssembly.promising === 'function';
 if (process.env.WALI_JSPI && !JSPI) process.stderr.write('[wali-host] WALI_JSPI set but JSPI unavailable (need node 24 + --experimental-wasm-jspi); using synchronous model\n');
 // syscalls that may block -> wrapped as WebAssembly.Suspending in JSPI mode
-const BLOCKING = new Set(['read', 'readv', 'wait4', 'poll', 'ppoll', 'nanosleep', 'clock_nanosleep', 'execve', 'recvmsg', 'pause', 'sigsuspend']);
+const BLOCKING = new Set(['read', 'readv', 'wait4', 'poll', 'ppoll', 'nanosleep', 'clock_nanosleep', 'execve', 'recvmsg', 'pause', 'sigsuspend', 'rt_sigsuspend', 'accept', 'accept4']);
 const ASYNC_PAGES = 16;               // 1MB asyncify unwind buffer (grown at first fork)
 const QUANTUM_MS = 10;                // JSPI preemption: max run between event-loop yields
 const inflight = new Set();           // live child task promises (keeps event loop alive)
@@ -179,11 +179,21 @@ function wakeWaiters(S) { if (S.waitWaiters.length) { const w = S.waitWaiters; S
 // binary linked with -Wl,--export-table; without the table, handled signals
 // degrade to their default action (SIG_IGN is always honored). ----
 const SIG = { HUP:1, INT:2, QUIT:3, ILL:4, ABRT:6, KILL:9, USR1:10, SEGV:11, USR2:12, PIPE:13, ALRM:14, TERM:15, CHLD:17, CONT:18, STOP:19, TSTP:20, TTIN:21, TTOU:22, URG:23, WINCH:28 };
-const SIG_DFL_IGNORE = new Set([SIG.CHLD, SIG.CONT, SIG.STOP, SIG.TSTP, SIG.TTIN, SIG.TTOU, SIG.URG, SIG.WINCH]);
+const SIG_DFL_IGNORE = new Set([SIG.CHLD, SIG.CONT, SIG.URG, SIG.WINCH]);
+const SIG_STOPPERS = new Set([SIG.STOP, SIG.TSTP, SIG.TTIN, SIG.TTOU]);
 const procs = new Map();              // live pid -> Process (kill routing)
 let rootProc = null;                  // the tree root (fallback Ctrl-C target)
+// SysV shared memory: segments are host-side buffers; a process snapshots the
+// content in at shmat and writes it back at shmdt/exit. Coherent for
+// vfork-in-place children (same instance memory); forked children see the
+// attach-time snapshot — LIVE cross-process stores need same-memory domains
+// (--import-memory process groups), which wasm can't retrofit per-mapping.
+const shmSegs = new Map(), shmById = new Map(); let nextShmId = 1;
 function postSignal(P, sig) {
   if (!P || !sig) return;
+  if (sig === SIG.CONT) { for (const st of SIG_STOPPERS) P.sig.pending.delete(st); // POSIX: CONT discards pending stops
+    if (P.stopped) { P.stopped = 0; const c = P.contWaiters; P.contWaiters = []; for (const f of c) f(); } }
+  if (SIG_STOPPERS.has(sig)) P.sig.pending.delete(SIG.CONT);   // and a stop discards a pending CONT // resume regardless of disposition
   const h = P.sig.handlers.get(sig);
   if (h && (h.ptr === -2 || h.ptr === 1) && sig !== SIG.KILL) return; // SIG_IGN (this musl: -2; classic ABI: 1)
   if ((!h || !h.ptr) && SIG_DFL_IGNORE.has(sig)) return;        // default-ignore
@@ -240,10 +250,21 @@ class Process {
     this.sig = { handlers: new Map(), mask: 0n, pending: new Set(), waiters: [] };
     this.timers = new Map();         // which(0=ITIMER_REAL) -> {deadline, intervalMs, to}
     this.lastYield = 0;              // JSPI preemption quantum bookkeeping
+    this.stopped = 0;                // job control: stopping signal number, 0 = running
+    this.stopReported = false; this.contWaiters = [];
+    const u = process.env.WALI_UID !== undefined ? (+process.env.WALI_UID | 0) : 0; // root by default (sshd drops privs itself)
+    this.cred = { uid: u, euid: u, suid: u, gid: u, egid: u, sgid: u };
+    this.maps = new Map();           // MAP_SHARED file mappings: base -> {len, fd, off}
+    this.shmAt = new Map();          // SysV shm attachments: base -> segment
     procs.set(this.pid, this);
   }
 
+  msyncMap(base, m) { // write a MAP_SHARED file mapping back to its file
+    try { this.refresh(); fs.writeSync(m.fd, this.u8, base, m.len, m.off); } catch {}
+  }
   retire() {                         // process is gone: unregister + disarm timers
+    for (const [base, m] of this.maps) this.msyncMap(base, m);            // flush shared file mappings
+    try { this.refresh(); for (const [base, seg] of this.shmAt) seg.buf.set(this.u8.subarray(base, base + seg.size)); } catch {} // flush shm
     procs.delete(this.pid);
     for (const t of this.timers.values()) if (t.to) clearTimeout(t.to);
     this.timers.clear();
@@ -270,9 +291,9 @@ class Process {
     const t = { deadline: Date.now() + valueMs, intervalMs, to: null };
     if (JSPI) {                      // event-driven fire; sync model polls deadlines
       const fire = () => { postSignal(this, SIG.ALRM);
-        if (t.intervalMs > 0) { t.deadline = Date.now() + t.intervalMs; t.to = setTimeout(fire, t.intervalMs); t.to.unref && t.to.unref(); }
+        if (t.intervalMs > 0) { t.deadline = Date.now() + t.intervalMs; t.to = setTimeout(fire, t.intervalMs); }
         else this.timers.delete(which); };
-      t.to = setTimeout(fire, valueMs); t.to.unref && t.to.unref();
+      t.to = setTimeout(fire, valueMs);
     }
     this.timers.set(which, t);
   }
@@ -299,6 +320,10 @@ class Process {
           process.stderr.write(`[wali-host] pid ${this.pid}: signal handler registered but binary lacks --export-table; using default action\n`); }
       }
       if (SIG_DFL_IGNORE.has(sig)) continue;                // default-ignore
+      if (SIG_STOPPERS.has(sig)) {                          // job control: park until SIGCONT
+        if (JSPI && !this.inChild()) { this.stopped = sig; this.stopReported = false; }
+        continue;                                           // (sync model: a stopped proc would deadlock — ignore)
+      }
       if (this.inChild()) return this.parkChild({ exited: 128 + sig });
       throw new ExitError(128 + sig);                       // default-terminate
     }
@@ -530,7 +555,7 @@ class Process {
         const argv = S.rPtrArray(a[1]);
         const envp = a[2] ? S.rPtrArray(a[2]) : [];
         if (!S.inChild()) { // exec without fork: replace this process = run child, exit with its code
-          const code = runProgram(p, argv, envp, S.fds, S.cwd.p, S.modPath);
+          const code = runProgram(p, argv, envp, S.fds, S.cwd.p, S.modPath, S.cred, S.pid);
           if (code === null) return err(E.NOENT);
           throw new ExitError(code);
         }
@@ -538,13 +563,13 @@ class Process {
         if (JSPI) { // spawn the child as a CONCURRENT task; parent longjmps back and keeps running
           const ctx = S.childStack.pop(); S.fds = ctx.savedFds; // restore parent's fd view
           const childPid = ctx.pid;
-          const task = runProgramAsync(p, argv, envp, fdsnap, S.cwd.p, S.modPath)
+          const task = runProgramAsync(p, argv, envp, fdsnap, S.cwd.p, S.modPath, S.cred, childPid)
             .then((code) => { S.reaped.set(childPid, code === null ? 127 : code); releaseFds(fdsnap); S.childTasks.delete(childPid); postSignal(S, SIG.CHLD); wakeWaiters(S); });
           inflight.add(task); task.finally(() => inflight.delete(task));
           S.childTasks.set(childPid, task);
           return CHILD_DONE;
         }
-        const r = S.parkChild({ exec: { path: p, argv, envp, fds: fdsnap, cwd: S.cwd.p, selfPath: S.modPath } });
+        const r = S.parkChild({ exec: { path: p, argv, envp, fds: fdsnap, cwd: S.cwd.p, selfPath: S.modPath, cred: { ...S.cred } } });
         return r; }
       case 'exit': case 'exit_group': {
         if (S.inChild()) return S.parkChild({ exited: a[0] & 0xff });
@@ -555,7 +580,7 @@ class Process {
         while (S.pending.length) {
           const c = S.pending.shift();
           if (c.exited !== undefined) { S.reaped.set(c.pid, c.exited); continue; }
-          const code = runProgram(c.exec.path, c.exec.argv, c.exec.envp, c.exec.fds, c.exec.cwd, c.exec.selfPath);
+          const code = runProgram(c.exec.path, c.exec.argv, c.exec.envp, c.exec.fds, c.exec.cwd, c.exec.selfPath, c.exec.cred, c.pid);
           S.reaped.set(c.pid, code === null ? 127 : code);
         }
         let pid = -1;
@@ -570,14 +595,42 @@ class Process {
         if (a[0] === 0 || a[0] <= S.heapBrk) return BigInt(S.heapBrk); return err(E.NOMEM); }
       case 'mmap': {
         const n = Math.ceil(a[1] / PAGE); const base = S.growPages(n);
-        if (!(a[3] & 0x20)) {
+        if (!(a[3] & 0x20)) { // file-backed
           const h = S.fds.get(a[4]); if (!h || h.fd === undefined) return err(E.BADF);
           const buf = Buffer.alloc(a[1]);
           const got = fs.readSync(h.fd, buf, 0, a[1], Number(a[5]));
           S.wbytes(base, buf.subarray(0, got));
+          if (a[3] & 0x1) S.maps.set(base, { len: a[1], fd: h.fd, off: Number(a[5]) }); // MAP_SHARED: writeback at msync/munmap
         }
         return BigInt(base); }
-      case 'munmap': case 'mprotect': case 'madvise': return 0n;
+      case 'pread64': { const h = S.fds.get(a[0]); if (!h || h.fd === undefined) return err(E.BADF);
+        const b = Buffer.alloc(a[2]); let got = 0;
+        try { got = fs.readSync(h.fd, b, 0, a[2], Number(a[3])); } catch (e) { return sysErr(e); }
+        S.wbytes(a[1], b.subarray(0, got)); return BigInt(got); }
+      case 'pwrite64': { const h = S.fds.get(a[0]); if (!h || h.fd === undefined) return err(E.BADF);
+        S.refresh();
+        try { return BigInt(fs.writeSync(h.fd, S.u8, a[1], a[2], Number(a[3]))); } catch (e) { return sysErr(e); } }
+      case 'msync': { const m = S.maps.get(a[0] >>> 0); if (m) S.msyncMap(a[0] >>> 0, m); return 0n; }
+      case 'munmap': { const m = S.maps.get(a[0] >>> 0); if (m) { S.msyncMap(a[0] >>> 0, m); S.maps.delete(a[0] >>> 0); } return 0n; }
+      case 'mprotect': case 'madvise': return 0n;
+      case 'shmget': { // key -> segment id; content lives host-side, snapshot in/out at attach/detach
+        const key = a[0] | 0, size = a[1] >>> 0, flags = a[2] | 0;
+        let seg = key !== 0 ? shmSegs.get(key) : null;
+        if (!seg) {
+          if (key !== 0 && !(flags & 0o1000)) return err(E.NOENT); // no IPC_CREAT
+          seg = { id: nextShmId++, key, buf: Buffer.alloc(size), size };
+          shmSegs.set(key || -seg.id, seg); shmById.set(seg.id, seg);
+        }
+        return BigInt(seg.id); }
+      case 'shmat': { const seg = shmById.get(a[0] | 0); if (!seg) return err(E.INVAL);
+        const base = S.growPages(Math.ceil(seg.size / PAGE));
+        S.wbytes(base, seg.buf);
+        S.shmAt.set(base, seg);
+        return BigInt(base); }
+      case 'shmdt': { const base = a[0] >>> 0; const seg = S.shmAt.get(base); if (!seg) return err(E.INVAL);
+        S.refresh(); seg.buf.set(S.u8.subarray(base, base + seg.size)); // writeback
+        S.shmAt.delete(base); return 0n; }
+      case 'shmctl': { if ((a[1] | 0) === 0) { const seg = shmById.get(a[0] | 0); if (seg) { shmById.delete(seg.id); shmSegs.delete(seg.key || -seg.id); } } return 0n; } // IPC_RMID
       case 'mremap': { if (a[2] <= a[1]) return BigInt(a[0]);
         const b = Number(S.sys('mmap', [0, a[2], 3, 0x22, -1, 0n])); S.refresh(); S.u8.copyWithin(b, a[0], a[0] + a[1]); return BigInt(b); }
       case 'getdents64': {
@@ -643,9 +696,9 @@ class Process {
           ms = end - Date.now();
         }
         return 0n; }
-      case 'pause': case 'sigsuspend': { // sync model: sliced wait for a signal
+      case 'pause': case 'sigsuspend': case 'rt_sigsuspend': { // sync model: sliced wait for a signal
         const oldMask = S.sig.mask;
-        if (name === 'sigsuspend' && a[0]) { S.refresh(); S.sig.mask = BigInt.asUintN(64, S.r64(a[0])); }
+        if (name !== 'pause' && a[0]) { S.refresh(); S.sig.mask = BigInt.asUintN(64, S.r64(a[0])); }
         try {
           for (;;) {
             if (S.sig.pending.size) { S.sigDelivered = false; const dv = S.predeliver(); if (dv !== null) return dv; if (S.sigDelivered) return err(E.INTR); }
@@ -677,15 +730,37 @@ class Process {
         t.deadline = 0; t.intervalMs = ivMs; t.count = 0;
         if (vMs > 0) { t.deadline = Date.now() + vMs;
           if (JSPI) { const fire = () => { t.count++; const w = t.waiters; t.waiters = []; for (const f of w) f('t');
-              if (t.intervalMs > 0) { t.deadline = Date.now() + t.intervalMs; t.to = setTimeout(fire, t.intervalMs); if (t.to.unref) t.to.unref(); } else { t.deadline = 0; t.to = null; } };
-            t.to = setTimeout(fire, vMs); if (t.to.unref) t.to.unref(); } }
+              if (t.intervalMs > 0) { t.deadline = Date.now() + t.intervalMs; t.to = setTimeout(fire, t.intervalMs); } else { t.deadline = 0; t.to = null; } };
+            t.to = setTimeout(fire, vMs); } }
         return 0n; }
       case 'timerfd_gettime': { const h = S.fds.get(a[0]); if (!h || !h.tfd) return err(E.BADF); S.refresh();
         S.wrTs(a[1], h.tfd.intervalMs); S.wrTs(a[1] + 16, h.tfd.deadline ? Math.max(0, h.tfd.deadline - Date.now()) : 0);
         return 0n; }
       case 'uname': { ['Linux', 'wali', '6.1.0-wali', '#1 WALI-js', 'wasm32', ''].forEach((s, i) => S.wstr(a[name === 'uname' ? 0 : 2] + i * 65, s, 65)); return 0n; }
-      case 'getuid': case 'geteuid': case 'getgid': case 'getegid': return 1000n;
-      case 'setuid': case 'setgid': case 'setreuid': case 'setregid': case 'setresuid': case 'setresgid': case 'getgroups': case 'setgroups': return 0n;
+      case 'getuid': return BigInt(S.cred.uid); case 'geteuid': return BigInt(S.cred.euid);
+      case 'getgid': return BigInt(S.cred.gid); case 'getegid': return BigInt(S.cred.egid);
+      case 'setuid': { const u = a[0] | 0; // root drops all ids; others may only toggle to real uid
+        if (S.cred.euid === 0) { S.cred.uid = S.cred.euid = S.cred.suid = u; return 0n; }
+        if (u === S.cred.uid || u === S.cred.suid) { S.cred.euid = u; return 0n; }
+        return err(E.PERM); }
+      case 'setgid': { const g = a[0] | 0;
+        if (S.cred.euid === 0) { S.cred.gid = S.cred.egid = S.cred.sgid = g; return 0n; }
+        if (g === S.cred.gid || g === S.cred.sgid) { S.cred.egid = g; return 0n; }
+        return err(E.PERM); }
+      case 'setreuid': case 'setresuid': { const ids = name === 'setreuid' ? [a[0] | 0, a[1] | 0, -1] : [a[0] | 0, a[1] | 0, a[2] | 0];
+        const ok = (x) => x === -1 || S.cred.euid === 0 || x === S.cred.uid || x === S.cred.euid || x === S.cred.suid;
+        if (!ids.every(ok)) return err(E.PERM);
+        if (ids[0] !== -1) S.cred.uid = ids[0]; if (ids[1] !== -1) S.cred.euid = ids[1]; if (ids[2] !== -1) S.cred.suid = ids[2];
+        return 0n; }
+      case 'setregid': case 'setresgid': { const ids = name === 'setregid' ? [a[0] | 0, a[1] | 0, -1] : [a[0] | 0, a[1] | 0, a[2] | 0];
+        const ok = (x) => x === -1 || S.cred.euid === 0 || x === S.cred.gid || x === S.cred.egid || x === S.cred.sgid;
+        if (!ids.every(ok)) return err(E.PERM);
+        if (ids[0] !== -1) S.cred.gid = ids[0]; if (ids[1] !== -1) S.cred.egid = ids[1]; if (ids[2] !== -1) S.cred.sgid = ids[2];
+        return 0n; }
+      case 'getresuid': { S.i32(a[0], S.cred.uid); S.i32(a[1], S.cred.euid); S.i32(a[2], S.cred.suid); return 0n; }
+      case 'getresgid': { S.i32(a[0], S.cred.gid); S.i32(a[1], S.cred.egid); S.i32(a[2], S.cred.sgid); return 0n; }
+      case 'getgroups': return 0n;
+      case 'setgroups': return S.cred.euid === 0 ? 0n : err(E.PERM);
       case 'chroot': return 0n; // no real chroot; sshd privsep chroots to /var/empty — treat as success
       case 'getpid': return BigInt(S.inChild() ? S.childStack[S.childStack.length - 1].pid : S.pid);
       case 'getppid': return 1n; case 'gettid': return BigInt(S.pid);
@@ -762,7 +837,25 @@ class Process {
         const A = S.allocFd(); S.fds.set(A, { spair: { rd: f2, wr: f1 }, nonblock: nb }); // A reads what B wrote
         const B = S.allocFd(); S.fds.set(B, { spair: { rd: f1, wr: f2 }, nonblock: nb });
         S.i32(a[3], A); S.i32(a[3] + 4, B); return 0n; }
-      case 'bind': return 0n; // no server binding; UDP auto-binds ephemeral in the bridge
+      case 'bind': { const h = S.fds.get(a[0]); if (!h || !h.sock) return err(E.BADF);
+        S.refresh(); h.sock.bindAddr = readSockaddr(S, a[1]); return 0n; } // UDP auto-binds ephemeral in the bridge
+      case 'listen': { const h = S.fds.get(a[0]); if (!h || !h.sock) return err(E.BADF);
+        const ba = h.sock.bindAddr || { ip: '0.0.0.0', port: 0 };
+        const br = initSockBridge();
+        const spec = Buffer.from(`${ba.ip === '::' ? '0.0.0.0' : ba.ip}|${ba.port}`, 'utf8');
+        const r = br.call(br.OP.LISTEN, spec.length, 0, 0, spec);
+        if (r.res < 0) return BigInt(r.res);
+        h.sock.id = r.res; h.sock.listener = true; h.sock.boundPort = r.aux;
+        return 0n; }
+      case 'accept': case 'accept4': { const h = S.fds.get(a[0]); if (!h || !h.sock || !h.sock.listener) return err(E.INVAL);
+        const br = initSockBridge();
+        const r = br.call(br.OP.ACCEPT, h.sock.id, (h.nonblock || h.sock.nonblock || JSPI) ? 1 : 0, 0);
+        if (r.res < 0) return BigInt(r.res); // EAGAIN under JSPI: sysAsync loops with suspends
+        S.refresh();
+        const [pip, pport] = Buffer.from(r.data.subarray(0, r.aux)).toString('utf8').split('|');
+        if (a[1]) { const n = writeSockaddr(S, a[1], { ip: (pip || '0.0.0.0').replace(/^::ffff:/, ''), port: +pport || 0 }); if (a[2]) S.i32(a[2], n); }
+        const g = S.allocFd(); S.fds.set(g, { sock: { id: r.res, dom: h.sock.dom, nonblock: !!(a[3] & 0x800) } });
+        return BigInt(g); }
       case 'connect': { const h = S.fds.get(a[0]); if (!h || !h.sock) return err(E.BADF);
         S.refresh();
         const dst = readSockaddr(S, a[1]);
@@ -848,7 +941,11 @@ class Process {
           if (process.env.WALI_DBG) process.stderr.write(`[dbg] recv ${r.res}B resp=${Buffer.from(r.data.subarray(0,Math.min(r.res,16))).toString('hex')}\n`);
           S.wbytes(p, r.data.subarray(0, r.res)); total += r.res; if (r.res < l) break; }
         return BigInt(total); }
-      case 'setsockopt': case 'getsockname': case 'getpeername': case 'shutdown': return 0n;
+      case 'getsockname': { const h = S.fds.get(a[0]); if (!h || !h.sock) return err(E.BADF);
+        S.refresh(); const ba = h.sock.bindAddr || { ip: '0.0.0.0', port: 0 };
+        const n = writeSockaddr(S, a[1], { ip: ba.ip === '::' ? '0.0.0.0' : ba.ip, port: h.sock.boundPort || ba.port });
+        if (a[2]) S.i32(a[2], n); return 0n; }
+      case 'setsockopt': case 'getpeername': case 'shutdown': return 0n;
       default:
         if (!unknownSyscalls.has(name)) { unknownSyscalls.add(name); process.stderr.write(`[wali-host] ENOSYS SYS_${name}\n`); }
         return err(E.NOSYS);
@@ -901,14 +998,14 @@ class Process {
         S.refresh();
         const end = Date.now() + S.sleepMs(name, a);
         while (Date.now() < end) {
-          const w = await S.sigRace(res => { const to = setTimeout(() => res('t'), Math.min(end - Date.now(), 3600000)); if (to.unref) to.unref(); });
+          const w = await S.sigRace(res => { setTimeout(() => res('t'), Math.min(end - Date.now(), 3600000)); });
           if (w === 'sig') { const v = S.onSigWake(); if (v !== null) return v; }
         }
         return 0n;
       }
-      case 'pause': case 'sigsuspend': { // suspend until a signal is DELIVERED
+      case 'pause': case 'sigsuspend': case 'rt_sigsuspend': { // suspend until a signal is DELIVERED
         const oldMask = S.sig.mask;
-        if (name === 'sigsuspend' && a[0]) { S.refresh(); S.sig.mask = BigInt.asUintN(64, S.r64(a[0])); }
+        if (name !== 'pause' && a[0]) { S.refresh(); S.sig.mask = BigInt.asUintN(64, S.r64(a[0])); }
         try {
           for (;;) {
             if (S.sig.pending.size) { const v = S.onSigWake(); if (v !== null) return v; }
@@ -927,6 +1024,15 @@ class Process {
         }
         return S.sys(name, a);
       }
+      case 'accept': case 'accept4': { // JSPI: probe + suspend so siblings run while we wait
+        const h = S.fds.get(a[0]); if (!h || !h.sock || !h.sock.listener) return err(E.INVAL);
+        for (;;) {
+          const r = S.sys(name, a);
+          if (r !== BigInt(-E.AGAIN) || h.nonblock || h.sock.nonblock) return r;
+          const w = await S.sigRace(res => { setTimeout(() => res('t'), 20); });
+          if (w === 'sig') { const v = S.onSigWake(true); if (v !== null) return v; }
+        }
+      }
       case 'wait4': return await S.wait4Async(a);
       case 'poll': case 'ppoll': return await S.pollAsync(name, a);
       case 'execve': {
@@ -934,14 +1040,14 @@ class Process {
         const argv = S.rPtrArray(a[1]);
         const envp = a[2] ? S.rPtrArray(a[2]) : [];
         if (!S.inChild()) { // exec-without-fork (e.g. sshd re-exec): run the replacement to completion, then exit with its code
-          const code = await runProgramAsync(p, argv, envp, S.fds, S.cwd.p, S.modPath);
+          const code = await runProgramAsync(p, argv, envp, S.fds, S.cwd.p, S.modPath, S.cred, S.pid);
           if (code === null) return err(E.NOENT);
           throw new ExitError(code);
         }
         // fork+exec: spawn the child as a concurrent task; parent longjmps back
         const fdsnap = S.fds;
         const ctx = S.childStack.pop(); S.fds = ctx.savedFds; const childPid = ctx.pid;
-        const task = runProgramAsync(p, argv, envp, fdsnap, S.cwd.p, S.modPath)
+        const task = runProgramAsync(p, argv, envp, fdsnap, S.cwd.p, S.modPath, S.cred, childPid)
           .then((code) => { S.reaped.set(childPid, code === null ? 127 : code); releaseFds(fdsnap); S.childTasks.delete(childPid); postSignal(S, SIG.CHLD); wakeWaiters(S); });
         inflight.add(task); task.finally(() => inflight.delete(task));
         S.childTasks.set(childPid, task);
@@ -958,8 +1064,17 @@ class Process {
       if (want > 0) { if (S.reaped.has(want)) pid = want; }
       else if (S.reaped.size) pid = S.reaped.keys().next().value;
       if (pid >= 0) { const code = S.reaped.get(pid); S.reaped.delete(pid); if (a[1]) S.i32(a[1], (code & 0xff) << 8); return BigInt(pid); }
+      if (a[2] & 2) { // WUNTRACED: report a stopped child once
+        for (const cpid of S.childTasks.keys()) {
+          if (want > 0 && cpid !== want) continue;
+          const C = procs.get(cpid);
+          if (C && C.stopped && !C.stopReported) { C.stopReported = true;
+            if (a[1]) S.i32(a[1], (C.stopped << 8) | 0x7f); return BigInt(cpid); }
+        }
+      }
       const stillRunning = want > 0 ? S.childTasks.has(want) : S.childTasks.size > 0;
       if (!stillRunning) return err(E.CHILD);
+      if (a[2] & 1) return 0n; // WNOHANG
       waitSuspends++;
       const w = await S.sigRace(res => S.waitWaiters.push(() => res('ev'))); // suspend until a child finishes
       if (w === 'sig') { const v = S.onSigWake(true); if (v !== null) return v; } // interruptible (sshd waits with SIGCHLD/EINTR)
@@ -998,7 +1113,7 @@ class Process {
         for (const f of r.waitFifos) f.readWaiters.push(() => fin(true));
         for (const wl of r.waitPtys) wl.push(() => fin(true));
         if (r.waitStdin) { startStdin(); stdinWaiters.push(() => fin(true)); }
-        if (timeout > 0) { const to = setTimeout(() => fin(false), timeout); if (to.unref) to.unref(); }
+        if (timeout > 0) setTimeout(() => fin(false), timeout);
         else if (!r.waitFifos.length && !r.waitPtys.length && !r.waitStdin) setTimeout(() => fin(false), 50);
       });
       if (woke === 'sig') { const v = S.onSigWake(); if (v !== null) return v; }
@@ -1069,6 +1184,33 @@ class Process {
         fs.writeFileSync(f, S.env.join('\n') + '\n');
         S.wstr(buf, f, sz); return 1;
       };
+      else if (name === 'log_execution') { // wasm-opt --log-execution instrumentation: a hook at every
+        // basic-block entry. This is the compute-loop preemption point: even a
+        // syscall-free spin can deliver signals, park on SIGSTOP, and yield its
+        // quantum. Opt-in per binary (build with farm/instrument-preempt.sh).
+        // V8 traps ANY Suspending call outside a promising context, and shared-memory
+        // links put an instrumented __wasm_init_memory in the START section — so
+        // preempt-instrumented binaries must be linked WITHOUT --shared-memory
+        // (see farm/instrument-preempt.sh). Under JSPI the slow path really
+        // yields/parks; in the sync model it delivers signals and timers only.
+        let fuel = 0;
+        const check = () => {                          // shared fast-path body
+          S.pollTimers();
+          S.sigDelivered = false;
+          const dv = S.predeliver(); if (dv !== null) return null;
+          const now = Date.now();
+          if (!S.stopped && now - S.lastYield < QUANTUM_MS) return null;
+          return (async () => {                        // yield / park on SIGSTOP
+            while (S.stopped) await new Promise(res => S.contWaiters.push(res));
+            S.lastYield = Date.now();
+            await new Promise(res => setImmediate(res));
+            return 0;
+          })();
+        };
+        wali[name] = JSPI
+          ? new WebAssembly.Suspending(() => { if (++fuel & 0x3fff) return 0; return check() || 0; })
+          : (() => { if (++fuel & 0x3fff) return; S.pollTimers(); if (S.sig.pending.size) { S.sigDelivered = false; S.predeliver(); } });
+      }
       else if (name === '__cl_get_argc') wali[name] = () => S.argv.length;
       else if (name === '__cl_get_argv_len') wali[name] = (i) => Buffer.byteLength(S.argv[i] || '', 'utf8');
       else if (name === '__cl_copy_argv') wali[name] = (buf, i) => S.wstr(buf, S.argv[i] || '', 0);
@@ -1098,6 +1240,8 @@ class Process {
             S.pollTimers();
             S.sigDelivered = false;
             const dv = S.predeliver(); if (dv !== null) return dv;
+            while (S.stopped) { await new Promise(res => S.contWaiters.push(res)); // SIGSTOP parks here until SIGCONT
+              const dv2 = S.predeliver(); if (dv2 !== null) return dv2; }
             const now = Date.now();
             if (now - S.lastYield >= QUANTUM_MS) { S.lastYield = now; await new Promise(res => setImmediate(res)); }
             const r = BLOCKING.has(sysname) ? await S.sysAsync(sysname, map(a2)) : S.sys(sysname, map(a2));
@@ -1193,6 +1337,7 @@ class Process {
   async _driveInner(rewind) {
     const start = WebAssembly.promising(this.inst.exports._start);
     if (rewind) this.inst.exports.asyncify_start_rewind(this.asyncifyBuf);
+    this._promised = true; // suspension is legal from here on (log_execution slow path)
     for (;;) {
       try { await start(); }
       catch (e) {
@@ -1220,7 +1365,7 @@ class Process {
     const mod = getModule(this.modPath);
     const child = new Process(this.modPath, this.argv, this.env, new Map(), this.cwd.p);
     procs.delete(child.pid);                 // re-register under the pid fork() reported
-    child.pid = childPid; child.pgid = this.pgid;
+    child.pid = childPid; child.pgid = this.pgid; child.cred = { ...this.cred };
     procs.set(childPid, child);
     child.fds = new Map([...this.fds].map(([k, v]) => [k, { ...v, shared: true }])); // COW-ish: share handle objects
     for (const v of child.fds.values()) child.bumpFifo(v);
@@ -1229,7 +1374,7 @@ class Process {
     child.memory = child.inst.exports.memory; child.membuf = null; child.refresh();
     const need = this.memory.buffer.byteLength - child.memory.buffer.byteLength;
     if (need > 0) child.memory.grow(Math.ceil(need / PAGE));
-    new Uint8Array(child.memory.buffer).set(new Uint8Array(this.memory.buffer)); // inherit parent memory (incl. asyncify stack)
+    Buffer.from(child.memory.buffer).set(Buffer.from(this.memory.buffer)); // inherit parent memory (5x faster than whole-SAB Uint8Array.set)
     child.membuf = null; child.refresh();
     child.asyncifyBuf = this.asyncifyBuf; child.forkState = 'rewinding'; child.forkRet = 0n;
     return child;
@@ -1238,7 +1383,7 @@ class Process {
 class ExitError extends Error { constructor(code) { super('exit'); this.code = code; } }
 
 // run a program synchronously, return exit code (null if module unresolvable)
-function runProgram(p, argv, envp, fdTable, cwd, selfPath) {
+function runProgram(p, argv, envp, fdTable, cwd, selfPath, cred, asPid) {
   // "compiler as a service": the browser can't run native clang, but a build is
   // just a process the shell spawns. Here (node host) we resolve cc/clang to the
   // real toolchain so a WASM shell can drive a compile+run loop through our
@@ -1256,19 +1401,20 @@ function runProgram(p, argv, envp, fdTable, cwd, selfPath) {
   const pabs = (p.startsWith('/') || !p.includes('/')) ? p : path.resolve(cwd, p);
   const mp = resolveModulePath(pabs, selfPath);
   if (!mp) { process.stderr.write(`[wali-host] execve: cannot resolve ${p}\n`); return null; }
-  const proc = new Process(mp, argv, envp, fdTable, cwd);
+  const proc = new Process(mp, argv, envp, fdTable, cwd); if (cred) proc.cred = { ...cred }; if (asPid) { procs.delete(proc.pid); proc.pid = asPid; procs.set(asPid, proc); }
   return proc.run();
 }
 
 // JSPI variant: run the child concurrently (its blocking syscalls suspend, not stall)
-async function runProgramAsync(p, argv, envp, fdTable, cwd, selfPath) {
+async function runProgramAsync(p, argv, envp, fdTable, cwd, selfPath, cred, asPid) {
   const base = path.basename(p);
-  if (base === 'cc' || base === 'clang' || base === 'wcc') return runProgram(p, argv, envp, fdTable, cwd, selfPath); // native compile stays sync
+  if (base === 'cc' || base === 'clang' || base === 'wcc') return runProgram(p, argv, envp, fdTable, cwd, selfPath, cred, asPid); // native compile stays sync
   const pabs = (p.startsWith('/') || !p.includes('/')) ? p : path.resolve(cwd, p);
   const mp = resolveModulePath(pabs, selfPath);
   if (!mp) { process.stderr.write(`[wali-host] execve: cannot resolve ${p}\n`); return null; }
-  const proc = new Process(mp, argv, envp, fdTable, cwd);
+  const proc = new Process(mp, argv, envp, fdTable, cwd); if (cred) proc.cred = { ...cred }; if (asPid) { procs.delete(proc.pid); proc.pid = asPid; procs.set(asPid, proc); }
   if (process.env.WALI_SCHED_DBG) process.stderr.write(`[sched] start pid=${proc.pid} ${path.basename(mp)} argv=[${argv.join(' ')}]\n`);
+  await new Promise(res => setImmediate(res)); // clean JS stack: the child's _start must not run inside the parent's suspending import (SuspendError)
   const code = await proc.runAsync();
   if (process.env.WALI_SCHED_DBG) process.stderr.write(`[sched] exit  pid=${proc.pid} ${path.basename(mp)} code=${code}\n`);
   return code;

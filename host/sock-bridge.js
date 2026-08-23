@@ -62,7 +62,7 @@ const HDR = 32;                       // bytes reserved for ctl (8 int32)
 const ctl = new Int32Array(workerData.sab, 0, 8);
 const data = new Uint8Array(workerData.sab, HDR);
 
-const OP = { CONNECT: 1, SEND: 2, RECV: 3, CLOSE: 4, POLL: 5, UDP: 6, SENDTO: 7, RECVFROM: 8 };
+const OP = { CONNECT: 1, SEND: 2, RECV: 3, CLOSE: 4, POLL: 5, UDP: 6, SENDTO: 7, RECVFROM: 8, LISTEN: 9, ACCEPT: 10 };
 const EAGAIN = -11, ECONNREFUSED = -111, EPIPE = -32, EBADF = -9, EINVAL = -22;
 
 // per-socket state living in the worker
@@ -89,6 +89,21 @@ async function handle(op) {
       s.on('error', (e) => { st.err = e.code === 'ECONNREFUSED' ? ECONNREFUSED : EPIPE; resolve(); });
     });
     if (st.err) { socks.delete(id); return finish(st.err); }
+    return finish(id);
+  }
+  if (op === OP.LISTEN) { // request bytes: "ip|port" -> listener id; ctl[7] = actual port
+    const [ip, portStr] = Buffer.from(data.subarray(0, a0)).toString('utf8').split('|');
+    const id = nextId++;
+    const st = { server: null, pendq: [], rxq: [], eof: false, err: 0 };
+    socks.set(id, st);
+    await new Promise((resolve) => {
+      const srv = net.createServer((s) => st.pendq.push(s));
+      st.server = srv;
+      srv.on('error', (e) => { st.err = e.code === 'EADDRINUSE' ? -98 : EINVAL; resolve(); });
+      srv.listen(+portStr, ip === '0.0.0.0' ? undefined : ip, () => resolve());
+    });
+    if (st.err) { socks.delete(id); return finish(st.err); }
+    ctl[7] = st.server.address().port;
     return finish(id);
   }
   if (op === OP.UDP) {
@@ -141,8 +156,27 @@ async function handle(op) {
     data.set(msg.subarray(0, n), 0);
     return finish(n);
   }
-  if (op === OP.CLOSE) { if (st.sock) st.sock.destroy(); if (st.udp) st.udp.close(); socks.delete(a0); return finish(0); }
-  if (op === OP.POLL) { return finish(st.rxq.length || st.eof ? 1 : 0); }
+  if (op === OP.ACCEPT) { // a0 = listener id, a1 = probe (1: EAGAIN instead of block)
+    if (!st.server) return finish(EINVAL);
+    while (!st.pendq.length && !st.err) {
+      if (a1) return finish(EAGAIN);
+      await new Promise(r => setTimeout(r, 5));
+    }
+    if (st.err) return finish(st.err);
+    const s = st.pendq.shift();
+    const id = nextId++;
+    const cst = { sock: s, rxq: [], eof: false, connected: true, err: 0 };
+    s.on('data', (b) => cst.rxq.push(b));
+    s.on('end', () => { cst.eof = true; });
+    s.on('close', () => { cst.eof = true; });
+    s.on('error', () => { cst.err = EPIPE; });
+    socks.set(id, cst);
+    const peer = Buffer.from(`${s.remoteAddress || '0.0.0.0'}|${s.remotePort || 0}`, 'utf8');
+    data.set(peer, 0); ctl[7] = peer.length;
+    return finish(id);
+  }
+  if (op === OP.CLOSE) { if (st.sock) st.sock.destroy(); if (st.udp) st.udp.close(); if (st.server) st.server.close(); socks.delete(a0); return finish(0); }
+  if (op === OP.POLL) { return finish((st.server ? st.pendq.length : st.rxq.length || st.eof) ? 1 : 0); }
   finish(EINVAL);
 }
 
