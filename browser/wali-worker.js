@@ -611,7 +611,7 @@ class Process {
       case 'getpgid': return BigInt(S.pid); case 'setpgid': case 'setsid': return 0n;
       case 'set_tid_address': return BigInt(S.pid);
       case 'tkill': case 'kill': { if (S.inChild()) return S.parkChild({ exited: 128 + (a[1] | 0) }); throw new ExitError(128 + (a[1] | 0)); }
-      case 'rt_sigaction': case 'rt_sigprocmask': case 'sigaltstack': case 'setitimer': return 0n;
+      case 'rt_sigaction': case 'rt_sigprocmask': case 'sigaltstack': case 'setitimer': case 'prctl': return 0n;
       case 'futex': return 0n;
       case 'sched_getaffinity': { S.i64(a[2], 1n); return 8n; }
       case 'sched_yield': return 0n;
