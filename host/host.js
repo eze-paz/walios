@@ -86,6 +86,34 @@ function getModule(p) {
   return modCache.get(p);
 }
 
+// ---- pseudo-terminals (module-level: master in parent, slave in child share) ----
+const ptys = new Map(); let nextPtyId = 0;
+// termios flag bits (asm-generic): c_lflag ISIG|ICANON|ECHO|ECHOE; c_iflag ICRNL;
+// c_oflag OPOST|ONLCR. struct: c_iflag,c_oflag,c_cflag,c_lflag (u32 each), c_line,
+// c_cc[32]. c_cc VINTR@0 VERASE@2 VEOF@4 VMIN@6.
+const ICANON = 0x2, ECHO = 0x8, ISIG = 0x1, ICRNL = 0x100, OPOST = 0x1, ONLCR = 0x4;
+function defaultTermios() { const t = new Uint8Array(60); const dv = new DataView(t.buffer);
+  dv.setUint32(0, ICRNL | 0x400, true); dv.setUint32(4, OPOST | ONLCR, true);
+  dv.setUint32(8, 0xbf, true); dv.setUint32(12, ISIG | ICANON | ECHO | 0x10, true);
+  t[17] = 3; t[19] = 21; t[17 + 2] = 127; t[17 + 4] = 4; t[17 + 6] = 1; return t; }
+function newPty() { const id = nextPtyId++; ptys.set(id, { toSlave: [], toMaster: [], line: [], termios: defaultTermios(), rows: 24, cols: 80, pgrp: 0 }); return id; }
+const tflag = (p, off) => new DataView(p.termios.buffer).getUint32(off, true);
+function ptyMasterWrite(p, bytes) { // user input -> line discipline -> slave
+  const lf = tflag(p, 12), canon = lf & ICANON, echo = lf & ECHO, icrnl = tflag(p, 0) & ICRNL;
+  for (let c of bytes) {
+    if (canon) {
+      if (c === 0x7f || c === 0x08) { if (p.line.length) { p.line.pop(); if (echo) p.toMaster.push(8, 32, 8); } continue; }
+      if (c === 0x0d && icrnl) c = 0x0a;
+      p.line.push(c); if (echo) p.toMaster.push(c);
+      if (c === 0x0a) { for (const x of p.line) p.toSlave.push(x); p.line = []; }
+    } else { p.toSlave.push(c); if (echo) p.toMaster.push(c); }
+  }
+}
+function ptySlaveWrite(p, bytes) { // program output -> ONLCR -> master
+  const of = tflag(p, 4), onlcr = (of & OPOST) && (of & ONLCR);
+  for (const c of bytes) { if (onlcr && c === 0x0a) p.toMaster.push(0x0d, 0x0a); else p.toMaster.push(c); }
+}
+
 // ---- pipes ----
 function mkPipe() { return { chunks: [], writers: 1, readers: 1 }; }
 function pipeRead(fifo, n) {
@@ -162,6 +190,9 @@ class Process {
           S.wbytes(a[1], b.subarray(0, got)); return BigInt(got);
         }
         if (h.fifo) { const b = pipeRead(h.fifo, a[2]); S.wbytes(a[1], b); return BigInt(b.length); }
+        if (h.devnull) return 0n;
+        if (h.pty !== undefined) { const p = ptys.get(h.pty); const q = h.master ? p.toMaster : p.toSlave;
+          if (!q.length) return err(E.AGAIN); const k = Math.min(q.length, a[2]); S.wbytes(a[1], Uint8Array.from(q.splice(0, k))); return BigInt(k); }
         if (h.sock) { const br = initSockBridge(); const r = br.call(br.OP.RECV, h.sock.id, a[2], 0); if (r.res <= 0) return BigInt(r.res); S.wbytes(a[1], r.data.subarray(0, r.res)); return BigInt(r.res); }
         if (h.fd === undefined) return err(E.BADF);
         if (h.pos === undefined) h.pos = 0;
@@ -174,6 +205,9 @@ class Process {
         S.refresh();
         if (h.std !== undefined) { try { return BigInt(fs.writeSync(h.std === 0 ? 1 : h.std, S.u8, a[1], a[2])); } catch (e) { return sysErr(e); } }
         if (h.fifo) { h.fifo.chunks.push(Buffer.from(S.u8.slice(a[1], a[1] + a[2]))); return BigInt(a[2]); }
+        if (h.devnull) return BigInt(a[2]);
+        if (h.pty !== undefined) { const p = ptys.get(h.pty); const b = S.u8.slice(a[1], a[1] + a[2]);
+          if (h.master) ptyMasterWrite(p, b); else ptySlaveWrite(p, b); return BigInt(a[2]); }
         if (h.sock) { const br = initSockBridge(); const r = br.call(br.OP.SEND, h.sock.id, a[2], 0, S.u8.slice(a[1], a[1] + a[2])); return BigInt(r.res); }
         if (h.fd === undefined) return err(E.BADF);
         if (h.pos === undefined) h.pos = 0;
@@ -188,11 +222,13 @@ class Process {
         else if (h.fd > 2 && !S.shared(h)) { try { fs.closeSync(h.fd); } catch {} }
         S.fds.delete(a[0]); S.dirState.delete(a[0]); return 0n; }
       case 'lseek': { const h = S.fds.get(a[0]); if (!h) return err(E.BADF);
-        if (h.std !== undefined || h.fifo || h.sock) return err(E.SPIPE);
+        if (h.std !== undefined || h.fifo || h.sock || h.pty !== undefined || h.devnull) return err(E.SPIPE);
         const size = h.dir ? 0 : fs.fstatSync(h.fd).size;
         h.pos = a[2] === 0 ? Number(a[1]) : a[2] === 1 ? (h.pos || 0) + Number(a[1]) : size + Number(a[1]);
         return BigInt(h.pos); }
       case 'fstat': { const h = S.fds.get(a[0]); if (!h) return err(E.BADF);
+        if (h.pty !== undefined) { S.putStat(a[1], { size: 0, mode: 0o020620 }); return 0n; } // char device (a tty)
+        if (h.devnull) { S.putStat(a[1], { size: 0, mode: 0o020666 }); return 0n; }
         if (h.std !== undefined || h.fifo || h.sock) { S.putStat(a[1], { size: 0, mode: (h.fifo || h.sock) ? 0o010600 : 0o020620 }); return 0n; }
         try { S.putStat(a[1], h.dir ? fs.statSync(h.path) : fs.fstatSync(h.fd)); return 0n; } catch (e) { return sysErr(e); } }
       case 'stat': case 'lstat': {
@@ -297,9 +333,27 @@ class Process {
           off += reclen; st.pos++;
         }
         return BigInt(off); }
-      case 'ioctl': { const h = S.fds.get(a[0]);
-        if (!h || h.std === undefined) return err(E.NOTTY);
-        if (a[1] === 0x5413) { S.refresh(); S.dv.setUint16(a[2], 24, true); S.dv.setUint16(a[2] + 2, 80, true); S.i32(a[2] + 4, 0); }
+      case 'ioctl': { const h = S.fds.get(a[0]); if (!h) return err(E.BADF); S.refresh();
+        const req = a[1] >>> 0;
+        if (h.pty !== undefined) { const p = ptys.get(h.pty);
+          switch (req) {
+            case 0x5401: S.wbytes(a[2], p.termios); return 0n;                 // TCGETS
+            case 0x5402: case 0x5403: case 0x5404:                              // TCSETS/W/F
+              p.termios = Buffer.from(S.u8.slice(a[2], a[2] + 60)); return 0n;
+            case 0x5413: S.dv.setUint16(a[2], p.rows, true); S.dv.setUint16(a[2] + 2, p.cols, true); S.i32(a[2] + 4, 0); return 0n; // TIOCGWINSZ
+            case 0x5414: p.rows = S.dv.getUint16(a[2], true); p.cols = S.dv.getUint16(a[2] + 2, true); return 0n; // TIOCSWINSZ
+            case 0x80045430: S.i32(a[2], h.pty); return 0n;                    // TIOCGPTN
+            case 0x40045431: return 0n;                                        // TIOCSPTLCK (unlock)
+            case 0x540e: S.ctty = h.pty; return 0n;                            // TIOCSCTTY
+            case 0x540f: S.i32(a[2], p.pgrp || S.pid); return 0n;              // TIOCGPGRP
+            case 0x5410: p.pgrp = S.r32(a[2]); return 0n;                      // TIOCSPGRP
+            case 0x40045441: { const g = S.nextFd++; S.fds.set(g, { pty: h.pty, master: false }); return BigInt(g); } // TIOCGPTPEER
+            default: return 0n;
+          }
+        }
+        if (h.std === undefined) return err(E.NOTTY);
+        if (req === 0x5413) { S.dv.setUint16(a[2], 24, true); S.dv.setUint16(a[2] + 2, 80, true); S.i32(a[2] + 4, 0); } // TIOCGWINSZ on stdio
+        if (req === 0x5401) S.wbytes(a[2], defaultTermios()); // TCGETS on stdio -> looks like a tty
         return 0n; }
       case 'fcntl': { const h = S.fds.get(a[0]); if (!h) return err(E.BADF);
         if (a[1] === 0 || a[1] === 1030) { // F_DUPFD / F_DUPFD_CLOEXEC: honor min-fd hint
@@ -337,6 +391,8 @@ class Process {
           const h = S.fds.get(fd); let re = 0;
           if (h && h.sock && h.sock.id) { const pk = initSockBridge().call(initSockBridge().OP.POLL, h.sock.id, 0, 0);
             if ((ev & 1) && pk.res > 0) re |= 1; if (ev & 4) re |= 4; } // POLLIN if data, POLLOUT always
+          else if (h && h.pty !== undefined) { const p = ptys.get(h.pty); const q = h.master ? p.toMaster : p.toSlave;
+            if ((ev & 1) && q.length) re |= 1; if (ev & 4) re |= 4; } // pty: POLLIN if data buffered
           else re = ev & 5; // stdio/pipe/file: ready
           S.dv.setInt16(a[0] + i * 8 + 6, re, true); if (re) ready++;
         }
@@ -412,6 +468,12 @@ class Process {
     const c = fs.constants;
     try {
       if (fp === '/proc/self/exe') fp = this.modPath;
+      // PTY devices
+      if (fp === '/dev/ptmx') { const id = newPty(); const g = this.nextFd++; this.fds.set(g, { pty: id, master: true }); return BigInt(g); }
+      let m;
+      if ((m = fp.match(/^\/dev\/pts\/(\d+)$/))) { const id = +m[1]; if (!ptys.has(id)) return err(E.NOENT); const g = this.nextFd++; this.fds.set(g, { pty: id, master: false }); return BigInt(g); }
+      if (fp === '/dev/tty' && this.ctty !== undefined) { const g = this.nextFd++; this.fds.set(g, { pty: this.ctty, master: false }); return BigInt(g); }
+      if (fp === '/dev/null') { const g = this.nextFd++; this.fds.set(g, { devnull: true }); return BigInt(g); }
       const ex = fs.existsSync(fp) && fs.statSync(fp);
       if (ex && ex.isDirectory()) {
         if ((flags & 3) !== 0) return err(E.ISDIR);

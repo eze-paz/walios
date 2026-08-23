@@ -115,6 +115,24 @@ function resolveModuleKey(p, selfKey) {
   }
   return null;
 }
+// ---- pseudo-terminals (module-level; master in parent, slave in child) ----
+const ptys = new Map(); let nextPtyId = 0;
+const ICANON = 0x2, ECHO = 0x8, ISIG = 0x1, ICRNL = 0x100, OPOST = 0x1, ONLCR = 0x4;
+function defaultTermios() { const t = new Uint8Array(60); const dv = new DataView(t.buffer);
+  dv.setUint32(0, ICRNL | 0x400, true); dv.setUint32(4, OPOST | ONLCR, true);
+  dv.setUint32(8, 0xbf, true); dv.setUint32(12, ISIG | ICANON | ECHO | 0x10, true);
+  t[17] = 3; t[19] = 21; t[19] = 21; t[17 + 2] = 127; t[17 + 4] = 4; t[17 + 6] = 1; return t; }
+function newPty() { const id = nextPtyId++; ptys.set(id, { toSlave: [], toMaster: [], line: [], termios: defaultTermios(), rows: 24, cols: 80, pgrp: 0 }); return id; }
+const tflag = (p, off) => new DataView(p.termios.buffer).getUint32(off, true);
+function ptyMasterWrite(p, bytes) { const lf = tflag(p, 12), canon = lf & ICANON, echo = lf & ECHO, icrnl = tflag(p, 0) & ICRNL;
+  for (let c of bytes) { if (canon) {
+      if (c === 0x7f || c === 0x08) { if (p.line.length) { p.line.pop(); if (echo) p.toMaster.push(8, 32, 8); } continue; }
+      if (c === 0x0d && icrnl) c = 0x0a; p.line.push(c); if (echo) p.toMaster.push(c);
+      if (c === 0x0a) { for (const x of p.line) p.toSlave.push(x); p.line = []; }
+    } else { p.toSlave.push(c); if (echo) p.toMaster.push(c); } } }
+function ptySlaveWrite(p, bytes) { const of = tflag(p, 4), onlcr = (of & OPOST) && (of & ONLCR);
+  for (const c of bytes) { if (onlcr && c === 0x0a) p.toMaster.push(0x0d, 0x0a); else p.toMaster.push(c); } }
+
 function mkPipe() { return { chunks: [] }; }
 function pipeRead(fifo, n) {
   if (!fifo.chunks.length) return new Uint8Array(0);
@@ -228,6 +246,9 @@ class Process {
   openAt(path2, flags, mode) {
     const O_CREAT = 0o100, O_TRUNC = 0o1000, O_APPEND = 0o2000, O_DIRECTORY = 0o200000, O_EXCL = 0o200;
     if (path2 === '/proc/self/exe') { const g = this.nextFd++; this.fds.set(g, { exe: true }); return BigInt(g); }
+    if (path2 === '/dev/ptmx') { const id = newPty(); const g = this.nextFd++; this.fds.set(g, { pty: id, master: true }); return BigInt(g); }
+    if (path2 === '/dev/null') { const g = this.nextFd++; this.fds.set(g, { devnull: true }); return BigInt(g); }
+    { const m = path2.match(/^\/dev\/pts\/(\d+)$/); if (m) { const id = +m[1]; if (!ptys.has(id)) return err(E.NOENT); const g = this.nextFd++; this.fds.set(g, { pty: id, master: false }); return BigInt(g); } }
     if (dirs.has(path2)) { const g = this.nextFd++; this.fds.set(g, { path: path2, dir: true }); return BigInt(g); }
     if (flags & O_DIRECTORY) return err(E.NOTDIR);
     let f = files.get(path2);
@@ -256,6 +277,9 @@ class Process {
         const h = S.fds.get(a[0]); if (!h) return err(E.BADF);
         if (h.std !== undefined) { if (h.std !== 0) return err(E.BADF); const b = readStdin(a[2]); S.wbytes(a[1], b); return BigInt(b.length); }
         if (h.fifo) { const b = pipeRead(h.fifo, a[2]); S.wbytes(a[1], b); return BigInt(b.length); }
+        if (h.devnull) return 0n;
+        if (h.pty !== undefined) { const p = ptys.get(h.pty); const q = h.master ? p.toMaster : p.toSlave;
+          if (!q.length) return err(E.AGAIN); const k = Math.min(q.length, a[2]); S.wbytes(a[1], Uint8Array.from(q.splice(0, k))); return BigInt(k); }
         if (h.sock) { const br = initWisp(); if (h.sock.nonblock) { const pk = br.call(br.OP.POLL, h.sock.id, 0, 0); if (pk.res <= 0) return err(E.AGAIN); } const r = br.call(h.sock.udp ? br.OP.RECVFROM : br.OP.RECV, h.sock.id, a[2], 0); if (r.res <= 0) return BigInt(r.res); S.wbytes(a[1], r.data.subarray(0, r.res)); return BigInt(r.res); }
         if (!h.file) return err(E.BADF);
         const b = fileRead(h.file, h.pos, a[2]); S.wbytes(a[1], b); h.pos += b.length; return BigInt(b.length);
@@ -265,6 +289,8 @@ class Process {
         S.refresh();
         if (h.std !== undefined) { post(td.decode(S.u8.slice(a[1], a[1] + a[2])), h.std === 0 ? 1 : h.std); return BigInt(a[2]); }
         if (h.fifo) { h.fifo.chunks.push(S.u8.slice(a[1], a[1] + a[2])); return BigInt(a[2]); }
+        if (h.devnull) return BigInt(a[2]);
+        if (h.pty !== undefined) { const p = ptys.get(h.pty); const b = S.u8.slice(a[1], a[1] + a[2]); if (h.master) ptyMasterWrite(p, b); else ptySlaveWrite(p, b); return BigInt(a[2]); }
         if (h.sock) { const br = initWisp(); const r = br.call(br.OP.SEND, h.sock.id, a[2], 0, S.u8.slice(a[1], a[1] + a[2])); return BigInt(r.res); }
         if (!h.file) return err(E.BADF);
         const w = fileWrite(h.file, h.append ? h.file.size : h.pos, S.u8.slice(a[1], a[1] + a[2])); h.pos += w; return BigInt(w);
@@ -277,11 +303,12 @@ class Process {
         if (h.sock && h.sock.id) initWisp().call(initWisp().OP.CLOSE, h.sock.id, 0, 0);
         S.fds.delete(a[0]); S.dirState.delete(a[0]); return 0n; }
       case 'lseek': { const h = S.fds.get(a[0]); if (!h) return err(E.BADF);
-        if (h.std !== undefined || h.fifo || h.sock) return err(E.SPIPE);
+        if (h.std !== undefined || h.fifo || h.sock || h.pty !== undefined || h.devnull) return err(E.SPIPE);
         const size = h.file ? h.file.size : 0;
         h.pos = a[2] === 0 ? Number(a[1]) : a[2] === 1 ? (h.pos || 0) + Number(a[1]) : size + Number(a[1]);
         return BigInt(h.pos); }
       case 'fstat': { const h = S.fds.get(a[0]); if (!h) return err(E.BADF);
+        if (h.pty !== undefined || h.devnull) { S.putStat(a[1], { size: 0, mode: 0o020620 }); return 0n; }
         if (h.std !== undefined || h.fifo || h.sock) { S.putStat(a[1], { size: 0, mode: (h.fifo || h.sock) ? 0o010600 : 0o020620 }); return 0n; }
         if (h.exe) { S.putStat(a[1], { size: 1, mode: 0o100755 }); return 0n; }
         return S.statPath(h.path, a[1]); }
@@ -381,9 +408,24 @@ class Process {
           off += reclen; st.pos++;
         }
         return BigInt(off); }
-      case 'ioctl': { const h = S.fds.get(a[0]);
-        if (!h || h.std === undefined) return err(E.NOTTY);
-        if (a[1] === 0x5413) { S.refresh(); S.dv.setUint16(a[2], 24, true); S.dv.setUint16(a[2] + 2, 80, true); S.i32(a[2] + 4, 0); }
+      case 'ioctl': { const h = S.fds.get(a[0]); if (!h) return err(E.BADF); S.refresh(); const req = a[1] >>> 0;
+        if (h.pty !== undefined) { const p = ptys.get(h.pty);
+          switch (req) {
+            case 0x5401: S.wbytes(a[2], p.termios); return 0n;
+            case 0x5402: case 0x5403: case 0x5404: p.termios = S.u8.slice(a[2], a[2] + 60); return 0n;
+            case 0x5413: S.dv.setUint16(a[2], p.rows, true); S.dv.setUint16(a[2] + 2, p.cols, true); S.i32(a[2] + 4, 0); return 0n;
+            case 0x5414: p.rows = S.dv.getUint16(a[2], true); p.cols = S.dv.getUint16(a[2] + 2, true); return 0n;
+            case 0x80045430: S.i32(a[2], h.pty); return 0n;
+            case 0x40045431: return 0n;
+            case 0x540e: S.ctty = h.pty; return 0n;
+            case 0x540f: S.i32(a[2], p.pgrp || S.pid); return 0n;
+            case 0x5410: p.pgrp = S.r32(a[2]); return 0n;
+            case 0x40045441: { const g = S.nextFd++; S.fds.set(g, { pty: h.pty, master: false }); return BigInt(g); }
+            default: return 0n;
+          } }
+        if (h.std === undefined) return err(E.NOTTY);
+        if (req === 0x5413) { S.dv.setUint16(a[2], 24, true); S.dv.setUint16(a[2] + 2, 80, true); S.i32(a[2] + 4, 0); }
+        if (req === 0x5401) S.wbytes(a[2], defaultTermios());
         return 0n; }
       case 'fcntl': { const h = S.fds.get(a[0]); if (!h) return err(E.BADF);
         if (a[1] === 0 || a[1] === 1030) {
@@ -419,6 +461,7 @@ class Process {
         for (let i = 0; i < a[1]; i++) { const fd = S.r32(a[0] + i * 8), ev = S.dv.getInt16(a[0] + i * 8 + 4, true);
           const h = S.fds.get(fd); let re = 0;
           if (h && h.sock && h.sock.id) { const pk = initWisp().call(initWisp().OP.POLL, h.sock.id, 0, 0); if ((ev & 1) && pk.res > 0) re |= 1; if (ev & 4) re |= 4; }
+          else if (h && h.pty !== undefined) { const p = ptys.get(h.pty); const q = h.master ? p.toMaster : p.toSlave; if ((ev & 1) && q.length) re |= 1; if (ev & 4) re |= 4; }
           else re = ev & 5;
           S.dv.setInt16(a[0] + i * 8 + 6, re, true); if (re) ready++; }
         return BigInt(ready); }
