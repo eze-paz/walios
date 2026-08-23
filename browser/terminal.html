@@ -35,8 +35,8 @@ function boot() {
   };
   worker.postMessage({ t: 'run', wasm: 'busybox.wasm', manifest: MANIFEST,
     tars: [['rootfs.tar.gz', '/']], opfs: '/root',   // /root is a persistent OPFS home
-    env: { HOME: '/root', TERM: 'xterm', PATH: '/bin:/usr/bin', PS1: 'walios:\\w\\$ ', HOSTNAME: 'walios' },
-    cwd: '/root', argv: ['busybox', 'sh', '-i'], jspi: true, pty: true,
+    env: { HOME: '/root', TERM: 'xterm', PATH: '/bin:/usr/bin', PS1: 'walios:$PWD$ ', HOSTNAME: 'walios' },
+    cwd: '/root', argv: ['busybox', 'ash', '-i'], jspi: true, pty: true,
     cols: term.cols, rows: term.rows });
 }
 term.onData(d => { if (worker && running) worker.postMessage({ t: 'stdin', data: d }); });
