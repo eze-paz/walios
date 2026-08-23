@@ -185,7 +185,7 @@ let rootProc = null;                  // the tree root (fallback Ctrl-C target)
 function postSignal(P, sig) {
   if (!P || !sig) return;
   const h = P.sig.handlers.get(sig);
-  if (h && h.ptr === 1 && sig !== SIG.KILL) return;             // SIG_IGN
+  if (h && (h.ptr === -2 || h.ptr === 1) && sig !== SIG.KILL) return; // SIG_IGN (this musl: -2; classic ABI: 1)
   if ((!h || !h.ptr) && SIG_DFL_IGNORE.has(sig)) return;        // default-ignore
   P.sig.pending.add(sig);
   const w = P.sig.waiters; P.sig.waiters = []; for (const f of w) f('sig'); // wake blocked syscalls
@@ -287,7 +287,7 @@ class Process {
       if (this.sig.mask & (1n << BigInt(sig - 1))) continue;
       this.sig.pending.delete(sig);
       const h = this.sig.handlers.get(sig);
-      if (h && h.ptr === 1) continue;                       // SIG_IGN
+      if (h && (h.ptr === -2 || h.ptr === 1)) continue;     // SIG_IGN
       if (h && h.ptr > 1 && sig !== SIG.KILL) {
         const table = this.inst && this.inst.exports.__indirect_function_table;
         if (table) {
@@ -717,7 +717,8 @@ class Process {
       case 'rt_sigaction': { const sig = a[0] | 0; S.refresh();
         const old = S.sig.handlers.get(sig);
         if (a[2]) { S.i32(a[2], old ? old.ptr : 0); S.i32(a[2] + 4, old ? old.flags : 0); S.i32(a[2] + 8, 0); S.i64(a[2] + 12, 0n); }
-        if (a[1]) S.sig.handlers.set(sig, { ptr: S.r32(a[1]), flags: S.r32(a[1] + 4) });
+        if (a[1]) { S.sig.handlers.set(sig, { ptr: S.r32(a[1]), flags: S.r32(a[1] + 4) }); if (process.env.WALI_DBG_SIG) process.stderr.write(`[sig] pid ${S.pid} sigaction(${sig}) ptr=${S.r32(a[1])} flags=0x${(S.r32(a[1]+4)>>>0).toString(16)}
+`); }
         return 0n; }
       case 'rt_sigprocmask': { const how = a[0] | 0; S.refresh();
         if (a[2]) S.i64(a[2], BigInt.asIntN(64, S.sig.mask));
