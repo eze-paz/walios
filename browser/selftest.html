@@ -76,6 +76,10 @@ function check(name, ok, detail) {
   const gone = !/selftest-payload/.test(r.out);
   check('unlink visible to a fresh run', gone, r.out);
 
+  // 7. permissions + symlinks as a NON-ROOT user (uid 1000)
+  r = await run('umask 027; echo secret > /f.txt; busybox ln -s /f.txt /l.txt; cat /l.txt; busybox chmod 400 /f.txt; if test -w /f.txt; then echo BAD-writable; else echo not-writable; fi; if test -r /f.txt; then echo readable; fi', { uid: 1000 });
+  check('perms + symlink as uid 1000', /secret/.test(r.out) && /not-writable/.test(r.out) && /readable/.test(r.out) && !/BAD/.test(r.out), r.out);
+
   sumEl.textContent = `pass=${pass} fail=${fail}`;
   sumEl.className = fail ? 'bad' : 'ok';
   document.title = `walios selftest: pass=${pass} fail=${fail}`;

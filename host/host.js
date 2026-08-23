@@ -256,6 +256,7 @@ class Process {
     this.cred = { uid: u, euid: u, suid: u, gid: u, egid: u, sgid: u };
     this.maps = new Map();           // MAP_SHARED file mappings: base -> {len, fd, off}
     this.shmAt = new Map();          // SysV shm attachments: base -> segment
+    this.umask = 0o22;
     procs.set(this.pid, this);
   }
 
@@ -499,8 +500,15 @@ class Process {
         try { S.putStat(a[2], (a[3] & 0x100) ? fs.lstatSync(p) : fs.statSync(p)); return 0n; } catch (e) { return sysErr(e); } }
       case 'access': case 'faccessat': case 'faccessat2': {
         const p = name === 'access' ? S.rpath(S.cstr(a[0])) : S.atPath(a[0], S.cstr(a[1]));
+        const want = name === 'access' ? (a[1] | 0) : (a[2] | 0); // F_OK=0 R=4 W=2 X=1
         if (p === '/proc/self/exe') return 0n;
-        try { fs.accessSync(p); return 0n; } catch (e) { return sysErr(e); } }
+        try { const st = fs.statSync(p);
+          if (want && S.cred.euid !== 0) {
+            const bits = (st.mode >> (st.uid === S.cred.euid ? 6 : 0)) & 7;
+            if ((want & ~1) & ~bits) return err(E.ACCES); // X not enforced (wasm binaries are data)
+          }
+          return 0n;
+        } catch (e) { return sysErr(e); } }
       case 'readlink': { const p = S.rpath(S.cstr(a[0]));
         if (p === '/proc/self/exe') return BigInt(S.wstr(a[1], S.modPath, a[2] + 1));
         let m2; if ((m2 = p.match(/^\/proc\/self\/fd\/(\d+)$/))) { // ttyname_r reads this
@@ -529,8 +537,35 @@ class Process {
       case 'fchdir': { const h = S.fds.get(a[0]); if (!h || !h.dir) return err(E.BADF); S.cwd.p = h.path; return 0n; }
       case 'getcwd': return BigInt(S.wstr(a[0], S.cwd.p, a[1]) + 1);
       case 'chmod': { try { fs.chmodSync(S.rpath(S.cstr(a[0])), a[1]); return 0n; } catch (e) { return sysErr(e); } }
-      case 'fchmod': case 'chown': return 0n;
-      case 'umask': return 0o22n;
+      case 'fchmodat': { try { fs.chmodSync(S.atPath(a[0], S.cstr(a[1])), a[2]); return 0n; } catch (e) { return sysErr(e); } }
+      case 'fchmod': { const h = S.fds.get(a[0]); if (!h) return err(E.BADF);
+        if (h.fd === undefined) return 0n;
+        try { fs.fchmodSync(h.fd, a[1]); return 0n; } catch (e) { return sysErr(e); } }
+      case 'chown': case 'lchown': case 'fchown': case 'fchownat':
+        return S.cred.euid === 0 ? 0n : err(E.PERM); // only root may chown (ownership itself is the host's)
+      case 'umask': { const old = S.umask; S.umask = a[0] & 0o777; return BigInt(old); }
+      case 'symlink': { try { fs.symlinkSync(S.cstr(a[0]), S.rpath(S.cstr(a[1]))); return 0n; } catch (e) { return sysErr(e); } }
+      case 'symlinkat': { try { fs.symlinkSync(S.cstr(a[0]), S.atPath(a[1], S.cstr(a[2]))); return 0n; } catch (e) { return sysErr(e); } }
+      case 'link': { try { fs.linkSync(S.rpath(S.cstr(a[0])), S.rpath(S.cstr(a[1]))); return 0n; } catch (e) { return sysErr(e); } }
+      case 'linkat': { try { fs.linkSync(S.atPath(a[0], S.cstr(a[1])), S.atPath(a[2], S.cstr(a[3]))); return 0n; } catch (e) { return sysErr(e); } }
+      case 'truncate': { try { fs.truncateSync(S.rpath(S.cstr(a[0])), Number(a[1])); return 0n; } catch (e) { return sysErr(e); } }
+      case 'ftruncate': { const h = S.fds.get(a[0]); if (!h) return err(E.BADF);
+        if (h.fd === undefined) return err(E.INVAL);
+        try { fs.ftruncateSync(h.fd, Number(a[1])); return 0n; } catch (e) { return sysErr(e); } }
+      case 'fsync': case 'fdatasync': { const h = S.fds.get(a[0]); if (!h) return err(E.BADF);
+        if (h.fd !== undefined && h.fd > 2) { try { fs.fsyncSync(h.fd); } catch {} } return 0n; }
+      case 'statfs': case 'fstatfs': { const p = a[1]; S.refresh();
+        S.u8.fill(0, p, p + 120);
+        S.i64(p, 0x858458f6n);            // f_type: ramfs
+        S.i64(p + 8, 4096n);              // f_bsize
+        S.i64(p + 16, 1n << 20n);         // f_blocks
+        S.i64(p + 24, 1n << 19n);         // f_bfree
+        S.i64(p + 32, 1n << 19n);         // f_bavail
+        S.i64(p + 40, 1n << 16n);         // f_files
+        S.i64(p + 48, 1n << 15n);         // f_ffree
+        S.i64(p + 64, 255n);              // f_namelen
+        S.i64(p + 72, 4096n);             // f_frsize
+        return 0n; }
       case 'dup': { const h = S.fds.get(a[0]); if (!h) return err(E.BADF); h.shared = true; const g = S.allocFd(); S.fds.set(g, { ...h }); S.bumpFifo(h); return BigInt(g); }
       case 'dup2': case 'dup3': { const h = S.fds.get(a[0]); if (!h) return err(E.BADF); h.shared = true;
         if (a[0] !== a[1]) { const old = S.fds.get(a[1]); if (old && old.fifo) { if (old.end === 'w') { if (--old.fifo.writers <= 0) wakePipe(old.fifo); } else old.fifo.readers--; } // dup2 closes the target first
@@ -1143,10 +1178,14 @@ class Process {
         const g = this.allocFd(); this.fds.set(g, { fd: -1, path: fp, dir: true }); return BigInt(g);
       }
       if (flags & O_DIRECTORY) return err(E.NOTDIR);
+      if (ex && this.cred.euid !== 0) { // non-root: enforce mode bits (owner class if the host uid matches, else other)
+        const acc = flags & 3, bits = (ex.mode >> (ex.uid === this.cred.euid ? 6 : 0)) & 7;
+        if ((acc !== 1 && !(bits & 4)) || (acc !== 0 && !(bits & 2))) return err(E.ACCES);
+      }
       let o = (flags & 3) === 0 ? c.O_RDONLY : (flags & 3) === 1 ? c.O_WRONLY : c.O_RDWR;
       if (flags & 0o100) o |= c.O_CREAT; if (flags & 0o200) o |= c.O_EXCL;
       if (flags & 0o1000) o |= c.O_TRUNC;
-      const fd = fs.openSync(fp, o, mode || 0o666);
+      const fd = fs.openSync(fp, o, (mode || 0o666) & ~this.umask);
       const g = this.allocFd();
       this.fds.set(g, { fd, path: fp, pos: (flags & 0o2000) ? fs.fstatSync(fd).size : 0, append: !!(flags & 0o2000) });
       return BigInt(g);

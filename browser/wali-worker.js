@@ -350,6 +350,7 @@ class Process {
     this.stopped = 0; this.stopReported = false; this.contWaiters = [];
     this.cred = { uid: 0, euid: 0, suid: 0, gid: 0, egid: 0, sgid: 0 }; // root by default
     this.shmAt = new Map();          // SysV shm attachments: base -> segment
+    this.umask = 0o22;
     procs.set(this.pid, this);
   }
   retire() {
@@ -474,12 +475,33 @@ class Process {
     const t = (off, ms) => { this.i64(p + off, BigInt(Math.floor(ms / 1000))); this.i64(p + off + 8, BigInt(Math.floor((ms % 1000) * 1e6))); };
     t(72, o.mtimeMs || Date.now()); t(88, o.mtimeMs || Date.now()); t(104, o.mtimeMs || Date.now());
   }
-  statPath(path2, sp) {
+  follow(p, depth = 0) { // resolve symlinks (parents + final component), max 8 hops
+    if (depth > 8) return p;
+    const segs = p.split('/').filter(Boolean); let cur = '';
+    for (let i = 0; i < segs.length; i++) {
+      cur += '/' + segs[i];
+      const f = files.get(cur);
+      if (f && f.sym !== undefined) {
+        const tgt = f.sym.startsWith('/') ? f.sym : cur.slice(0, cur.lastIndexOf('/') + 1) + f.sym;
+        return this.follow(norm(tgt + '/' + segs.slice(i + 1).join('/'), '/'), depth + 1);
+      }
+    }
+    return p;
+  }
+  // classic rwx check against this process's creds (euid 0 bypasses; want: r4 w2)
+  mayAccess(f, want) {
+    if (this.cred.euid === 0) return true;
+    const cls = (f.uid ?? 0) === this.cred.euid ? 6 : (f.gid ?? 0) === this.cred.egid ? 3 : 0;
+    return !(want & ~((f.mode >> cls) & 7));
+  }
+  statPath(path2, sp, followLinks = true) {
     if (path2 === '/proc/self/exe') { this.putStat(sp, { size: 1, mode: 0o100755 }); return 0n; }
     opfsFault(path2);
+    if (followLinks) path2 = this.follow(path2);
     if (dirs.has(path2)) { this.putStat(sp, { size: 4096, mode: 0o040755 }); return 0n; }
     const f = files.get(path2); if (!f) return err(E.NOENT);
-    this.putStat(sp, { size: f.size, mode: f.mode, mtimeMs: f.mtimeMs });
+    if (f.sym !== undefined) { this.putStat(sp, { size: f.sym.length, mode: 0o120777 }); return 0n; }
+    this.putStat(sp, { size: f.size, mode: f.mode, mtimeMs: f.mtimeMs, uid: f.uid ?? 0, gid: f.gid ?? 0 });
     return 0n;
   }
   openAt(path2, flags, mode) {
@@ -491,11 +513,17 @@ class Process {
     { const m = path2.match(/^\/dev\/pts\/(\d+)$/); if (m) { const id = +m[1]; if (!ptys.has(id)) return err(E.NOENT); ptys.get(id).fg = this; const g = this.allocFd(); this.fds.set(g, { pty: id, master: false }); return BigInt(g); } }
     if (dirs.has(path2)) { const g = this.allocFd(); this.fds.set(g, { path: path2, dir: true }); return BigInt(g); }
     if (flags & O_DIRECTORY) return err(E.NOTDIR);
+    path2 = this.follow(path2);
     let f = files.get(path2);
+    if (f && f.sym === undefined) {   // existing regular file: enforce rw bits
+      const acc = flags & 3, want = (acc !== 1 ? 4 : 0) | (acc !== 0 ? 2 : 0);
+      if (!this.mayAccess(f, want)) return err(E.ACCES);
+    }
     if (!f) {
       if (!(flags & O_CREAT)) return err(E.NOENT);
-      addFile(path2, new Uint8Array(0));
+      addFile(path2, new Uint8Array(0), 0o100000 | ((mode || 0o666) & ~this.umask & 0o7777));
       f = files.get(path2);
+      f.uid = this.cred.euid; f.gid = this.cred.egid;
       if (inOpfs(path2)) { f.br = opfsRel(path2); f.data = null; opfsHandle(f, true); } // new files under the mount persist
     } else if ((flags & O_CREAT) && (flags & O_EXCL)) return err(E.EXIST);
     if (flags & O_TRUNC) {
@@ -582,14 +610,20 @@ class Process {
         if (p === '/dev/ptmx') { S.putStat(a[1], ptyStatObj(0, true)); return 0n; }
         if ((m = p.match(/^\/dev\/pts\/(\d+)$/))) { if (!ptys.has(+m[1])) return err(E.NOENT); S.putStat(a[1], ptyStatObj(+m[1], false)); return 0n; }
         if (p === '/dev/null' || p === '/dev/tty') { S.putStat(a[1], { size: 0, mode: 0o020666 }); return 0n; }
-        return S.statPath(p, a[1]); }
+        return S.statPath(p, a[1], name === 'stat'); }
       case 'newfstatat': { const s = S.cstr(a[1]); return s === '' ? S.sys('fstat', [a[0], a[2]]) : S.statPath(S.atPath(a[0], s), a[2]); }
       case 'access': case 'faccessat': case 'faccessat2': {
         const p = name === 'access' ? S.atPath(-100, S.cstr(a[0])) : S.atPath(a[0], S.cstr(a[1]));
         if (p === '/proc/self/exe') return 0n;
-        opfsFault(p);
-        return (files.has(p) || dirs.has(p)) ? 0n : err(E.NOENT); }
-      case 'readlink': { const p = S.atPath(-100, S.cstr(a[0]));
+        opfsFault(p); const pf = S.follow(p);
+        const want = (name === 'access' ? (a[1] | 0) : (a[2] | 0)) & 6; // X not enforced
+        if (dirs.has(pf)) return 0n;
+        const f = files.get(pf); if (!f) return err(E.NOENT);
+        return (!want || S.mayAccess(f, want)) ? 0n : err(E.ACCES); }
+      case 'readlink': case 'readlinkat': { const p = S.atPath(name === 'readlink' ? -100 : a[0], S.cstr(name === 'readlink' ? a[0] : a[1]));
+        const lbuf = name === 'readlink' ? a[1] : a[2], llen = name === 'readlink' ? a[2] : a[3];
+        opfsFault(p); const lf = files.get(p);
+        if (lf && lf.sym !== undefined) return BigInt(S.wstr(lbuf, lf.sym, llen + 1));
         if (p === '/proc/self/exe') return BigInt(S.wstr(a[1], '/bin/' + (S.argv[0] || 'wasm'), a[2] + 1));
         let m2; if ((m2 = p.match(/^\/proc\/self\/fd\/(\d+)$/))) { const h = S.fds.get(+m2[1]); if (!h) return err(E.BADF);
           const tgt = h.pty !== undefined ? (h.master ? '/dev/ptmx' : '/dev/pts/' + h.pty) : h.path ? h.path : h.std !== undefined ? '/dev/tty' : '/dev/null';
@@ -630,8 +664,54 @@ class Process {
       case 'chdir': { const p = S.atPath(-100, S.cstr(a[0])); opfsFault(p); if (!dirs.has(p)) return err(E.NOTDIR); S.cwd.p = p; return 0n; }
       case 'fchdir': { const h = S.fds.get(a[0]); if (!h || !h.dir) return err(E.BADF); S.cwd.p = h.path; return 0n; }
       case 'getcwd': return BigInt(S.wstr(a[0], S.cwd.p, a[1]) + 1);
-      case 'chmod': case 'fchmod': case 'chown': return 0n;
-      case 'umask': return 0o22n;
+      case 'chmod': case 'fchmodat': { const p = S.follow(S.atPath(name === 'chmod' ? -100 : a[0], S.cstr(name === 'chmod' ? a[0] : a[1])));
+        opfsFault(p); const md = name === 'chmod' ? a[1] : a[2];
+        if (dirs.has(p)) return 0n;
+        const f = files.get(p); if (!f) return err(E.NOENT);
+        if (S.cred.euid !== 0 && (f.uid ?? 0) !== S.cred.euid) return err(E.PERM);
+        f.mode = (f.mode & ~0o7777) | (md & 0o7777); return 0n; }
+      case 'fchmod': { const h = S.fds.get(a[0]); if (!h || !h.file) return err(E.BADF);
+        if (S.cred.euid !== 0 && (h.file.uid ?? 0) !== S.cred.euid) return err(E.PERM);
+        h.file.mode = (h.file.mode & ~0o7777) | (a[1] & 0o7777); return 0n; }
+      case 'chown': case 'lchown': case 'fchownat': { const pi = name === 'fchownat' ? 1 : 0, di = name === 'fchownat' ? a[0] : -100;
+        const p = S.follow(S.atPath(di, S.cstr(a[pi]))); opfsFault(p);
+        if (S.cred.euid !== 0) return err(E.PERM);
+        const f = files.get(p); if (!f && !dirs.has(p)) return err(E.NOENT);
+        if (f) { const u = a[pi + 1] | 0, g = a[pi + 2] | 0; if (u !== -1) f.uid = u; if (g !== -1) f.gid = g; }
+        return 0n; }
+      case 'fchown': { const h = S.fds.get(a[0]); if (!h || !h.file) return err(E.BADF);
+        if (S.cred.euid !== 0) return err(E.PERM);
+        if ((a[1] | 0) !== -1) h.file.uid = a[1] | 0; if ((a[2] | 0) !== -1) h.file.gid = a[2] | 0; return 0n; }
+      case 'umask': { const old = S.umask; S.umask = a[0] & 0o777; return BigInt(old); }
+      case 'symlink': case 'symlinkat': { const tgt = S.cstr(a[0]);
+        const lp = S.atPath(name === 'symlink' ? -100 : a[1], S.cstr(name === 'symlink' ? a[1] : a[2]));
+        if (files.has(lp) || dirs.has(lp)) return err(E.EXIST);
+        addFile(lp, new Uint8Array(0), 0o120777); const lf = files.get(lp);
+        lf.sym = tgt; lf.uid = S.cred.euid; lf.gid = S.cred.egid; return 0n; }
+      case 'link': case 'linkat': { const oi = name === 'link' ? 0 : 1, ni = name === 'link' ? 1 : 3;
+        const pa = S.follow(S.atPath(name === 'link' ? -100 : a[0], S.cstr(a[oi])));
+        const pb = S.atPath(name === 'link' ? -100 : a[2], S.cstr(a[ni]));
+        opfsFault(pa); const f = files.get(pa); if (!f) return err(E.NOENT);
+        if (f.br !== undefined) return err(E.PERM); // OPFS-backed: a hard link would double-delete the store file
+        if (files.has(pb) || dirs.has(pb)) return err(E.EXIST);
+        const parent = pb.slice(0, pb.lastIndexOf('/')) || '/'; mkdirp(parent);
+        dirs.get(parent).add(pb.slice(pb.lastIndexOf('/') + 1));
+        files.set(pb, f); return 0n; } // same object: a real hard link
+      case 'truncate': { const p = S.follow(S.atPath(-100, S.cstr(a[0]))); opfsFault(p);
+        const f = files.get(p); if (!f) return err(E.NOENT);
+        if (!S.mayAccess(f, 2)) return err(E.ACCES);
+        if (f.br !== undefined) { const id = opfsHandle(f, true); if (id) initOpfs().call(OFS.TRUNC, id, Number(a[1]), 0, null); }
+        f.size = Number(a[1]); return 0n; }
+      case 'ftruncate': { const h = S.fds.get(a[0]); if (!h || !h.file) return err(E.BADF);
+        const f = h.file;
+        if (f.br !== undefined) { const id = opfsHandle(f, true); if (id) initOpfs().call(OFS.TRUNC, id, Number(a[1]), 0, null); }
+        f.size = Number(a[1]); return 0n; }
+      case 'fsync': case 'fdatasync': return 0n; // VFS writes are synchronous; OPFS flushes at RELEASE
+      case 'statfs': case 'fstatfs': { const sp2 = a[1]; S.refresh();
+        S.u8.fill(0, sp2, sp2 + 120);
+        S.i64(sp2, 0x858458f6n); S.i64(sp2 + 8, 4096n); S.i64(sp2 + 16, 1n << 20n);
+        S.i64(sp2 + 24, 1n << 19n); S.i64(sp2 + 32, 1n << 19n); S.i64(sp2 + 40, 1n << 16n);
+        S.i64(sp2 + 48, 1n << 15n); S.i64(sp2 + 64, 255n); S.i64(sp2 + 72, 4096n); return 0n; }
       case 'dup': { const h = S.fds.get(a[0]); if (!h) return err(E.BADF); const g = S.allocFd(); S.fds.set(g, { ...h }); S.bumpFifo(h); return BigInt(g); }
       case 'dup2': case 'dup3': { const h = S.fds.get(a[0]); if (!h) return err(E.BADF);
         if (a[0] !== a[1]) { const old = S.fds.get(a[1]);
@@ -1394,6 +1474,7 @@ self.onmessage = async (ev) => {
     if (m.jspi && !jspiAvailable) post('[host] jspi requested but unavailable in this browser; using synchronous model\n', 2);
     pipeSuspends = 0; waitSuspends = 0;
     const root = new Process(rootKey, m.argv, env, rootFds, m.cwd || '/');
+    if (m.uid !== undefined) { const u = m.uid | 0; root.cred = { uid: u, euid: u, suid: u, gid: u, egid: u, sgid: u }; } // run as a non-root user
     rootProc = root;
     self.postMessage({ t: 'boot', ms: performance.now() - boot0 });
     const t0 = performance.now();
