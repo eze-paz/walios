@@ -63,11 +63,17 @@ Shipped & verified:
 - **Searchable aports browser** — `browser/aports.html`: 1600+ Alpine packages
   searchable, the built ones runnable click-to-run in a terminal.
 
-Genuinely remaining (not faked): browser **raw-TCP sockets** need a WISP relay (the
-node bridge proves the syscall contract; browsers have no TCP); **PTY** layer for
-interactive `sshd`; and a few per-package source walls (oniguruma st.h, ncurses
-native `tic`). The `clang.wasm` from-scratch build recipe is in `ci/` + `farm/` but
-is moot now that a maintained prebuilt exists.
+- **Browser TCP via WISP** — `browser/wisp-relay.js` (WebSocket↔TCP relay, DoH
+  resolution, ICMP) + `browser/wisp-worker.js` (a sibling worker owning the
+  WebSocket, bridged to the OS worker over a SAB). Verified: `busybox wget
+  http://neverssl.com` fetches the real page **in the tab**. Synthetic DNS hands the
+  hostname to the relay (avoids COEP-blocked in-browser DoH). Defaults to this
+  origin's `/wisp` (same relay the riscv-vm uses); a bundled dev relay runs on :8790.
+
+Genuinely remaining (not faked): **PTY** layer for interactive `sshd`; a few
+per-package source walls (oniguruma `st.h`, ncurses native `tic`); farm scale-out.
+The `clang.wasm` from-scratch build recipe is in `ci/` + `farm/` but is moot now
+that a maintained prebuilt exists.
 
 Not a from-scratch build: this rides the WALI project (github.com/arjunr2/WALI) for
 the toolchain/ABI, and @yowasp/clang for the in-browser compiler. This repo is the

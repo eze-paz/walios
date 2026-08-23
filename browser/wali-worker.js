@@ -133,6 +133,33 @@ function pipeRead(fifo, n) {
 // ---- stdio ----
 function post(s, fd) { self.postMessage({ t: 'out', fd: fd || 1, s }); }
 let stdinCtl = null, stdinData = null;
+// ---- WISP socket bridge: a sibling wisp-worker (spawned by the page) owns the
+// WebSocket; we share a SAB with it (set via the 'wisp-sab' message). ----
+let wisp = null, wispSab = null;
+function initWisp() {
+  if (wisp) return wisp;
+  if (!wispSab) { post('[host] no WISP bridge (sockets unavailable)\n', 2); return { call: () => ({ res: -38, data: new Uint8Array(0) }), OP: {} }; }
+  const sab = wispSab;
+  const ctl = new Int32Array(sab, 0, 8), wdata = new Uint8Array(sab, 32);
+  const call = (op, a0, a1, a2, bytes) => {
+    if (bytes) wdata.set(bytes, 0);
+    ctl[2] = op; ctl[3] = a0 | 0; ctl[4] = a1 | 0; ctl[5] = a2 | 0;
+    const prev = Atomics.load(ctl, 1);
+    Atomics.add(ctl, 0, 1); Atomics.notify(ctl, 0);
+    while (Atomics.load(ctl, 1) === prev) Atomics.wait(ctl, 1, prev);
+    return { res: ctl[6], data: wdata };
+  };
+  wisp = { call, OP: { CONNECT: 1, SEND: 2, RECV: 3, CLOSE: 4, POLL: 5, UDP: 6, SENDTO: 7, RECVFROM: 8 } };
+  return wisp;
+}
+function readSockaddr(S, p) { S.refresh();
+  const fam = S.dv.getUint16(p, true), port = S.dv.getUint16(p + 2, false); let ip;
+  if (fam === 10) { const g = []; for (let i = 0; i < 16; i += 2) g.push(S.dv.getUint16(p + 8 + i, false).toString(16)); ip = g.join(':'); }
+  else ip = `${S.u8[p+4]}.${S.u8[p+5]}.${S.u8[p+6]}.${S.u8[p+7]}`; return { ip, port }; }
+function writeSockaddr(S, p, d) { S.refresh(); S.u8.fill(0, p, p + 16);
+  S.dv.setUint16(p, 2, true); S.dv.setUint16(p + 2, d.port, false);
+  const o = d.ip.split('.').map(Number); S.u8[p+4]=o[0]; S.u8[p+5]=o[1]; S.u8[p+6]=o[2]; S.u8[p+7]=o[3]; return 16; }
+
 function readStdin(n) {
   if (!stdinCtl) return new Uint8Array(0);
   while (true) {
@@ -229,6 +256,7 @@ class Process {
         const h = S.fds.get(a[0]); if (!h) return err(E.BADF);
         if (h.std !== undefined) { if (h.std !== 0) return err(E.BADF); const b = readStdin(a[2]); S.wbytes(a[1], b); return BigInt(b.length); }
         if (h.fifo) { const b = pipeRead(h.fifo, a[2]); S.wbytes(a[1], b); return BigInt(b.length); }
+        if (h.sock) { const br = initWisp(); if (h.sock.nonblock) { const pk = br.call(br.OP.POLL, h.sock.id, 0, 0); if (pk.res <= 0) return err(E.AGAIN); } const r = br.call(h.sock.udp ? br.OP.RECVFROM : br.OP.RECV, h.sock.id, a[2], 0); if (r.res <= 0) return BigInt(r.res); S.wbytes(a[1], r.data.subarray(0, r.res)); return BigInt(r.res); }
         if (!h.file) return err(E.BADF);
         const b = fileRead(h.file, h.pos, a[2]); S.wbytes(a[1], b); h.pos += b.length; return BigInt(b.length);
       }
@@ -237,6 +265,7 @@ class Process {
         S.refresh();
         if (h.std !== undefined) { post(td.decode(S.u8.slice(a[1], a[1] + a[2])), h.std === 0 ? 1 : h.std); return BigInt(a[2]); }
         if (h.fifo) { h.fifo.chunks.push(S.u8.slice(a[1], a[1] + a[2])); return BigInt(a[2]); }
+        if (h.sock) { const br = initWisp(); const r = br.call(br.OP.SEND, h.sock.id, a[2], 0, S.u8.slice(a[1], a[1] + a[2])); return BigInt(r.res); }
         if (!h.file) return err(E.BADF);
         const w = fileWrite(h.file, h.append ? h.file.size : h.pos, S.u8.slice(a[1], a[1] + a[2])); h.pos += w; return BigInt(w);
       }
@@ -244,14 +273,16 @@ class Process {
       case 'readv': { let t = 0n; for (let i = 0; i < a[2]; i++) { const p = S.r32(a[1] + i * 8), l = S.r32(a[1] + i * 8 + 4); if (!l) continue; const r = S.sys('read', [a[0], p, l]); if (r < 0n) return t > 0n ? t : r; t += r; if (Number(r) < l) break; } return t; }
       case 'open': return S.openAt(S.atPath(-100, S.cstr(a[0])), a[1], a[2]);
       case 'openat': return S.openAt(S.atPath(a[0], S.cstr(a[1])), a[2], a[3]);
-      case 'close': { if (!S.fds.has(a[0])) return err(E.BADF); S.fds.delete(a[0]); S.dirState.delete(a[0]); return 0n; }
+      case 'close': { const h = S.fds.get(a[0]); if (!h) return err(E.BADF);
+        if (h.sock && h.sock.id) initWisp().call(initWisp().OP.CLOSE, h.sock.id, 0, 0);
+        S.fds.delete(a[0]); S.dirState.delete(a[0]); return 0n; }
       case 'lseek': { const h = S.fds.get(a[0]); if (!h) return err(E.BADF);
-        if (h.std !== undefined || h.fifo) return err(E.SPIPE);
+        if (h.std !== undefined || h.fifo || h.sock) return err(E.SPIPE);
         const size = h.file ? h.file.size : 0;
         h.pos = a[2] === 0 ? Number(a[1]) : a[2] === 1 ? (h.pos || 0) + Number(a[1]) : size + Number(a[1]);
         return BigInt(h.pos); }
       case 'fstat': { const h = S.fds.get(a[0]); if (!h) return err(E.BADF);
-        if (h.std !== undefined || h.fifo) { S.putStat(a[1], { size: 0, mode: h.fifo ? 0o010600 : 0o020620 }); return 0n; }
+        if (h.std !== undefined || h.fifo || h.sock) { S.putStat(a[1], { size: 0, mode: (h.fifo || h.sock) ? 0o010600 : 0o020620 }); return 0n; }
         if (h.exe) { S.putStat(a[1], { size: 1, mode: 0o100755 }); return 0n; }
         return S.statPath(h.path, a[1]); }
       case 'stat': case 'lstat': return S.statPath(S.atPath(-100, S.cstr(a[0])), a[1]);
@@ -384,10 +415,47 @@ class Process {
       case 'getrusage': { S.refresh(); S.u8.fill(0, a[1], a[1] + 144); return 0n; }
       case 'sysinfo': { S.refresh(); S.u8.fill(0, a[0], a[0] + 112); S.i64(a[0], 1000n); S.i64(a[0] + 32, 4294967296n); S.i64(a[0] + 40, 2147483648n); return 0n; }
       case 'getrandom': { const b = new Uint8Array(Math.min(a[1], 65536)); crypto.getRandomValues(b); S.wbytes(a[0], b); return BigInt(b.length); }
-      case 'poll': { S.refresh(); for (let i = 0; i < a[1]; i++) { const ev = S.dv.getInt16(a[0] + i * 8 + 4, true); S.dv.setInt16(a[0] + i * 8 + 6, ev & 5, true); } return BigInt(a[1]); }
+      case 'poll': { S.refresh(); let ready = 0;
+        for (let i = 0; i < a[1]; i++) { const fd = S.r32(a[0] + i * 8), ev = S.dv.getInt16(a[0] + i * 8 + 4, true);
+          const h = S.fds.get(fd); let re = 0;
+          if (h && h.sock && h.sock.id) { const pk = initWisp().call(initWisp().OP.POLL, h.sock.id, 0, 0); if ((ev & 1) && pk.res > 0) re |= 1; if (ev & 4) re |= 4; }
+          else re = ev & 5;
+          S.dv.setInt16(a[0] + i * 8 + 6, re, true); if (re) ready++; }
+        return BigInt(ready); }
       case 'select': case 'pselect6': return 1n;
-      case 'socket': case 'connect': case 'bind': case 'sendto': case 'recvmsg': case 'sendmsg': case 'getsockname': case 'getpeername': return err(E.NOSYS);
-      case 'setsockopt': return 0n;
+      case 'socket': { const dom = a[0] & 0xff, type = a[1] & 0xff, nonblock = !!(a[1] & 0x800);
+        if (dom !== 2 && dom !== 10) return err(E.NOSYS);
+        const br = initWisp();
+        if (type === 2) { const r = br.call(br.OP.UDP, 0, 0, 0); if (r.res < 0) return BigInt(r.res); const g = S.nextFd++; S.fds.set(g, { sock: { id: r.res, udp: true, nonblock } }); return BigInt(g); }
+        const g = S.nextFd++; S.fds.set(g, { sock: { id: 0, dom, nonblock } }); return BigInt(g); }
+      case 'bind': return 0n;
+      case 'connect': { const h = S.fds.get(a[0]); if (!h || !h.sock) return err(E.BADF); S.refresh();
+        const dst = readSockaddr(S, a[1]);
+        if (h.sock.udp) { h.sock.dest = dst; return 0n; }
+        const br = initWisp(); const spec = te.encode(`${dst.ip}|${dst.port}`);
+        const r = br.call(br.OP.CONNECT, spec.length, 0, 0, spec); if (r.res < 0) return BigInt(r.res); h.sock.id = r.res; return 0n; }
+      case 'sendto': case 'sendmsg': { const h = S.fds.get(a[0]); if (!h || !h.sock) return err(E.BADF);
+        const br = initWisp(); S.refresh(); let payload, dest = h.sock.dest;
+        if (name === 'sendmsg') { const np = S.r32(a[1]); if (np) dest = readSockaddr(S, np);
+          const iov = S.r32(a[1] + 8), iovn = S.r32(a[1] + 12); const parts = [];
+          for (let i = 0; i < iovn; i++) { const p = S.r32(iov + i * 8), l = S.r32(iov + i * 8 + 4); if (l) parts.push(S.u8.slice(p, p + l)); }
+          payload = new Uint8Array(parts.reduce((n, x) => n + x.length, 0)); let o = 0; for (const x of parts) { payload.set(x, o); o += x.length; } }
+        else { payload = S.u8.slice(a[1], a[1] + a[2]); if (a[4]) dest = readSockaddr(S, a[4]); }
+        if (h.sock.udp) { if (!dest) return err(E.INVAL); h.sock.lastDest = dest;
+          const addr = te.encode(`${dest.ip}|${dest.port}`); const packed = new Uint8Array(payload.length + addr.length); packed.set(payload, 0); packed.set(addr, payload.length);
+          const r = br.call(br.OP.SENDTO, h.sock.id, payload.length, addr.length, packed); return BigInt(r.res); }
+        const r = br.call(br.OP.SEND, h.sock.id, payload.length, 0, payload); return BigInt(r.res); }
+      case 'recvmsg': case 'recvfrom': { const h = S.fds.get(a[0]); if (!h || !h.sock) return err(E.BADF);
+        const br = initWisp(); const op = h.sock.udp ? br.OP.RECVFROM : br.OP.RECV;
+        if (h.sock.nonblock) { const pk = br.call(br.OP.POLL, h.sock.id, 0, 0); if (pk.res <= 0) return err(E.AGAIN); }
+        if (name === 'recvfrom') { const r = br.call(op, h.sock.id, a[2], 0); if (r.res <= 0) return BigInt(r.res); S.wbytes(a[1], r.data.subarray(0, r.res));
+          if (a[4] && h.sock.lastDest) { const n = writeSockaddr(S, a[4], h.sock.lastDest); if (a[5]) S.i32(a[5], n); } return BigInt(r.res); }
+        const np = S.r32(a[1]); if (np && h.sock.lastDest) { const n = writeSockaddr(S, np, h.sock.lastDest); S.i32(a[1] + 4, n); }
+        const iov = S.r32(a[1] + 8), iovn = S.r32(a[1] + 12); let total = 0;
+        for (let i = 0; i < iovn; i++) { const p = S.r32(iov + i * 8), l = S.r32(iov + i * 8 + 4); if (!l) continue;
+          const r = br.call(op, h.sock.id, l, 0); if (r.res < 0) return total || BigInt(r.res); if (r.res === 0) break; S.wbytes(p, r.data.subarray(0, r.res)); total += r.res; if (r.res < l) break; }
+        return BigInt(total); }
+      case 'setsockopt': case 'getsockname': case 'getpeername': case 'shutdown': return 0n;
       default:
         if (!unknownSyscalls.has(name)) { unknownSyscalls.add(name); post(`[host] ENOSYS SYS_${name}\n`, 2); }
         return err(E.NOSYS);
@@ -518,12 +586,15 @@ function runProgram(p, argv, envp, fdTable, cwd, selfKey) {
 self.onmessage = async (ev) => {
   const m = ev.data;
   if (m.t === 'stdin-sab') { stdinCtl = new Int32Array(m.sab, 0, 4); stdinData = new Uint8Array(m.sab, 16); return; }
+  if (m.t === 'wisp-sab') { wispSab = m.sab; return; }
   if (m.t !== 'run') return;
   try {
     const boot0 = performance.now();
     for (const [url, prefix] of m.tars || []) await loadTar(url, prefix);
     if (m.opfs) { const n = await mountOpfs(m.opfs); if (n >= 0) post(`[host] OPFS mounted at ${m.opfs}: ${n} files\n`, 2); }
     manifest = m.manifest || {};
+    addFile('/etc/resolv.conf', te.encode('nameserver 1.1.1.1\n')); // DNS goes via DoH in the WISP worker
+    addFile('/etc/hosts', te.encode('127.0.0.1 localhost\n'));
     // seed VFS with inline binaries (e.g. wasm just produced by clang.wasm)
     if (m.blobs) for (const [p, buf] of Object.entries(m.blobs)) addFile(norm(p, '/'), new Uint8Array(buf));
     // compile URL-based modules (root + manifest); skip when running a VFS binary

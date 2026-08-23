@@ -58,6 +58,13 @@ function log(s, err){ const sp=document.createElement('span'); if(err) sp.classN
 
 let CAT = [], sel = null, running = false, worker = null;
 const sab = new SharedArrayBuffer(16+4096), ctl = new Int32Array(sab,0,4), data = new Uint8Array(sab,16);
+// persistent WISP bridge worker (owns the WebSocket to the relay); shared SAB
+const wispSab = new SharedArrayBuffer(32+65536);
+const wispWorker = new Worker('wisp-worker.js');
+// default relay = this origin's /wisp (same as the riscv-vm). For local dev
+// (no /wisp here) use the bundled wisp-relay.js on :8790.
+const RELAY_URL = (location.port==='8791') ? `ws://${location.hostname}:8790` : `${location.protocol==='https:'?'wss':'ws'}://${location.host}/wisp`;
+wispWorker.postMessage({ t:'sab', sab:wispSab, url:RELAY_URL });
 
 // per-package run config (env/tars for the special ones)
 const PYENV = { PYTHONHOME:'/py', PYTHONPATH:'/py/Lib', PYTHONDONTWRITEBYTECODE:'1', HOME:'/', LC_ALL:'C.UTF-8' };
@@ -99,7 +106,7 @@ It would run in the emulated VM tier. Build it with the farm to promote it to th
 
 function freshWorker(){
   if(worker) worker.terminate();
-  worker=new Worker('wali-worker.js'); worker.postMessage({t:'stdin-sab',sab});
+  worker=new Worker('wali-worker.js'); worker.postMessage({t:'stdin-sab',sab}); worker.postMessage({t:'wisp-sab',sab:wispSab});
   worker.onmessage=ev=>{ const m=ev.data;
     if(m.t==='out') log(m.s, m.fd===2);
     else if(m.t==='boot') statusEl.textContent=`booted ${m.ms.toFixed(0)}ms · running ${sel.name}…`;
