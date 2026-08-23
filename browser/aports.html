@@ -65,6 +65,10 @@ const wispWorker = new Worker('wisp-worker.js');
 // (no /wisp here) use the bundled wisp-relay.js on :8790.
 const RELAY_URL = (location.port==='8791') ? `ws://${location.hostname}:8790` : `${location.protocol==='https:'?'wss':'ws'}://${location.host}/wisp`;
 wispWorker.postMessage({ t:'sab', sab:wispSab, url:RELAY_URL });
+// OPFS bridge: a page-owned sibling worker holds every OPFS handle (lazy fault-in)
+const opfsSab = new SharedArrayBuffer(32 + (1<<20));
+const opfsWorker = new Worker('opfs-worker.js');
+opfsWorker.postMessage({ t:'sab', sab:opfsSab });
 
 // per-package run config (env/tars for the special ones)
 const PYENV = { PYTHONHOME:'/py', PYTHONPATH:'/py/Lib', PYTHONDONTWRITEBYTECODE:'1', HOME:'/', LC_ALL:'C.UTF-8' };
@@ -106,7 +110,7 @@ It would run in the emulated VM tier. Build it with the farm to promote it to th
 
 function freshWorker(){
   if(worker) worker.terminate();
-  worker=new Worker('wali-worker.js'); worker.postMessage({t:'stdin-sab',sab}); worker.postMessage({t:'wisp-sab',sab:wispSab});
+  worker=new Worker('wali-worker.js'); worker.postMessage({t:'stdin-sab',sab}); worker.postMessage({t:'wisp-sab',sab:wispSab}); worker.postMessage({t:'opfs-sab',sab:opfsSab});
   worker.onmessage=ev=>{ const m=ev.data;
     if(m.t==='out') log(m.s, m.fd===2);
     else if(m.t==='boot') statusEl.textContent=`booted ${m.ms.toFixed(0)}ms · running ${sel.name}…`;

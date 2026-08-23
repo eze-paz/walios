@@ -58,42 +58,100 @@ async function loadTar(url, prefix) {
     off += Math.ceil(size / 512) * 512;
   }
 }
-async function mountOpfs(mount) {
-  try {
-    const root = await navigator.storage.getDirectory();
-    try {
-      const fh = await root.getFileHandle('hello-from-opfs.txt', { create: true });
-      const sh = await fh.createSyncAccessHandle();
-      if (sh.getSize() === 0) sh.write(te.encode('greetings from real OPFS storage\n'), { at: 0 });
-      sh.close();
-    } catch {}
-    let n = 0;
-    async function walk(dirHandle, vpath) {
-      mkdirp(vpath);
-      for await (const [name, h] of dirHandle.entries()) {
-        const child = vpath + '/' + name;
-        if (h.kind === 'directory') await walk(h, child);
-        else {
-          try {
-            const sh = await h.createSyncAccessHandle();
-            const parent = child.slice(0, child.lastIndexOf('/')) || '/';
-            mkdirp(parent); dirs.get(parent).add(name);
-            files.set(child, { opfs: sh, size: sh.getSize(), mode: 0o100644, mtimeMs: Date.now(), data: null });
-            n++;
-          } catch (e) { post(`[opfs] skip ${child}: ${e.message}\n`, 2); }
-        }
-      }
+// ---- lazy OPFS mount (the riscv-vm ?p9lazy model): a sibling opfs-worker
+// (spawned by the page, SAB set via the 'opfs-sab' message) owns every OPFS
+// handle. We fault a directory's LISTING in on first touch of any path under
+// it, and open a per-file handle only when the file is actually read/written —
+// so mount cost is O(1) and untouched files hold no exclusive locks. ----
+let opfsSab = null, opfsMount = null, opfsBr = null;
+const opfsLoaded = new Set();   // dirs whose OPFS listing has been merged into the VFS
+const OFS = { READDIR: 1, OPEN: 2, READ: 3, WRITE: 4, TRUNC: 5, CLOSE: 6, UNLINK: 7, MKDIR: 8, RMDIR: 9, RENAME: 10, RELEASE: 11 };
+function initOpfs() {
+  if (opfsBr) return opfsBr;
+  if (!opfsSab) return null;
+  const ctl = new Int32Array(opfsSab, 0, 8), bdata = new Uint8Array(opfsSab, 32);
+  const call = (op, a0, a1, a2, bytes) => {
+    if (bytes) bdata.set(bytes, 0);
+    ctl[2] = op; ctl[3] = a0 | 0; ctl[4] = a1 | 0; ctl[5] = a2 | 0;
+    const prev = Atomics.load(ctl, 1);
+    Atomics.add(ctl, 0, 1); Atomics.notify(ctl, 0);
+    while (Atomics.load(ctl, 1) === prev) Atomics.wait(ctl, 1, prev);
+    return { res: ctl[6], aux: ctl[7], data: bdata };
+  };
+  opfsBr = { call, max: bdata.length };
+  return opfsBr;
+}
+const inOpfs = (p) => opfsMount && (p === opfsMount || p.startsWith(opfsMount + '/'));
+const opfsRel = (p) => p === opfsMount ? '' : p.slice(opfsMount.length + 1);
+function opfsPathOp(op, rel, rel2) {
+  const br = initOpfs(); if (!br) return -E.NOSYS;
+  const pb = te.encode(rel2 !== undefined ? rel + '\0' + rel2 : rel);
+  return br.call(op, pb.length, 0, 0, pb).res;
+}
+function opfsLoadDir(p) {       // merge one directory's OPFS listing (once)
+  if (opfsLoaded.has(p)) return; opfsLoaded.add(p);
+  const br = initOpfs(); if (!br) return;
+  const pb = te.encode(opfsRel(p));
+  const r = br.call(OFS.READDIR, pb.length, 0, 0, pb);
+  if (r.res < 0) return;
+  mkdirp(p);
+  for (const e of JSON.parse(td.decode(r.data.slice(0, r.res)))) { // slice: TextDecoder rejects SAB views
+    const child = p + '/' + e.n;
+    if (e.d) mkdirp(child);
+    else if (!files.has(child)) {
+      dirs.get(p).add(e.n);
+      files.set(child, { br: opfsRel(child), size: e.s, mode: 0o100644, mtimeMs: e.m, data: null });
     }
-    await walk(root, mount);
-    return n;
-  } catch (e) { post(`[opfs] mount failed: ${e.message}\n`, 2); return -1; }
+  }
+}
+function opfsFault(p) {         // fault in listings along p (and p itself if it is a dir)
+  if (!inOpfs(p)) return;
+  opfsLoadDir(opfsMount);
+  if (p === opfsMount) return;
+  let cur = opfsMount;
+  for (const seg of opfsRel(p).split('/')) {
+    cur = cur + '/' + seg;
+    if (dirs.has(cur) && !files.has(cur)) opfsLoadDir(cur); else break;
+  }
+}
+function opfsHandle(f, create) { // lazily open the per-file bridge handle
+  if (f.brId) return f.brId;
+  const br = initOpfs(); if (!br) return 0;
+  const pb = te.encode(f.br);
+  const r = br.call(OFS.OPEN, pb.length, create ? 1 : 0, 0, pb);
+  if (r.res <= 0) return 0;
+  f.brId = r.res;
+  return f.brId;
 }
 function fileRead(f, pos, n) {
-  if (f.opfs) { const b = new Uint8Array(Math.min(n, Math.max(0, f.size - pos))); f.opfs.read(b, { at: pos }); return b; }
+  if (f.br !== undefined) {
+    const br = initOpfs(), id = opfsHandle(f); if (!id) return new Uint8Array(0);
+    const want = Math.min(n, Math.max(0, f.size - pos)), out = new Uint8Array(want);
+    let got = 0;
+    while (got < want) {
+      const chunk = Math.min(want - got, br.max);
+      const r = br.call(OFS.READ, id, pos + got, chunk, null);
+      if (r.res <= 0) break;
+      out.set(r.data.subarray(0, r.res), got); got += r.res;
+      if (r.res < chunk) break;
+    }
+    return out.subarray(0, got);
+  }
   return f.data.subarray(pos, Math.min(pos + n, f.size));
 }
 function fileWrite(f, pos, bytes) {
-  if (f.opfs) { f.opfs.write(bytes, { at: pos }); f.size = Math.max(f.size, pos + bytes.length); return bytes.length; }
+  if (f.br !== undefined) {
+    const br = initOpfs(), id = opfsHandle(f, true); if (!id) return 0;
+    let done = 0;
+    while (done < bytes.length) {
+      const chunk = Math.min(bytes.length - done, br.max);
+      const r = br.call(OFS.WRITE, id, pos + done, chunk, bytes.subarray(done, done + chunk));
+      if (r.res <= 0) break;
+      done += r.res;
+    }
+    f.size = Math.max(f.size, pos + done); f.mtimeMs = Date.now();
+    return done;
+  }
   if (pos + bytes.length > f.data.length) {
     const nd = new Uint8Array(Math.max(pos + bytes.length, f.data.length * 2, 4096));
     nd.set(f.data.subarray(0, f.size)); f.data = nd;
@@ -259,6 +317,7 @@ class Process {
   }
   statPath(path2, sp) {
     if (path2 === '/proc/self/exe') { this.putStat(sp, { size: 1, mode: 0o100755 }); return 0n; }
+    opfsFault(path2);
     if (dirs.has(path2)) { this.putStat(sp, { size: 4096, mode: 0o040755 }); return 0n; }
     const f = files.get(path2); if (!f) return err(E.NOENT);
     this.putStat(sp, { size: f.size, mode: f.mode, mtimeMs: f.mtimeMs });
@@ -267,6 +326,7 @@ class Process {
   openAt(path2, flags, mode) {
     const O_CREAT = 0o100, O_TRUNC = 0o1000, O_APPEND = 0o2000, O_DIRECTORY = 0o200000, O_EXCL = 0o200;
     if (path2 === '/proc/self/exe') { const g = this.nextFd++; this.fds.set(g, { exe: true }); return BigInt(g); }
+    opfsFault(path2);
     if (path2 === '/dev/ptmx') { const id = newPty(); const g = this.nextFd++; this.fds.set(g, { pty: id, master: true }); return BigInt(g); }
     if (path2 === '/dev/null') { const g = this.nextFd++; this.fds.set(g, { devnull: true }); return BigInt(g); }
     { const m = path2.match(/^\/dev\/pts\/(\d+)$/); if (m) { const id = +m[1]; if (!ptys.has(id)) return err(E.NOENT); const g = this.nextFd++; this.fds.set(g, { pty: id, master: false }); return BigInt(g); } }
@@ -277,8 +337,13 @@ class Process {
       if (!(flags & O_CREAT)) return err(E.NOENT);
       addFile(path2, new Uint8Array(0));
       f = files.get(path2);
+      if (inOpfs(path2)) { f.br = opfsRel(path2); f.data = null; opfsHandle(f, true); } // new files under the mount persist
     } else if ((flags & O_CREAT) && (flags & O_EXCL)) return err(E.EXIST);
-    if (flags & O_TRUNC) { if (f.opfs) f.opfs.truncate(0); else f.data = new Uint8Array(0); f.size = 0; }
+    if (flags & O_TRUNC) {
+      if (f.br !== undefined) { const id = opfsHandle(f, true); if (id) initOpfs().call(OFS.TRUNC, id, 0, 0, null); }
+      else f.data = new Uint8Array(0);
+      f.size = 0;
+    }
     const g = this.nextFd++;
     this.fds.set(g, { path: path2, file: f, pos: (flags & O_APPEND) ? f.size : 0, append: !!(flags & O_APPEND) });
     return BigInt(g);
@@ -339,20 +404,44 @@ class Process {
       case 'access': case 'faccessat': case 'faccessat2': {
         const p = name === 'access' ? S.atPath(-100, S.cstr(a[0])) : S.atPath(a[0], S.cstr(a[1]));
         if (p === '/proc/self/exe') return 0n;
+        opfsFault(p);
         return (files.has(p) || dirs.has(p)) ? 0n : err(E.NOENT); }
       case 'readlink': { const p = S.atPath(-100, S.cstr(a[0]));
         if (p === '/proc/self/exe') return BigInt(S.wstr(a[1], '/bin/' + (S.argv[0] || 'wasm'), a[2] + 1));
         return err(E.INVAL); }
-      case 'unlink': { const p = S.atPath(-100, S.cstr(a[0])); if (!files.has(p)) return err(E.NOENT);
-        const f = files.get(p); if (f.opfs) { f.opfs.truncate(0); f.opfs.close(); } rmEntry(p); return 0n; }
-      case 'rmdir': { const p = S.atPath(-100, S.cstr(a[0])); if (!dirs.has(p)) return err(E.NOENT);
-        if (dirs.get(p).size) return err(E.NOTEMPTY); rmEntry(p); return 0n; }
-      case 'mkdir': { mkdirp(S.atPath(-100, S.cstr(a[0]))); return 0n; }
+      case 'unlink': { const p = S.atPath(-100, S.cstr(a[0])); opfsFault(p); if (!files.has(p)) return err(E.NOENT);
+        const f = files.get(p);
+        if (f.br !== undefined) { const r = opfsPathOp(OFS.UNLINK, f.br); if (r < 0) return BigInt(r); f.brId = 0; }
+        rmEntry(p); return 0n; }
+      case 'rmdir': { const p = S.atPath(-100, S.cstr(a[0])); opfsFault(p); if (!dirs.has(p)) return err(E.NOENT);
+        if (dirs.get(p).size) return err(E.NOTEMPTY);
+        if (inOpfs(p) && p !== opfsMount) { const r = opfsPathOp(OFS.RMDIR, opfsRel(p)); if (r < 0 && r !== -E.NOENT) return BigInt(r); }
+        rmEntry(p); return 0n; }
+      case 'mkdir': { const p = S.atPath(-100, S.cstr(a[0])); opfsFault(p); mkdirp(p);
+        if (inOpfs(p) && p !== opfsMount) { const r = opfsPathOp(OFS.MKDIR, opfsRel(p)); if (r < 0) return BigInt(r); opfsLoaded.add(p); }
+        return 0n; }
       case 'rename': { const pa = S.atPath(-100, S.cstr(a[0])), pb = S.atPath(-100, S.cstr(a[1]));
-        const f = files.get(pa); if (!f) return err(E.NOENT); rmEntry(pb); rmEntry(pa);
-        addFile(pb, f.data || new Uint8Array(0)); const nf = files.get(pb);
-        if (f.opfs) nf.opfs = f.opfs; nf.size = f.size; return 0n; }
-      case 'chdir': { const p = S.atPath(-100, S.cstr(a[0])); if (!dirs.has(p)) return err(E.NOTDIR); S.cwd.p = p; return 0n; }
+        opfsFault(pa); opfsFault(pb);
+        const f = files.get(pa); if (!f) return err(E.NOENT);
+        if (f.br !== undefined && inOpfs(pb)) {          // OPFS -> OPFS: rename in the store
+          const r = opfsPathOp(OFS.RENAME, f.br, opfsRel(pb)); if (r < 0) return BigInt(r);
+          rmEntry(pb); rmEntry(pa);
+          addFile(pb, new Uint8Array(0)); const nf = files.get(pb);
+          nf.br = opfsRel(pb); nf.brId = 0; nf.data = null; nf.size = f.size; return 0n; }
+        if (f.br !== undefined) {                        // OPFS -> RAM: pull bytes out, drop the store copy
+          const bytes = fileRead(f, 0, f.size); const r = opfsPathOp(OFS.UNLINK, f.br); if (r < 0) return BigInt(r);
+          rmEntry(pb); rmEntry(pa); addFile(pb, bytes.slice()); return 0n; }
+        if (inOpfs(pb)) {                                // RAM -> OPFS: persist into the store
+          const bytes = f.data ? f.data.subarray(0, f.size) : new Uint8Array(0);
+          rmEntry(pb); rmEntry(pa);
+          addFile(pb, new Uint8Array(0)); const nf = files.get(pb);
+          nf.br = opfsRel(pb); nf.data = null; nf.size = 0;
+          if (!opfsHandle(nf, true)) return err(E.ACCES);
+          initOpfs().call(OFS.TRUNC, nf.brId, 0, 0, null);
+          fileWrite(nf, 0, bytes); return 0n; }
+        rmEntry(pb); rmEntry(pa);                        // RAM -> RAM (original behavior)
+        addFile(pb, f.data || new Uint8Array(0)); files.get(pb).size = f.size; return 0n; }
+      case 'chdir': { const p = S.atPath(-100, S.cstr(a[0])); opfsFault(p); if (!dirs.has(p)) return err(E.NOTDIR); S.cwd.p = p; return 0n; }
       case 'fchdir': { const h = S.fds.get(a[0]); if (!h || !h.dir) return err(E.BADF); S.cwd.p = h.path; return 0n; }
       case 'getcwd': return BigInt(S.wstr(a[0], S.cwd.p, a[1]) + 1);
       case 'chmod': case 'fchmod': case 'chown': return 0n;
@@ -729,7 +818,7 @@ function runProgram(p, argv, envp, fdTable, cwd, selfKey) {
     const vp = p.startsWith('/') ? norm(p, '/') : norm(p, cwd);
     const f = files.get(vp);
     if (f) {
-      const bytes = f.opfs ? fileRead(f, 0, f.size) : f.data.subarray(0, f.size);
+      const bytes = f.br !== undefined ? fileRead(f, 0, f.size) : f.data.subarray(0, f.size);
       if (bytes[0] === 0 && bytes[1] === 0x61 && bytes[2] === 0x73 && bytes[3] === 0x6d) {
         key = 'vfs:' + vp;
         if (!modCache.has(key)) modCache.set(key, new WebAssembly.Module(bytes.slice()));
@@ -748,7 +837,7 @@ async function runProgramAsync(p, argv, envp, fdTable, cwd, selfKey) {
     const vp = p.startsWith('/') ? norm(p, '/') : norm(p, cwd);
     const f = files.get(vp);
     if (f) {
-      const bytes = f.opfs ? fileRead(f, 0, f.size) : f.data.subarray(0, f.size);
+      const bytes = f.br !== undefined ? fileRead(f, 0, f.size) : f.data.subarray(0, f.size);
       if (bytes[0] === 0 && bytes[1] === 0x61 && bytes[2] === 0x73 && bytes[3] === 0x6d) {
         key = 'vfs:' + vp;
         if (!modCache.has(key)) modCache.set(key, new WebAssembly.Module(bytes.slice()));
@@ -765,11 +854,15 @@ self.onmessage = async (ev) => {
   const m = ev.data;
   if (m.t === 'stdin-sab') { stdinCtl = new Int32Array(m.sab, 0, 4); stdinData = new Uint8Array(m.sab, 16); return; }
   if (m.t === 'wisp-sab') { wispSab = m.sab; return; }
+  if (m.t === 'opfs-sab') { opfsSab = m.sab; return; }
   if (m.t !== 'run') return;
   try {
     const boot0 = performance.now();
     for (const [url, prefix] of m.tars || []) await loadTar(url, prefix);
-    if (m.opfs) { const n = await mountOpfs(m.opfs); if (n >= 0) post(`[host] OPFS mounted at ${m.opfs}: ${n} files\n`, 2); }
+    if (m.opfs) {
+      opfsMount = norm(m.opfs, '/'); mkdirp(opfsMount);
+      post(opfsSab ? `[host] OPFS lazily mounted at ${opfsMount}\n` : `[host] OPFS requested but no opfs-sab bridge; ${opfsMount} is RAM-only\n`, 2);
+    }
     manifest = m.manifest || {};
     addFile('/etc/resolv.conf', te.encode('nameserver 1.1.1.1\n')); // DNS goes via DoH in the WISP worker
     addFile('/etc/hosts', te.encode('127.0.0.1 localhost\n'));
@@ -784,7 +877,7 @@ self.onmessage = async (ev) => {
       const vp = norm(m.vfsMain, '/'); const f = files.get(vp);
       if (!f) throw new Error('vfsMain not found: ' + vp);
       rootKey = 'vfs:' + vp;
-      const bytes = f.opfs ? fileRead(f, 0, f.size) : f.data.subarray(0, f.size);
+      const bytes = f.br !== undefined ? fileRead(f, 0, f.size) : f.data.subarray(0, f.size);
       if (!modCache.has(rootKey)) modCache.set(rootKey, new WebAssembly.Module(bytes.slice()));
     }
     const rootFds = new Map([[0, { std: 0 }], [1, { std: 1 }], [2, { std: 2 }]]);
@@ -797,7 +890,7 @@ self.onmessage = async (ev) => {
     self.postMessage({ t: 'boot', ms: performance.now() - boot0 });
     const t0 = performance.now();
     const code = JSPI ? await root.runAsync() : root.run();
-    for (const f of files.values()) if (f.opfs) { try { f.opfs.flush(); } catch {} }
+    if (opfsBr) { try { opfsBr.call(OFS.RELEASE, 0, 0, 0, null); } catch {} for (const f of files.values()) if (f.brId) f.brId = 0; }
     self.postMessage({ t: 'exit', code, ms: performance.now() - t0, syscalls: syscallTotal, procs: procCount, jspi: JSPI, pipeSuspends, waitSuspends });
   } catch (e) {
     post('[host] fatal: ' + (e.stack || e) + '\n', 2);

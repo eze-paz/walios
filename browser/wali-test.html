@@ -37,11 +37,16 @@ function log(s, err) { const sp = document.createElement('span'); if (err) sp.cl
 let worker = null, running = false;
 const sab = new SharedArrayBuffer(16 + 4096);
 const ctl = new Int32Array(sab, 0, 4), data = new Uint8Array(sab, 16);
+// OPFS bridge: a page-owned sibling worker holds every OPFS handle (lazy fault-in)
+const opfsSab = new SharedArrayBuffer(32 + (1 << 20));
+const opfsWorker = new Worker('opfs-worker.js');
+opfsWorker.postMessage({ t: 'sab', sab: opfsSab });
 
 function freshWorker() {
   if (worker) worker.terminate();
   worker = new Worker('wali-worker.js');
   worker.postMessage({ t: 'stdin-sab', sab });
+  worker.postMessage({ t: 'opfs-sab', sab: opfsSab });
   worker.onmessage = (ev) => {
     const m = ev.data;
     if (m.t === 'out') log(m.s, m.fd === 2);
