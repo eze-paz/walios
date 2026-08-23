@@ -100,7 +100,10 @@ self.onmessage = async (ev) => {
   if (ev.data.t !== 'sab') return;
   ctl = new Int32Array(ev.data.sab, 0, 8); data = new Uint8Array(ev.data.sab, 32);
   root = await navigator.storage.getDirectory();
-  try { // keep the demo seed the eager mount used to plant
+  // Optional isolation: scope this mount to an OPFS subdir so a shell can't see or
+  // delete the host app's OPFS data (same origin). terminal.html passes subdir.
+  if (ev.data.subdir) { for (const s of ev.data.subdir.split('/').filter(Boolean)) root = await root.getDirectoryHandle(s, { create: true }); }
+  else try { // legacy full-root mount: keep the demo seed the eager mount used to plant
     const sh = await (await root.getFileHandle('hello-from-opfs.txt', { create: true })).createSyncAccessHandle();
     if (sh.getSize() === 0) sh.write(te.encode('greetings from real OPFS storage\n'), { at: 0 });
     sh.close();

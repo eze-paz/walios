@@ -16,13 +16,6 @@ cat > "$S/etc/profile" <<'EOF'
 export PS1='walios:\w\$ '
 cat /etc/motd 2>/dev/null
 EOF
-cat > "$S/root/.profile" <<'EOF'
-cat /etc/motd 2>/dev/null
-EOF
-cat > "$S/root/readme.txt" <<'EOF'
-Welcome to walios. This whole shell — and every command you run — is native
-WebAssembly executing in your browser tab, answered by a JavaScript syscall host.
-No CPU emulation. Try: ls, cat readme.txt, seq 5 | wc -l, find / -maxdepth 2.
-EOF
-printf 'hello from a file inside the wasm OS\n' > "$S/root/hello.txt"
+# NB: no files under /root — it's a persistent OPFS mount (see terminal.html), so the
+# in-memory tar must not shadow it. Welcome lives in /etc/motd (cat it any time).
 cd "$S" && tar czf ~/wali-www/rootfs.tar.gz . && echo "rootfs: $(stat -c%s ~/wali-www/rootfs.tar.gz) bytes"
