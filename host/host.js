@@ -35,7 +35,7 @@ if (!wasmPath) { console.error('usage: node host.js prog.wasm [args...]'); proce
 
 const PAGE = 65536;
 const CHILD_DONE = 0x7e57n;
-const E = { PERM:1, NOENT:2, BADF:9, CHILD:10, AGAIN:11, NOMEM:12, ACCES:13, FAULT:14, EXIST:17, NOTDIR:20, ISDIR:21, INVAL:22, MFILE:24, NOTTY:25, SPIPE:29, RANGE:34, NOSYS:38, NOTEMPTY:39 };
+const E = { PERM:1, NOENT:2, BADF:9, CHILD:10, AGAIN:11, NOMEM:12, ACCES:13, FAULT:14, EXIST:17, NOTDIR:20, ISDIR:21, INVAL:22, MFILE:24, NOTTY:25, SPIPE:29, PIPE:32, RANGE:34, NOSYS:38, NOTEMPTY:39 };
 const err = (e) => BigInt(-e);
 function sysErr(e) {
   const m = { EPERM:E.PERM, ENOENT:E.NOENT, EBADF:E.BADF, EACCES:E.ACCES, EEXIST:E.EXIST, ENOTDIR:E.NOTDIR, EISDIR:E.ISDIR, EINVAL:E.INVAL, ENOTEMPTY:E.NOTEMPTY, EMFILE:E.MFILE, ESPIPE:E.SPIPE, EAGAIN:E.AGAIN };
@@ -274,8 +274,10 @@ class Process {
         const h = S.fds.get(a[0]); if (!h) return err(E.BADF);
         S.refresh();
         if (h.std !== undefined) { try { return BigInt(fs.writeSync(h.std === 0 ? 1 : h.std, S.u8, a[1], a[2])); } catch (e) { return sysErr(e); } }
-        if (h.fifo) { h.fifo.chunks.push(Buffer.from(S.u8.slice(a[1], a[1] + a[2]))); wakePipe(h.fifo); return BigInt(a[2]); }
-        if (h.spair) { h.spair.wr.chunks.push(Buffer.from(S.u8.slice(a[1], a[1] + a[2]))); wakePipe(h.spair.wr); return BigInt(a[2]); }
+        if (h.fifo) { if (h.fifo.readers <= 0) return err(E.PIPE); // no reader will ever come back
+          h.fifo.chunks.push(Buffer.from(S.u8.slice(a[1], a[1] + a[2]))); wakePipe(h.fifo); return BigInt(a[2]); }
+        if (h.spair) { if (h.spair.wr.readers <= 0) return err(E.PIPE); // peer end closed
+          h.spair.wr.chunks.push(Buffer.from(S.u8.slice(a[1], a[1] + a[2]))); wakePipe(h.spair.wr); return BigInt(a[2]); }
         if (h.devnull) return BigInt(a[2]);
         if (h.pty !== undefined) { const p = ptys.get(h.pty); const b = S.u8.slice(a[1], a[1] + a[2]);
           if (h.master) ptyMasterWrite(p, b); else ptySlaveWrite(p, b); return BigInt(a[2]); }
@@ -328,6 +330,19 @@ class Process {
           const tgt = h.pty !== undefined ? (h.master ? '/dev/ptmx' : '/dev/pts/' + h.pty) : h.path ? h.path : h.std !== undefined ? '/dev/tty' : '/dev/null';
           return BigInt(S.wstr(a[1], tgt, a[2] + 1)); }
         try { return BigInt(S.wstr(a[1], fs.readlinkSync(p), a[2] + 1)); } catch (e) { return sysErr(e); } }
+      case 'utimensat': case 'utimes': case 'futimesat': { // touch & friends set file times
+        const UTIME_OMIT = 0x3ffffffe;
+        const p = name === 'utimes' ? S.rpath(S.cstr(a[0])) : S.atPath(a[0], S.cstr(a[1]));
+        const tp = name === 'utimes' ? a[1] : a[2];
+        const now = Date.now() / 1000;
+        let at = now, mt = now;
+        if (tp) { S.refresh();
+          if (name === 'utimes') { at = Number(S.r64(tp)) + Number(S.r64(tp + 8)) / 1e6; mt = Number(S.r64(tp + 16)) + Number(S.r64(tp + 24)) / 1e6; }
+          else { const ts = (o) => { const s = Number(S.r64(tp + o)), ns = Number(S.r64(tp + o + 8)); return ns === UTIME_OMIT ? null : ns >= 0x3ffffffd ? now : s + ns / 1e9; };
+            at = ts(0); mt = ts(16); } }
+        try { const st = fs.statSync(p);
+          fs.utimesSync(p, at === null ? st.atimeMs / 1000 : at, mt === null ? st.mtimeMs / 1000 : mt); return 0n;
+        } catch (e) { return sysErr(e); } }
       case 'unlink': { try { fs.unlinkSync(S.rpath(S.cstr(a[0]))); return 0n; } catch (e) { return sysErr(e); } }
       case 'rmdir': { try { fs.rmdirSync(S.rpath(S.cstr(a[0]))); return 0n; } catch (e) { return sysErr(e); } }
       case 'mkdir': { try { fs.mkdirSync(S.rpath(S.cstr(a[0])), a[1]); return 0n; } catch (e) { return sysErr(e); } }
@@ -477,7 +492,7 @@ class Process {
       case 'set_tid_address': return BigInt(S.pid);
       case 'tkill': case 'kill': { if (!(a[1] | 0)) return 0n; // sig 0 = liveness probe, never kills
         if (S.inChild()) return S.parkChild({ exited: 128 + (a[1] | 0) }); throw new ExitError(128 + (a[1] | 0)); }
-      case 'rt_sigaction': case 'rt_sigprocmask': case 'sigaltstack': case 'setitimer': return 0n;
+      case 'rt_sigaction': case 'rt_sigprocmask': case 'sigaltstack': case 'setitimer': case 'prctl': return 0n;
       case 'futex': return 0n;
       case 'sched_getaffinity': { S.i64(a[2], 1n); return 8n; }
       case 'sched_yield': return 0n;

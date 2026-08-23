@@ -11,6 +11,24 @@ const FARM = path.join(HOME, 'wali-farm');
 const OVERLAY = path.join(FARM, 'overlay');
 const APORTS = 'https://git.alpinelinux.org/aports/plain';
 
+// pre-flight gate: a broken host silently poisons every smoke test in the run,
+// so refuse to farm until the regression suite is green against the SAME host
+// build-one.sh uses. FARM_NO_GATE=1 skips (e.g. mid-bringup of a new syscall).
+if (!process.env.FARM_NO_GATE) {
+  const runsh = [path.join(HOME, 'wali-os', 'tests', 'run.sh'), path.join(__dirname, '..', 'tests', 'run.sh')]
+    .find(p => fs.existsSync(p));
+  if (runsh) {
+    console.log('[farm] pre-flight: regression suite vs ' + path.join(HOME, 'walihost', 'host.js'));
+    try {
+      execFileSync('bash', [runsh], { stdio: 'inherit', timeout: 300000,
+        env: { ...process.env, HOST: path.join(HOME, 'walihost', 'host.js') } });
+    } catch {
+      console.error('[farm] pre-flight FAILED — host regressions would poison every smoke test. Fix the host or set FARM_NO_GATE=1.');
+      process.exit(1);
+    }
+  } else console.log('[farm] pre-flight: tests/run.sh not found, skipping gate');
+}
+
 // Seed = DEPENDENTS ONLY. The closure crawler discovers and orders their
 // libraries automatically (grep→pcre2, jq→oniguruma, less→ncurses, file→zlib...).
 const SEED = ['grep', 'jq', 'file', 'less', 'tar', 'sed', 'bc'];

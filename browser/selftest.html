@@ -1,0 +1,84 @@
+<!doctype html>
+<!-- walios browser self-test: scripted assertions over the worker host.
+     Serve from a dir with the wasm assets (wali-www) via coi.py, open, done —
+     the suite runs on load and reports "pass=N fail=M" in #summary (and the
+     page title), so it is drivable by any browser automation. -->
+<html><head><meta charset="utf-8"><title>walios selftest: running…</title>
+<style>body{font:13px monospace;background:#111;color:#ddd;padding:1em}
+.ok{color:#7c7}.bad{color:#f77}pre{white-space:pre-wrap;color:#888;margin:0 0 1em 2em}</style></head>
+<body>
+<h3>walios browser self-test</h3>
+<div id="log"></div>
+<div id="summary">running…</div>
+<script>
+'use strict';
+const logEl = document.getElementById('log'), sumEl = document.getElementById('summary');
+const stdinSab = new SharedArrayBuffer(16 + 4096);
+const opfsSab = new SharedArrayBuffer(32 + (1 << 20));
+const opfsWorker = new Worker('opfs-worker.js');
+opfsWorker.postMessage({ t: 'sab', sab: opfsSab });
+const MANIFEST = { 'busybox': 'busybox.wasm', 'sh': 'busybox.wasm', 'hush': 'busybox.wasm' };
+
+// one run = fresh wali-worker (like the real pages); resolves with captured output
+function run(argvLine, opts = {}) {
+  return new Promise((resolve) => {
+    const w = new Worker('wali-worker.js');
+    let out = '';
+    const timer = setTimeout(() => { w.terminate(); resolve({ out, code: -1, timeout: true }); }, 20000);
+    w.onmessage = (ev) => {
+      const m = ev.data;
+      if (m.t === 'out') out += m.s;
+      else if (m.t === 'exit') { clearTimeout(timer); w.terminate(); resolve({ out, code: m.code }); }
+    };
+    w.postMessage({ t: 'stdin-sab', sab: stdinSab });
+    w.postMessage({ t: 'opfs-sab', sab: opfsSab });
+    w.postMessage({ t: 'run', wasm: 'busybox.wasm', manifest: MANIFEST,
+      argv: ['busybox', 'hush', '-c', argvLine], opfs: '/files', ...opts });
+  });
+}
+
+let pass = 0, fail = 0;
+function check(name, ok, detail) {
+  const d = document.createElement('div');
+  d.className = ok ? 'ok' : 'bad';
+  d.textContent = (ok ? 'ok   ' : 'FAIL ') + name;
+  logEl.appendChild(d);
+  if (!ok) { const p = document.createElement('pre'); p.textContent = detail || ''; logEl.appendChild(p); fail++; }
+  else pass++;
+}
+
+(async () => {
+  // 1. lazy mount: write a marker, then ls /files must fault the listing in
+  //    (deliberately not asserting the sibling's seed file — a cold OPFS bucket
+  //    can lag enumeration of a file created moments earlier)
+  let r = await run('echo probe > /files/probe.txt; busybox ls /files');
+  check('lazy mount + readdir fault-in', /OPFS lazily mounted/.test(r.out) && /probe\.txt/.test(r.out), r.out);
+
+  // 2. write + readback in one run
+  r = await run('echo selftest-payload > /files/selftest.txt; cat /files/selftest.txt');
+  check('write + readback under /files', /selftest-payload/.test(r.out) && r.code === 0, r.out);
+
+  // 3. persistence + lock release: a FRESH worker reads what the last one wrote
+  r = await run('cat /files/selftest.txt');
+  check('cross-run persistence (locks released)', /selftest-payload/.test(r.out), r.out);
+
+  // 4. exec fallback: bare external command resolves to the busybox multi-call
+  r = await run('echo one two three | wc -w');
+  check('busybox fallback for external commands', /\b3\b/.test(r.out) && r.code === 0, r.out);
+
+  // 5. nested dir create + readback
+  r = await run('mkdir /files/selfdir; echo nested > /files/selfdir/n.txt; cat /files/selfdir/n.txt');
+  check('mkdir + nested write', /nested/.test(r.out), r.out);
+
+  // 6. unlink/rmdir propagate to the store: fresh run must not see them
+  await run('busybox rm /files/selftest.txt /files/probe.txt /files/selfdir/n.txt 2>/dev/null; busybox rmdir /files/selfdir 2>/dev/null; echo cleanup-done');
+  r = await run('cat /files/selftest.txt 2>&1; busybox ls /files');
+  const gone = !/selftest-payload/.test(r.out);
+  check('unlink visible to a fresh run', gone, r.out);
+
+  sumEl.textContent = `pass=${pass} fail=${fail}`;
+  sumEl.className = fail ? 'bad' : 'ok';
+  document.title = `walios selftest: pass=${pass} fail=${fail}`;
+})();
+</script>
+</body></html>
