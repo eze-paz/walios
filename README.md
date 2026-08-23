@@ -88,28 +88,41 @@ Shipped & verified:
   empty pipes and were resumed by the concurrent upstream). Default stays the
   synchronous model; opt in with `WALI_JSPI=1` (node) / `jspi:true` (browser).
 
-Toward interactive `sshd` (in progress): real OpenSSH 9.9 `sshd`+`sshd-session`
-speak the SSH-2 wire protocol over a socketpair loopback here — the syscall gaps it
-needed are now filled generally (`socketpair(AF_UNIX)` as cross-connected fifos;
-honest `O_NONBLOCK`/`EAGAIN` on pipes+socketpairs so poll-driven event loops work —
-this was also a real bug in the JSPI scheduler; `setgroups`/`chroot` stubs;
-`execve` made suspend-capable so a re-exec chain runs concurrently). The one hard
-wall is **privilege separation**: `fork()`-without-`exec` needs the monitor and
-child running *concurrently in a copy of the same memory*, which the JSPI scheduler
-cannot do (a live wasm stack can't be cloned). Rather than patch OpenSSH, we're
-building the **general fork substrate** with Asyncify: at `fork()` the live call
-stack is unwound into linear memory, the whole memory is copied to a fresh instance,
-and *both* instances are rewound to the fork point (parent←pid, child←0) and
-scheduled concurrently. `host/asyncify-fork-proof.mjs` (+ `.c`) proves it end to
-end: parent and child run interleaved on independent copied memories. Remaining to
-land it: real `fork()` in musl (drop the vfork-macro), Asyncify over *actual*
-wasm-EH try/catch (SJLJ) — the key open risk — and copy-on-fork performance, then
-unmodified privsep `sshd` runs.
+- **Interactive `sshd` — unmodified OpenSSH 9.9, privsep enabled.** A real
+  `ssh -o ProxyCommand="sshd -i"` loopback runs entirely as WALI wasm processes: the
+  ssh client, `sshd`, `sshd-session`, the privsep monitor **and** child, and the
+  login shell, all under the concurrent scheduler. Verified end to end — KEX
+  (post-quantum sntrup761x25519), publickey auth, privsep, PTY allocation, and a
+  live interactive login shell: type `uname -a` and get `Linux wali … wasm32` back,
+  with a prompt, `$SSH_TTY=/dev/pts/0`, clean teardown. See `host/ssh-loopback-demo.sh`.
 
-Also remaining: async stdin under JSPI (still SAB-blocking); a few per-package
-source walls (oniguruma `st.h`, ncurses native `tic`); farm scale-out. The
-`clang.wasm` from-scratch build recipe is in `ci/` + `farm/` but is moot now that a
-maintained prebuilt exists.
+  Getting there required a **general fork substrate** (no OpenSSH source edits) plus
+  filling real syscall gaps, all in `host/host.js`:
+  - **Real `fork()` via Asyncify.** `fork()`-without-`exec` (privsep) needs the
+    monitor and child running *concurrently in a copy of the same memory* — which the
+    JSPI scheduler can't do (a live wasm stack can't be cloned). So at `SYS_fork` the
+    host unwinds the caller's stack into linear memory (Binaryen `--asyncify`), copies
+    the whole memory into a fresh instance, and rewinds *both* to the fork point
+    (parent←pid, child←0), scheduling them concurrently. Binaries are built with real
+    `fork()` (`-D__WALI_ASYNCIFY_FORK`, see `musl-patches/asyncify-fork.md`) then
+    `wasm-opt --asyncify --pass-arg=asyncify-imports@wali.SYS_fork`; only `SYS_fork`
+    triggers asyncify, so blocking syscalls keep using JSPI. `host/asyncify-fork-proof.mjs`
+    is the minimal proof; `host/asyncify-forkwali.c` a real-musl fork+wait.
+  - `socketpair(AF_UNIX)` with **SCM_RIGHTS fd passing** (the privsep monitor passes
+    the pty + socket fds to the child).
+  - Honest `O_NONBLOCK`/`EAGAIN` on pipes & socketpairs (was a real JSPI-scheduler
+    bug: reads always suspended, so poll-driven event loops deadlocked).
+  - POSIX lowest-free fd allocation (sshd reopens `/dev/null` expecting fd 0).
+  - PTY `ttyname` support (`/proc/self/fd/N`, `stat(/dev/pts/N)` with matching
+    dev/ino) and suspend/wake on the pty line discipline.
+  - **Async stdin** under JSPI (event-driven, not SAB-blocking) so the client waiting
+    for a keystroke doesn't freeze the shell/server — required for live interactivity.
+  - `setgroups`/`chroot` stubs; `execve` made suspend-capable (re-exec runs concurrently).
+
+Remaining: port the fork substrate + async stdin to the browser worker; a few
+per-package source walls (oniguruma `st.h`, ncurses native `tic`); farm scale-out.
+The `clang.wasm` from-scratch build recipe is in `ci/` + `farm/` but is moot now that
+a maintained prebuilt exists.
 
 Not a from-scratch build: this rides the WALI project (github.com/arjunr2/WALI) for
 the toolchain/ABI, and @yowasp/clang for the in-browser compiler. This repo is the
