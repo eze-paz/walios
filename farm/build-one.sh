@@ -7,7 +7,7 @@ pkg="$1"; OVERLAY="$2"
 FARM=~/wali-farm; W=~/wali/build
 APORTS="https://git.alpinelinux.org/aports/plain"
 HOST="node $HOME/walihost/host.js"
-CC="$W/llvm/bin/clang --target=wasm32-unknown-linux-muslwali --sysroot=$W/sysroot -O2 -mllvm -wasm-enable-sjlj -fwasm-exceptions -pthread -matomics -mbulk-memory -mexception-handling -I$OVERLAY/usr/include -L$OVERLAY/usr/lib -L$W/sysroot/lib -Wl,--shared-memory -Wl,--export-memory -Wl,--max-memory=2147483648 -Wl,-z,stack-size=8388608 -Wno-implicit-function-declaration -Wno-int-conversion -Wno-incompatible-pointer-types -Wno-incompatible-function-pointer-types -Wno-unused-command-line-argument -Wno-ignored-optimization-argument"
+CC="$W/llvm/bin/clang --target=wasm32-unknown-linux-muslwali --sysroot=$W/sysroot -O2 -mllvm -wasm-enable-sjlj -fwasm-exceptions -pthread -matomics -mbulk-memory -mexception-handling -I$OVERLAY/usr/include -L$OVERLAY/usr/lib -L$W/sysroot/lib -Wl,--shared-memory -Wl,--export-memory -Wl,--export-table -Wl,--table-base=16 -Wl,--max-memory=2147483648 -Wl,-z,stack-size=8388608 -Wno-implicit-function-declaration -Wno-int-conversion -Wno-incompatible-pointer-types -Wno-incompatible-function-pointer-types -Wno-unused-command-line-argument -Wno-ignored-optimization-argument"
 AR="$W/llvm/bin/llvm-ar"; RANLIB="$W/llvm/bin/llvm-ranlib"; LD="$HOME/walihost/wali-ld"
 log="$FARM/log/$pkg.log"; : > "$log"
 bdir="$FARM/src/$pkg"; rm -rf "$bdir"; mkdir -p "$bdir" "$FARM/repo" "$OVERLAY"

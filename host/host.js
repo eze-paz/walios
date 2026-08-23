@@ -35,7 +35,7 @@ if (!wasmPath) { console.error('usage: node host.js prog.wasm [args...]'); proce
 
 const PAGE = 65536;
 const CHILD_DONE = 0x7e57n;
-const E = { PERM:1, NOENT:2, BADF:9, CHILD:10, AGAIN:11, NOMEM:12, ACCES:13, FAULT:14, EXIST:17, NOTDIR:20, ISDIR:21, INVAL:22, MFILE:24, NOTTY:25, SPIPE:29, PIPE:32, RANGE:34, NOSYS:38, NOTEMPTY:39 };
+const E = { PERM:1, NOENT:2, SRCH:3, INTR:4, BADF:9, CHILD:10, AGAIN:11, NOMEM:12, ACCES:13, FAULT:14, EXIST:17, NOTDIR:20, ISDIR:21, INVAL:22, MFILE:24, NOTTY:25, SPIPE:29, PIPE:32, RANGE:34, NOSYS:38, NOTEMPTY:39 };
 const err = (e) => BigInt(-e);
 function sysErr(e) {
   const m = { EPERM:E.PERM, ENOENT:E.NOENT, EBADF:E.BADF, EACCES:E.ACCES, EEXIST:E.EXIST, ENOTDIR:E.NOTDIR, EISDIR:E.ISDIR, EINVAL:E.INVAL, ENOTEMPTY:E.NOTEMPTY, EMFILE:E.MFILE, ESPIPE:E.SPIPE, EAGAIN:E.AGAIN };
@@ -80,8 +80,9 @@ const JSPI = !!process.env.WALI_JSPI && typeof WebAssembly.Suspending === 'funct
           && typeof WebAssembly.promising === 'function';
 if (process.env.WALI_JSPI && !JSPI) process.stderr.write('[wali-host] WALI_JSPI set but JSPI unavailable (need node 24 + --experimental-wasm-jspi); using synchronous model\n');
 // syscalls that may block -> wrapped as WebAssembly.Suspending in JSPI mode
-const BLOCKING = new Set(['read', 'readv', 'wait4', 'poll', 'ppoll', 'nanosleep', 'clock_nanosleep', 'execve', 'recvmsg']);
+const BLOCKING = new Set(['read', 'readv', 'wait4', 'poll', 'ppoll', 'nanosleep', 'clock_nanosleep', 'execve', 'recvmsg', 'pause', 'sigsuspend']);
 const ASYNC_PAGES = 16;               // 1MB asyncify unwind buffer (grown at first fork)
+const QUANTUM_MS = 10;                // JSPI preemption: max run between event-loop yields
 const inflight = new Set();           // live child task promises (keeps event loop alive)
 let pipeSuspends = 0, waitSuspends = 0; // JSPI concurrency evidence: times a process actually suspended
 
@@ -124,8 +125,16 @@ function wakePty(list) { if (list && list.length) { const w = list.splice(0); fo
 function ptyStatObj(id, master) { return { size: 0, mode: 0o020620, nlink: 1, uid: 1000, gid: 5, dev: 6, ino: master ? 2 : 1000 + id, rdev: master ? ((5 << 8) | 2) : ((136 << 8) | id) }; }
 const tflag = (p, off) => new DataView(p.termios.buffer).getUint32(off, true);
 function ptyMasterWrite(p, bytes) { // user input -> line discipline -> slave
-  const lf = tflag(p, 12), canon = lf & ICANON, echo = lf & ECHO, icrnl = tflag(p, 0) & ICRNL;
+  const lf = tflag(p, 12), canon = lf & ICANON, echo = lf & ECHO, icrnl = tflag(p, 0) & ICRNL, isig = lf & ISIG;
   for (let c of bytes) {
+    if (isig && c && (c === p.termios[17] || c === p.termios[18])) { // VINTR (^C) / VQUIT
+      const sig = c === p.termios[17] ? SIG.INT : SIG.QUIT;
+      p.line = [];                                     // flush the input line
+      if (echo) p.toMaster.push(94, 64 + (c & 31));    // echo ^C / ^\
+      if (p.pgrp) signalPgrp(p.pgrp, sig);
+      else if (p.fg) postSignal(p.fg, sig);            // no pgrp set: last slave opener
+      continue;
+    }
     if (canon) {
       if (c === 0x7f || c === 0x08) { if (p.line.length) { p.line.pop(); if (echo) p.toMaster.push(8, 32, 8); } continue; }
       if (c === 0x0d && icrnl) c = 0x0a;
@@ -163,6 +172,25 @@ function releaseFds(fdMap) { for (const h of fdMap.values()) {
   else if (h && h.spair) { if (--h.spair.wr.writers <= 0) wakePipe(h.spair.wr); h.spair.rd.readers--; } } }
 // wake a process suspended in wait4 (a child just finished)
 function wakeWaiters(S) { if (S.waitWaiters.length) { const w = S.waitWaiters; S.waitWaiters = []; for (const f of w) f(); } }
+
+// ---- signals: per-process handlers/mask/pending; delivery happens at syscall
+// boundaries (the only safe points — wasm can't be interrupted mid-loop). A
+// handler is invoked by calling its function-table index, which needs the
+// binary linked with -Wl,--export-table; without the table, handled signals
+// degrade to their default action (SIG_IGN is always honored). ----
+const SIG = { HUP:1, INT:2, QUIT:3, ILL:4, ABRT:6, KILL:9, USR1:10, SEGV:11, USR2:12, PIPE:13, ALRM:14, TERM:15, CHLD:17, CONT:18, STOP:19, TSTP:20, TTIN:21, TTOU:22, URG:23, WINCH:28 };
+const SIG_DFL_IGNORE = new Set([SIG.CHLD, SIG.CONT, SIG.STOP, SIG.TSTP, SIG.TTIN, SIG.TTOU, SIG.URG, SIG.WINCH]);
+const procs = new Map();              // live pid -> Process (kill routing)
+let rootProc = null;                  // the tree root (fallback Ctrl-C target)
+function postSignal(P, sig) {
+  if (!P || !sig) return;
+  const h = P.sig.handlers.get(sig);
+  if (h && h.ptr === 1 && sig !== SIG.KILL) return;             // SIG_IGN
+  if ((!h || !h.ptr) && SIG_DFL_IGNORE.has(sig)) return;        // default-ignore
+  P.sig.pending.add(sig);
+  const w = P.sig.waiters; P.sig.waiters = []; for (const f of w) f('sig'); // wake blocked syscalls
+}
+function signalPgrp(pgid, sig) { let n = 0; for (const P of procs.values()) if (P.pgid === pgid) { postSignal(P, sig); n++; } return n; }
 
 // ---- path redirect: virtualize specific guest paths (e.g. /etc/passwd) onto real
 // files without a full chroot. Populated from WALI_ETC (a dir whose files shadow
@@ -208,6 +236,119 @@ class Process {
     this.forkState = 'none';         // Asyncify fork: 'none' | 'unwinding' | 'rewinding'
     this.asyncifyBuf = 0; this.forkRet = 0n;
     this.syscalls = 0;
+    this.pgid = this.pid;
+    this.sig = { handlers: new Map(), mask: 0n, pending: new Set(), waiters: [] };
+    this.timers = new Map();         // which(0=ITIMER_REAL) -> {deadline, intervalMs, to}
+    this.lastYield = 0;              // JSPI preemption quantum bookkeeping
+    procs.set(this.pid, this);
+  }
+
+  retire() {                         // process is gone: unregister + disarm timers
+    procs.delete(this.pid);
+    for (const t of this.timers.values()) if (t.to) clearTimeout(t.to);
+    this.timers.clear();
+    const w = this.sig.waiters; this.sig.waiters = []; for (const f of w) f('sig');
+  }
+
+  // fire any expired timers (the sync model has no event loop while wasm runs,
+  // so deadlines are also polled at every syscall boundary)
+  pollTimers() {
+    if (!this.timers.size) return;
+    const now = Date.now();
+    for (const [which, t] of this.timers) {
+      if (t.deadline && now >= t.deadline) {
+        if (t.intervalMs > 0) t.deadline = now + t.intervalMs; else this.timers.delete(which);
+        postSignal(this, SIG.ALRM);
+      }
+    }
+  }
+  armItimer(which, valueMs, intervalMs) {
+    const old = this.timers.get(which);
+    if (old && old.to) clearTimeout(old.to);
+    this.timers.delete(which);
+    if (valueMs <= 0) return;
+    const t = { deadline: Date.now() + valueMs, intervalMs, to: null };
+    if (JSPI) {                      // event-driven fire; sync model polls deadlines
+      const fire = () => { postSignal(this, SIG.ALRM);
+        if (t.intervalMs > 0) { t.deadline = Date.now() + t.intervalMs; t.to = setTimeout(fire, t.intervalMs); t.to.unref && t.to.unref(); }
+        else this.timers.delete(which); };
+      t.to = setTimeout(fire, valueMs); t.to.unref && t.to.unref();
+    }
+    this.timers.set(which, t);
+  }
+
+  // deliver pending unblocked signals NOW (a syscall boundary). Returns null if
+  // nothing to do, or a BigInt the current syscall must return (in-place vfork
+  // child termination parks the child instead of throwing). Handlers with an
+  // exported function table are invoked re-entrantly; otherwise default action.
+  predeliver() {
+    if (!this.sig.pending.size) return null;
+    for (const sig of [...this.sig.pending]) {
+      if (this.sig.mask & (1n << BigInt(sig - 1))) continue;
+      this.sig.pending.delete(sig);
+      const h = this.sig.handlers.get(sig);
+      if (h && h.ptr === 1) continue;                       // SIG_IGN
+      if (h && h.ptr > 1 && sig !== SIG.KILL) {
+        const table = this.inst && this.inst.exports.__indirect_function_table;
+        if (table) {
+          try { table.get(h.ptr)(sig); this.sigDelivered = true;
+            if (!(h.flags & 0x10000000)) this.sigAllRestart = false; // !SA_RESTART
+            continue; }
+          catch (e) { process.stderr.write(`[wali-host] signal handler trap pid ${this.pid} sig ${sig}: ${e}\n`); }
+        } else if (!this.warnedNoTable) { this.warnedNoTable = true;
+          process.stderr.write(`[wali-host] pid ${this.pid}: signal handler registered but binary lacks --export-table; using default action\n`); }
+      }
+      if (SIG_DFL_IGNORE.has(sig)) continue;                // default-ignore
+      if (this.inChild()) return this.parkChild({ exited: 128 + sig });
+      throw new ExitError(128 + sig);                       // default-terminate
+    }
+    return null;
+  }
+
+  // race an event arm against signal arrival; resolves 'sig' or the armed value
+  sigRace(arm) {
+    return new Promise((res) => {
+      let done = false; const fin = (v) => { if (!done) { done = true; res(v); } };
+      arm(fin); this.sig.waiters.push(fin);
+    });
+  }
+  // wake from a blocking syscall with 'sig': run handlers; null = resume waiting
+  // (signal ignored, or all handlers had SA_RESTART and the call is restartable),
+  // BigInt = value the syscall must return (park/EINTR).
+  // POSIX: sleep/pause/poll are NEVER restarted — those sites pass restartable=false.
+  onSigWake(restartable) {
+    this.sigDelivered = false; this.sigAllRestart = true;
+    const dv = this.predeliver(); if (dv !== null) return dv;
+    if (!this.sigDelivered) return null;
+    return (restartable && this.sigAllRestart) ? null : err(E.INTR);
+  }
+  nextTimerDeadline() {
+    let d = 0;
+    for (const t of this.timers.values()) if (t.deadline && (!d || t.deadline < d)) d = t.deadline;
+    return d;
+  }
+  sleepMs(name, a) { // nanosleep/clock_nanosleep request in ms (handles TIMER_ABSTIME)
+    const abs = name === 'clock_nanosleep' && (a[1] & 1);
+    const tp = name === 'nanosleep' ? a[0] : a[2];
+    if (!tp) return 0;
+    const sec = Number(this.r64(tp)), ns = Number(this.r64(tp + 8));
+    if (!abs) return sec * 1000 + ns / 1e6;
+    const clk = a[0] | 0;
+    const nowMs = (clk === 1 || clk === 4) ? (() => { const t = process.hrtime(); return t[0] * 1000 + t[1] / 1e6; })() : Date.now();
+    return sec * 1000 + ns / 1e6 - nowMs;
+  }
+  wrTs(p, ms) { this.i64(p, BigInt(Math.floor(ms / 1000))); this.i64(p + 8, BigInt(Math.round((ms % 1000) * 1e6))); }
+  wrItimer(p, which) { // itimerval {interval, value} as {i64 sec, i64 usec} pairs
+    const t = this.timers.get(which);
+    const iv = t ? t.intervalMs : 0, rem = t && t.deadline ? Math.max(0, t.deadline - Date.now()) : 0;
+    this.i64(p, BigInt(Math.floor(iv / 1000))); this.i64(p + 8, BigInt(Math.round((iv % 1000) * 1000)));
+    this.i64(p + 16, BigInt(Math.floor(rem / 1000))); this.i64(p + 24, BigInt(Math.round((rem % 1000) * 1000)));
+  }
+  pollTfd(t) { // sync model: fire an expired timerfd at this boundary
+    if (!JSPI && t.deadline && Date.now() >= t.deadline) {
+      t.count++;
+      if (t.intervalMs > 0) t.deadline = Date.now() + t.intervalMs; else t.deadline = 0;
+    }
   }
 
   refresh() { if (this.membuf !== this.memory.buffer) { this.membuf = this.memory.buffer; this.u8 = new Uint8Array(this.membuf); this.dv = new DataView(this.membuf); } }
@@ -260,9 +401,20 @@ class Process {
         }
         if (h.fifo) { if (!h.fifo.chunks.length && h.nonblock && h.fifo.writers > 0) return err(E.AGAIN); const b = pipeRead(h.fifo, a[2]); S.wbytes(a[1], b); return BigInt(b.length); }
         if (h.spair) { if (!h.spair.rd.chunks.length && h.nonblock && h.spair.rd.writers > 0) return err(E.AGAIN); const b = pipeRead(h.spair.rd, a[2]); S.wbytes(a[1], b); return BigInt(b.length); }
+        if (h.tfd) { const t = h.tfd; S.pollTfd(t); // timerfd: 8-byte expiration count
+          while (!t.count) {
+            if (h.nonblock || JSPI) return err(E.AGAIN); // JSPI blocking waits in sysAsync
+            const nd = t.deadline || S.nextTimerDeadline();
+            Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, nd ? Math.max(1, Math.min(nd - Date.now(), 3600000)) : 50);
+            S.pollTfd(t); S.pollTimers();
+            if (S.sig.pending.size) { const w = S.onSigWake(true); if (w !== null) return w; }
+          }
+          if (a[2] < 8) return err(E.INVAL);
+          S.i64(a[1], BigInt(t.count)); t.count = 0; return 8n; }
         if (h.devnull) return 0n;
         if (h.pty !== undefined) { const p = ptys.get(h.pty); const q = h.master ? p.toMaster : p.toSlave;
-          if (!q.length) return err(E.AGAIN); const k = Math.min(q.length, a[2]); S.wbytes(a[1], Uint8Array.from(q.splice(0, k))); return BigInt(k); }
+          if (!q.length) return S.sigDelivered ? err(E.INTR) : err(E.AGAIN); // ^C at this boundary reads as EINTR
+          const k = Math.min(q.length, a[2]); S.wbytes(a[1], Uint8Array.from(q.splice(0, k))); return BigInt(k); }
         if (h.sock) { const br = initSockBridge(); const r = br.call(br.OP.RECV, h.sock.id, a[2], 0); if (r.res <= 0) return BigInt(r.res); S.wbytes(a[1], r.data.subarray(0, r.res)); return BigInt(r.res); }
         if (h.fd === undefined) return err(E.BADF);
         if (h.pos === undefined) h.pos = 0;
@@ -295,6 +447,7 @@ class Process {
           if (h.end === 'w') { if (--h.fifo.writers <= 0) wakePipe(h.fifo); } else if (h.end === 'r') { h.fifo.readers--; }
           S.fds.delete(a[0]); return 0n; }
         if (h.spair) { if (--h.spair.wr.writers <= 0) wakePipe(h.spair.wr); h.spair.rd.readers--; S.fds.delete(a[0]); return 0n; }
+        if (h.tfd) { if (h.tfd.to) clearTimeout(h.tfd.to); const w = h.tfd.waiters; h.tfd.waiters = []; for (const f of w) f('t'); S.fds.delete(a[0]); return 0n; }
         if (h.sock && h.sock.id && !S.shared(h)) { const br = initSockBridge(); br.call(br.OP.CLOSE, h.sock.id, 0, 0); }
         else if (h.fd > 2 && !S.shared(h)) { try { fs.closeSync(h.fd); } catch {} }
         S.fds.delete(a[0]); S.dirState.delete(a[0]); return 0n; }
@@ -386,7 +539,7 @@ class Process {
           const ctx = S.childStack.pop(); S.fds = ctx.savedFds; // restore parent's fd view
           const childPid = ctx.pid;
           const task = runProgramAsync(p, argv, envp, fdsnap, S.cwd.p, S.modPath)
-            .then((code) => { S.reaped.set(childPid, code === null ? 127 : code); releaseFds(fdsnap); S.childTasks.delete(childPid); wakeWaiters(S); });
+            .then((code) => { S.reaped.set(childPid, code === null ? 127 : code); releaseFds(fdsnap); S.childTasks.delete(childPid); postSignal(S, SIG.CHLD); wakeWaiters(S); });
           inflight.add(task); task.finally(() => inflight.delete(task));
           S.childTasks.set(childPid, task);
           return CHILD_DONE;
@@ -477,10 +630,58 @@ class Process {
       case 'clock_gettime': { if (a[0] === 1 || a[0] === 4) { const t = process.hrtime(); S.i64(a[1], BigInt(t[0])); S.i64(a[1] + 8, BigInt(t[1])); return 0n; }
         const ms = Date.now(); S.i64(a[1], BigInt(Math.floor(ms / 1000))); S.i64(a[1] + 8, BigInt((ms % 1000) * 1e6)); return 0n; }
       case 'gettimeofday': { const ms = Date.now(); S.i64(a[0], BigInt(Math.floor(ms / 1000))); S.i64(a[0] + 8, BigInt((ms % 1000) * 1000)); return 0n; }
-      case 'nanosleep': case 'clock_nanosleep': { // sync model: really sleep (Atomics.wait blocks the thread)
-        const tp = name === 'nanosleep' ? a[0] : a[2];
-        let ms = 0; if (tp) { S.refresh(); ms = Number(S.r64(tp)) * 1000 + Number(S.r64(tp + 8)) / 1e6; }
-        if (ms > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Math.min(ms, 3600000));
+      case 'nanosleep': case 'clock_nanosleep': { // sync model: sliced sleep so timers fire and signals interrupt (EINTR)
+        S.refresh();
+        let ms = S.sleepMs(name, a);
+        const end = Date.now() + ms;
+        while (ms > 0) {
+          const nd = S.nextTimerDeadline();
+          const slice = Math.min(ms, 50, nd ? Math.max(1, nd - Date.now()) : 1e12, 3600000);
+          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, slice);
+          S.pollTimers();
+          if (S.sig.pending.size) { S.sigDelivered = false; const dv = S.predeliver(); if (dv !== null) return dv; if (S.sigDelivered) return err(E.INTR); }
+          ms = end - Date.now();
+        }
+        return 0n; }
+      case 'pause': case 'sigsuspend': { // sync model: sliced wait for a signal
+        const oldMask = S.sig.mask;
+        if (name === 'sigsuspend' && a[0]) { S.refresh(); S.sig.mask = BigInt.asUintN(64, S.r64(a[0])); }
+        try {
+          for (;;) {
+            if (S.sig.pending.size) { S.sigDelivered = false; const dv = S.predeliver(); if (dv !== null) return dv; if (S.sigDelivered) return err(E.INTR); }
+            Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+            S.pollTimers();
+          }
+        } finally { S.sig.mask = oldMask; } }
+      case 'clock_getres': { if (a[1]) { S.i64(a[1], 0n); S.i64(a[1] + 8, 1000000n); } return 0n; }
+      case 'times': { if (a[0]) { S.refresh(); S.u8.fill(0, a[0], a[0] + 16); } return BigInt(Math.floor(performance.now() / 10) & 0x7fffffff); }
+      case 'setitimer': { const which = a[0] | 0; S.refresh();
+        if (a[2]) S.wrItimer(a[2], which);
+        if (a[1] && which === 0) { // ITIMER_REAL only (itimerval = two {i64 sec, i64 usec})
+          const ivMs = Number(S.r64(a[1])) * 1000 + Number(S.r64(a[1] + 8)) / 1000;
+          const vMs = Number(S.r64(a[1] + 16)) * 1000 + Number(S.r64(a[1] + 24)) / 1000;
+          S.armItimer(0, vMs, ivMs);
+        }
+        return 0n; }
+      case 'getitimer': { if (a[1]) { S.refresh(); S.wrItimer(a[1], a[0] | 0); } return 0n; }
+      case 'timerfd_create': { const g = S.allocFd ? S.allocFd() : S.nextFd++;
+        S.fds.set(g, { tfd: { count: 0, deadline: 0, intervalMs: 0, to: null, waiters: [] }, nonblock: !!(a[1] & 0x800) });
+        return BigInt(g); }
+      case 'timerfd_settime': { const h = S.fds.get(a[0]); if (!h || !h.tfd) return err(E.BADF);
+        S.refresh(); const t = h.tfd;
+        if (a[3]) { S.wrTs(a[3], t.intervalMs); S.wrTs(a[3] + 16, t.deadline ? Math.max(0, t.deadline - Date.now()) : 0); }
+        const ivMs = Number(S.r64(a[2])) * 1000 + Number(S.r64(a[2] + 8)) / 1e6;
+        let vMs = Number(S.r64(a[2] + 16)) * 1000 + Number(S.r64(a[2] + 24)) / 1e6;
+        if ((a[1] & 1) && vMs > 0) vMs -= Date.now(); // TFD_TIMER_ABSTIME (realtime)
+        if (t.to) { clearTimeout(t.to); t.to = null; }
+        t.deadline = 0; t.intervalMs = ivMs; t.count = 0;
+        if (vMs > 0) { t.deadline = Date.now() + vMs;
+          if (JSPI) { const fire = () => { t.count++; const w = t.waiters; t.waiters = []; for (const f of w) f('t');
+              if (t.intervalMs > 0) { t.deadline = Date.now() + t.intervalMs; t.to = setTimeout(fire, t.intervalMs); if (t.to.unref) t.to.unref(); } else { t.deadline = 0; t.to = null; } };
+            t.to = setTimeout(fire, vMs); if (t.to.unref) t.to.unref(); } }
+        return 0n; }
+      case 'timerfd_gettime': { const h = S.fds.get(a[0]); if (!h || !h.tfd) return err(E.BADF); S.refresh();
+        S.wrTs(a[1], h.tfd.intervalMs); S.wrTs(a[1] + 16, h.tfd.deadline ? Math.max(0, h.tfd.deadline - Date.now()) : 0);
         return 0n; }
       case 'uname': { ['Linux', 'wali', '6.1.0-wali', '#1 WALI-js', 'wasm32', ''].forEach((s, i) => S.wstr(a[name === 'uname' ? 0 : 2] + i * 65, s, 65)); return 0n; }
       case 'getuid': case 'geteuid': case 'getgid': case 'getegid': return 1000n;
@@ -488,11 +689,44 @@ class Process {
       case 'chroot': return 0n; // no real chroot; sshd privsep chroots to /var/empty — treat as success
       case 'getpid': return BigInt(S.inChild() ? S.childStack[S.childStack.length - 1].pid : S.pid);
       case 'getppid': return 1n; case 'gettid': return BigInt(S.pid);
-      case 'getpgid': return BigInt(S.pid); case 'setpgid': case 'setsid': return 0n;
+      case 'getpgid': { const q = a[0] | 0; if (!q || q === S.pid) return BigInt(S.pgid);
+        const T = procs.get(q); return T ? BigInt(T.pgid) : err(E.SRCH); }
+      case 'getpgrp': return BigInt(S.pgid);
+      case 'setpgid': { const T = (a[0] | 0) && (a[0] | 0) !== S.pid ? procs.get(a[0] | 0) : S;
+        if (!T) return err(E.SRCH); T.pgid = (a[1] | 0) || T.pid; return 0n; }
+      case 'setsid': { S.pgid = S.pid; return BigInt(S.pid); }
       case 'set_tid_address': return BigInt(S.pid);
-      case 'tkill': case 'kill': { if (!(a[1] | 0)) return 0n; // sig 0 = liveness probe, never kills
-        if (S.inChild()) return S.parkChild({ exited: 128 + (a[1] | 0) }); throw new ExitError(128 + (a[1] | 0)); }
-      case 'rt_sigaction': case 'rt_sigprocmask': case 'sigaltstack': case 'setitimer': case 'prctl': return 0n;
+      case 'tkill': case 'tgkill': case 'kill': {
+        const sig = name === 'tgkill' ? (a[2] | 0) : (a[1] | 0);
+        const pid = name === 'tgkill' ? (a[1] | 0) : (a[0] | 0);
+        const isSelf = (q) => q === S.pid || (S.inChild() && S.childStack.some(c => c.pid === q));
+        if (!sig) { if (name === 'kill' && pid <= 0) return 0n; return (procs.has(pid) || isSelf(pid)) ? 0n : err(E.SRCH); }
+        const targets = [];
+        if (name === 'kill' && pid <= 0) {                    // process group / broadcast
+          if (pid === -1) { for (const T of procs.values()) targets.push(T); }
+          else { const pg = pid === 0 ? S.pgid : -pid; for (const T of procs.values()) if (T.pgid === pg) targets.push(T); }
+          if (!targets.length) return err(E.SRCH);
+        } else {
+          const T = procs.get(pid) || (isSelf(pid) ? S : null);
+          if (!T) return err(E.SRCH);
+          targets.push(T);
+        }
+        for (const T of targets) postSignal(T, sig);
+        if (targets.includes(S)) { const dv = S.predeliver(); if (dv !== null) return dv; }
+        return 0n; }
+      case 'rt_sigaction': { const sig = a[0] | 0; S.refresh();
+        const old = S.sig.handlers.get(sig);
+        if (a[2]) { S.i32(a[2], old ? old.ptr : 0); S.i32(a[2] + 4, old ? old.flags : 0); S.i32(a[2] + 8, 0); S.i64(a[2] + 12, 0n); }
+        if (a[1]) S.sig.handlers.set(sig, { ptr: S.r32(a[1]), flags: S.r32(a[1] + 4) });
+        return 0n; }
+      case 'rt_sigprocmask': { const how = a[0] | 0; S.refresh();
+        if (a[2]) S.i64(a[2], BigInt.asIntN(64, S.sig.mask));
+        if (a[1]) { const m = BigInt.asUintN(64, S.r64(a[1]));
+          if (how === 0) S.sig.mask |= m; else if (how === 1) S.sig.mask &= ~m; else S.sig.mask = m;
+          if (S.sig.pending.size) { const dv = S.predeliver(); if (dv !== null) return dv; } } // unblocking delivers
+        return 0n; }
+      case 'rt_sigpending': { S.refresh(); let m = 0n; for (const s of S.sig.pending) m |= 1n << BigInt(s - 1); S.i64(a[0], BigInt.asIntN(64, m)); return 0n; }
+      case 'sigaltstack': case 'prctl': case 'rt_sigreturn': return 0n;
       case 'futex': return 0n;
       case 'sched_getaffinity': { S.i64(a[2], 1n); return 8n; }
       case 'sched_yield': return 0n;
@@ -627,36 +861,67 @@ class Process {
       case 'read': case 'readv': {
         const h = S.fds.get(a[0]);
         if (h && h.std === 0 && !h.nonblock) { // stdin: suspend until a keystroke/line or EOF
-          startStdin(); while (!stdinChunks.length && !stdinEOF) { pipeSuspends++; await new Promise(res => stdinWaiters.push(res)); }
+          startStdin(); while (!stdinChunks.length && !stdinEOF) { pipeSuspends++;
+            const w = await S.sigRace(res => stdinWaiters.push(() => res('ev')));
+            if (w === 'sig') { const v = S.onSigWake(true); if (v !== null) return v; } }
           return S.sys(name, a);
         }
         if (h && h.pty !== undefined && !h.nonblock) { // pty read: suspend until the line discipline delivers
           const p = ptys.get(h.pty); const q = () => h.master ? p.toMaster : p.toSlave; const wl = h.master ? p.masterWaiters : p.slaveWaiters;
-          while (!q().length) { pipeSuspends++; await new Promise(res => wl.push(res)); }
+          while (!q().length) { pipeSuspends++;
+            const w = await S.sigRace(res => wl.push(() => res('ev')));
+            if (w === 'sig') { const v = S.onSigWake(true); if (v !== null) return v; } }
           return S.sys(name, a);
         }
         // nonblocking fds never suspend here — the program polls, and poll suspends
         if (h && h.fifo && !h.nonblock) { // blocking: suspend until data or last writer closes (EOF)
-          while (!h.fifo.chunks.length && h.fifo.writers > 0) { pipeSuspends++; await new Promise(res => h.fifo.readWaiters.push(res)); }
+          while (!h.fifo.chunks.length && h.fifo.writers > 0) { pipeSuspends++;
+            const w = await S.sigRace(res => h.fifo.readWaiters.push(() => res('ev')));
+            if (w === 'sig') { const v = S.onSigWake(true); if (v !== null) return v; } }
           return S.sys(name, a);
         }
         if (h && h.spair && !h.nonblock) { // blocking socketpair: suspend until peer writes or closes
-          while (!h.spair.rd.chunks.length && h.spair.rd.writers > 0) { pipeSuspends++; await new Promise(res => h.spair.rd.readWaiters.push(res)); }
+          while (!h.spair.rd.chunks.length && h.spair.rd.writers > 0) { pipeSuspends++;
+            const w = await S.sigRace(res => h.spair.rd.readWaiters.push(() => res('ev')));
+            if (w === 'sig') { const v = S.onSigWake(true); if (v !== null) return v; } }
           return S.sys(name, a);
+        }
+        if (h && h.tfd && !h.nonblock) { // blocking timerfd read: suspend until expiry
+          while (!h.tfd.count) {
+            const w = await S.sigRace(res => h.tfd.waiters.push(res));
+            if (w === 'sig') { const v = S.onSigWake(true); if (v !== null) return v; }
+          }
+          S.refresh(); if (a[2] < 8) return err(E.INVAL);
+          S.i64(a[1], BigInt(h.tfd.count)); h.tfd.count = 0; return 8n;
         }
         return S.sys(name, a);
       }
-      case 'nanosleep': case 'clock_nanosleep': {
-        const tp = name === 'nanosleep' ? a[0] : a[2];
-        let ms = 0; if (tp) { S.refresh(); ms = Number(S.r64(tp)) * 1000 + Number(S.r64(tp + 8)) / 1e6; }
-        if (ms > 0) await new Promise(res => setTimeout(res, Math.min(ms, 3600000)));
+      case 'nanosleep': case 'clock_nanosleep': { // interruptible (EINTR) + TIMER_ABSTIME
+        S.refresh();
+        const end = Date.now() + S.sleepMs(name, a);
+        while (Date.now() < end) {
+          const w = await S.sigRace(res => { const to = setTimeout(() => res('t'), Math.min(end - Date.now(), 3600000)); if (to.unref) to.unref(); });
+          if (w === 'sig') { const v = S.onSigWake(); if (v !== null) return v; }
+        }
         return 0n;
+      }
+      case 'pause': case 'sigsuspend': { // suspend until a signal is DELIVERED
+        const oldMask = S.sig.mask;
+        if (name === 'sigsuspend' && a[0]) { S.refresh(); S.sig.mask = BigInt.asUintN(64, S.r64(a[0])); }
+        try {
+          for (;;) {
+            if (S.sig.pending.size) { const v = S.onSigWake(); if (v !== null) return v; }
+            await S.sigRace(() => {});
+          }
+        } finally { S.sig.mask = oldMask; }
       }
       case 'recvmsg': {
         const h = S.fds.get(a[0]);
         if (h && h.spair && !h.nonblock) { // blocking fd-passing recv (sshd privsep): suspend until a msg/fd arrives
           while (!h.spair.rd.chunks.length && (!h.spair.rd.fds || !h.spair.rd.fds.length) && h.spair.rd.writers > 0) {
-            pipeSuspends++; await new Promise(res => h.spair.rd.readWaiters.push(res));
+            pipeSuspends++;
+            const w = await S.sigRace(res => h.spair.rd.readWaiters.push(() => res('ev')));
+            if (w === 'sig') { const v = S.onSigWake(true); if (v !== null) return v; }
           }
         }
         return S.sys(name, a);
@@ -676,7 +941,7 @@ class Process {
         const fdsnap = S.fds;
         const ctx = S.childStack.pop(); S.fds = ctx.savedFds; const childPid = ctx.pid;
         const task = runProgramAsync(p, argv, envp, fdsnap, S.cwd.p, S.modPath)
-          .then((code) => { S.reaped.set(childPid, code === null ? 127 : code); releaseFds(fdsnap); S.childTasks.delete(childPid); wakeWaiters(S); });
+          .then((code) => { S.reaped.set(childPid, code === null ? 127 : code); releaseFds(fdsnap); S.childTasks.delete(childPid); postSignal(S, SIG.CHLD); wakeWaiters(S); });
         inflight.add(task); task.finally(() => inflight.delete(task));
         S.childTasks.set(childPid, task);
         return CHILD_DONE;
@@ -695,12 +960,15 @@ class Process {
       const stillRunning = want > 0 ? S.childTasks.has(want) : S.childTasks.size > 0;
       if (!stillRunning) return err(E.CHILD);
       waitSuspends++;
-      await new Promise(res => S.waitWaiters.push(res)); // suspend until a child finishes
+      const w = await S.sigRace(res => S.waitWaiters.push(() => res('ev'))); // suspend until a child finishes
+      if (w === 'sig') { const v = S.onSigWake(true); if (v !== null) return v; } // interruptible (sshd waits with SIGCHLD/EINTR)
     }
   }
   async pollAsync(name, a) {
     const S = this; const nfds = a[1];
-    const timeout = name === 'poll' ? (a[2] | 0) : -1; // ppoll: treat as blocking
+    S.refresh();
+    const timeout = name === 'poll' ? (a[2] | 0)
+      : (a[2] ? Math.ceil(Number(S.r64(a[2])) * 1000 + Number(S.r64(a[2] + 8)) / 1e6) : -1); // ppoll: timespec or NULL=block
     const evalReady = () => { S.refresh(); let ready = 0; const waitFifos = []; const waitPtys = []; let waitStdin = false;
       for (let i = 0; i < nfds; i++) {
         const fd = S.r32(a[0] + i * 8), ev = S.dv.getInt16(a[0] + i * 8 + 4, true);
@@ -713,6 +981,7 @@ class Process {
           if ((ev & 1) && rdy) re |= 1; if (ev & 4) re |= 4; if (!rdy) waitFifos.push(h.spair.rd); }
         else if (h && h.pty !== undefined) { const p = ptys.get(h.pty); const q = h.master ? p.toMaster : p.toSlave;
           if ((ev & 1) && q.length) re |= 1; if (ev & 4) re |= 4; if (!q.length) waitPtys.push(h.master ? p.masterWaiters : p.slaveWaiters); }
+        else if (h && h.tfd) { S.pollTfd(h.tfd); if ((ev & 1) && h.tfd.count > 0) re |= 1; if (!h.tfd.count) waitPtys.push(h.tfd.waiters); }
         else if (h && h.sock && h.sock.id) { const pk = initSockBridge().call(initSockBridge().OP.POLL, h.sock.id, 0, 0); if ((ev & 1) && pk.res > 0) re |= 1; if (ev & 4) re |= 4; }
         else if (h && h.pty !== undefined) { const p = ptys.get(h.pty); const q = h.master ? p.toMaster : p.toSlave; if ((ev & 1) && q.length) re |= 1; if (ev & 4) re |= 4; }
         else re = ev & 5; // stdio/file: ready
@@ -724,13 +993,14 @@ class Process {
       const r = evalReady();
       if (r.ready > 0) return BigInt(r.ready);
       if (timeout === 0) return 0n;
-      const woke = await new Promise(res => { let done = false; const fin = (v) => { if (!done) { done = true; res(v); } };
+      const woke = await S.sigRace((fin) => {
         for (const f of r.waitFifos) f.readWaiters.push(() => fin(true));
         for (const wl of r.waitPtys) wl.push(() => fin(true));
         if (r.waitStdin) { startStdin(); stdinWaiters.push(() => fin(true)); }
-        if (timeout > 0) setTimeout(() => fin(false), timeout);
+        if (timeout > 0) { const to = setTimeout(() => fin(false), timeout); if (to.unref) to.unref(); }
         else if (!r.waitFifos.length && !r.waitPtys.length && !r.waitStdin) setTimeout(() => fin(false), 50);
       });
+      if (woke === 'sig') { const v = S.onSigWake(); if (v !== null) return v; }
       if (timeout > 0 && woke === false) return BigInt(evalReady().ready); // timed out
     }
   }
@@ -748,7 +1018,7 @@ class Process {
       // PTY devices
       if (fp === '/dev/ptmx') { const id = newPty(); const g = this.allocFd(); this.fds.set(g, { pty: id, master: true }); return BigInt(g); }
       let m;
-      if ((m = fp.match(/^\/dev\/pts\/(\d+)$/))) { const id = +m[1]; if (!ptys.has(id)) return err(E.NOENT); const g = this.allocFd(); this.fds.set(g, { pty: id, master: false }); return BigInt(g); }
+      if ((m = fp.match(/^\/dev\/pts\/(\d+)$/))) { const id = +m[1]; if (!ptys.has(id)) return err(E.NOENT); ptys.get(id).fg = this; const g = this.allocFd(); this.fds.set(g, { pty: id, master: false }); return BigInt(g); }
       if (fp === '/dev/tty' && this.ctty !== undefined) { const g = this.allocFd(); this.fds.set(g, { pty: this.ctty, master: false }); return BigInt(g); }
       if (fp === '/dev/null') { const g = this.allocFd(); this.fds.set(g, { devnull: true }); return BigInt(g); }
       const ex = fs.existsSync(fp) && fs.statSync(fp);
@@ -819,16 +1089,26 @@ class Process {
             S.forkState = 'unwinding';
             return 0n; // dummy; the wasm now unwinds to _start
           };
-        } else if (JSPI && BLOCKING.has(sysname)) { // suspend-capable: yields to the scheduler while blocked
+        } else if (JSPI) { // every syscall is suspend-capable: the boundary where
+          // pending signals deliver and the preemption quantum yields, so a
+          // syscalling busy loop cannot starve its siblings.
           wali[name] = new WebAssembly.Suspending(async (...a2) => {
             S.syscalls++; syscallTotal++;
-            const r = await S.sysAsync(sysname, map(a2));
+            S.pollTimers();
+            S.sigDelivered = false;
+            const dv = S.predeliver(); if (dv !== null) return dv;
+            const now = Date.now();
+            if (now - S.lastYield >= QUANTUM_MS) { S.lastYield = now; await new Promise(res => setImmediate(res)); }
+            const r = BLOCKING.has(sysname) ? await S.sysAsync(sysname, map(a2)) : S.sys(sysname, map(a2));
             if (process.env.WALI_TRACE) process.stderr.write(`[p${S.pid}:${S.syscalls}] ${sysname}(${a2.join(',')}) = ${r} (async)\n`);
             return r;
           });
         } else {
           wali[name] = (...a2) => {
             S.syscalls++; syscallTotal++;
+            S.pollTimers();
+            S.sigDelivered = false;
+            const dv = S.predeliver(); if (dv !== null) return dv;
             const r = S.sys(sysname, map(a2));
             if (process.env.WALI_TRACE) process.stderr.write(`[p${S.pid}:${S.syscalls}] ${sysname}(${a2.join(',')}) = ${r}\n`);
             return r;
@@ -885,14 +1165,14 @@ class Process {
   run() {
     procCount++;
     const mod = getModule(this.modPath);
-    const inst = new WebAssembly.Instance(mod, this.makeImports(mod));
-    this.memory = inst.exports.memory; this.membuf = null; this.refresh();
-    try { inst.exports._start(); return 0; }
+    this.inst = new WebAssembly.Instance(mod, this.makeImports(mod));
+    this.memory = this.inst.exports.memory; this.membuf = null; this.refresh();
+    try { this.inst.exports._start(); return 0; }
     catch (e) {
       if (e instanceof ExitError) return e.code & 0xff;
       process.stderr.write(`[wali-host] trap in pid ${this.pid}: ${e.stack || e}\n`);
       return 139;
-    }
+    } finally { this.retire(); }
   }
 
   // JSPI: run _start as a promising export so its blocking syscalls can suspend.
@@ -907,6 +1187,9 @@ class Process {
   // the run loop: each time _start returns we check whether it was a real exit or an
   // Asyncify fork-unwind; on a fork we spawn the child (a memory copy) and rewind.
   async _drive(rewind) {
+    try { return await this._driveInner(rewind); } finally { this.retire(); }
+  }
+  async _driveInner(rewind) {
     const start = WebAssembly.promising(this.inst.exports._start);
     if (rewind) this.inst.exports.asyncify_start_rewind(this.asyncifyBuf);
     for (;;) {
@@ -921,7 +1204,7 @@ class Process {
       const childPid = nextPid++;
       if (process.env.WALI_SCHED_DBG) process.stderr.write(`[sched] fork pid=${this.pid} -> child pid=${childPid}\n`);
       const child = this.spawnForkChild(childPid);
-      const ctask = child._drive(true).then((code) => { if (process.env.WALI_SCHED_DBG) process.stderr.write(`[sched] exit fork pid=${childPid} code=${code}\n`); releaseFds(child.fds); this.reaped.set(childPid, code); this.childTasks.delete(childPid); wakeWaiters(this); });
+      const ctask = child._drive(true).then((code) => { if (process.env.WALI_SCHED_DBG) process.stderr.write(`[sched] exit fork pid=${childPid} code=${code}\n`); releaseFds(child.fds); this.reaped.set(childPid, code); this.childTasks.delete(childPid); postSignal(this, SIG.CHLD); wakeWaiters(this); });
       inflight.add(ctask); ctask.finally(() => inflight.delete(ctask));
       this.childTasks.set(childPid, ctask);
       this.forkRet = BigInt(childPid); this.forkState = 'rewinding';       // parent gets the child pid
@@ -935,7 +1218,9 @@ class Process {
   spawnForkChild(childPid) {
     const mod = getModule(this.modPath);
     const child = new Process(this.modPath, this.argv, this.env, new Map(), this.cwd.p);
-    child.pid = childPid;
+    procs.delete(child.pid);                 // re-register under the pid fork() reported
+    child.pid = childPid; child.pgid = this.pgid;
+    procs.set(childPid, child);
     child.fds = new Map([...this.fds].map(([k, v]) => [k, { ...v, shared: true }])); // COW-ish: share handle objects
     for (const v of child.fds.values()) child.bumpFifo(v);
     child.nextFd = this.nextFd; child.heapBrk = this.heapBrk; child.ctty = this.ctty;
@@ -996,6 +1281,11 @@ if (process.env.WALI_ARGV0) rootArgv[0] = process.env.WALI_ARGV0; // some progra
 (async () => {
   const t0 = Date.now();
   const root = new Process(path.resolve(wasmPath), rootArgv, rootEnv, rootFds, process.cwd());
+  rootProc = root;
+  if (JSPI) process.on('SIGINT', () => { // host Ctrl-C -> guest foreground group (pty pgrp if set, else the root)
+    let fg = 0; for (const p of ptys.values()) if (p.pgrp) fg = p.pgrp;
+    if (!(fg && signalPgrp(fg, SIG.INT))) postSignal(rootProc, SIG.INT);
+  });
   const code = JSPI ? await root.runAsync() : root.run();
   process.stderr.write(`[wali-host] exit=${code} procs=${procCount} syscalls=${syscallTotal} wall=${((Date.now() - t0) / 1000).toFixed(2)}s${JSPI ? ` [jspi] suspends=${pipeSuspends}pipe/${waitSuspends}wait` : ''}\n`);
   process.exit(code);

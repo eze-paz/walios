@@ -17,7 +17,7 @@ CCB="$W/llvm/bin/clang --target=wasm32-unknown-linux-muslwali --sysroot=$W/sysro
 LDB="$W/llvm/bin/clang --target=wasm32-unknown-linux-muslwali --sysroot=$W/sysroot"
 cd "$BB"
 make -j"$(nproc)" CC="$CCB" LD="$LDB" HOSTCC=cc SKIP_STRIP=y \
-  EXTRA_LDFLAGS="-Wl,--shared-memory -Wl,--export-memory -Wl,--max-memory=2147483648 -Wl,-z,stack-size=8388608"
+  EXTRA_LDFLAGS="-Wl,--shared-memory -Wl,--export-memory -Wl,--export-table -Wl,--table-base=16 -Wl,--max-memory=2147483648 -Wl,-z,stack-size=8388608"
 echo "built: $BB/busybox ($(stat -c%s "$BB/busybox") bytes)"
 echo "deploy: cp $BB/busybox ~/wali-www/busybox.wasm   # browser asset"
 echo "        (node host fallback reads $BB/busybox in place)"
