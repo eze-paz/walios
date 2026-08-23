@@ -21,13 +21,16 @@
   <button id="wasi">run real wasi binary (clang-built)</button>
   <button id="realcc">compile C with REAL clang in-tab → run (wasi)</button>
   <button id="waliCC">compile C → WALI target in-tab → run as OS process</button>
+  <button id="jspi" title="fork+exec children run concurrently; blocking reads suspend (JSPI)">concurrent pipeline (JSPI)</button>
 </div>
-<div id="status">idle — COI: <span id="coi"></span></div>
+<div id="status">idle — COI: <span id="coi"></span> — JSPI: <span id="jspiSupport"></span></div>
 <div id="term"></div>
 <form id="stdinForm"><input id="stdinLine" placeholder="stdin line (Enter sends)"><button>send</button></form>
 <script>
 const term = document.getElementById('term'), status = document.getElementById('status');
 document.getElementById('coi').textContent = crossOriginIsolated;
+document.getElementById('jspiSupport').textContent =
+  (typeof WebAssembly.Suspending === 'function' && typeof WebAssembly.promising === 'function') ? 'supported' : 'unavailable';
 function log(s, err) { const sp = document.createElement('span'); if (err) sp.className = 'err';
   sp.textContent = s; term.appendChild(sp); term.scrollTop = term.scrollHeight; }
 
@@ -44,8 +47,9 @@ function freshWorker() {
     if (m.t === 'out') log(m.s, m.fd === 2);
     else if (m.t === 'boot') status.textContent = `booted in ${m.ms.toFixed(0)}ms, running...`;
     else if (m.t === 'exit') { running = false;
-      status.textContent = `exit=${m.code}  wall=${(m.ms/1000).toFixed(2)}s  syscalls=${m.syscalls}`;
-      log(`\n[exit=${m.code} wall=${(m.ms/1000).toFixed(2)}s syscalls=${m.syscalls}]\n`, m.code !== 0); }
+      const j = m.jspi ? `  [jspi] suspends=${m.pipeSuspends}pipe/${m.waitSuspends}wait` : '';
+      status.textContent = `exit=${m.code}  wall=${(m.ms/1000).toFixed(2)}s  syscalls=${m.syscalls}${j}`;
+      log(`\n[exit=${m.code} wall=${(m.ms/1000).toFixed(2)}s syscalls=${m.syscalls}${j}]\n`, m.code !== 0); }
   };
 }
 
@@ -81,6 +85,18 @@ document.getElementById('bbsh').onclick = () => run({
     'echo == subshell pipe:; (echo S1; echo S2) | wc -l; ' +
     'echo == python in pipeline:; python -c "print(\'WALI \' * 3)" | wc -w; ' +
     'echo == all done'] });
+
+// Concurrent scheduler demo: a multi-stage pipeline where readers suspend on empty
+// pipes and are resumed by the concurrent upstream (JSPI). suspends>0 at exit is the
+// proof that stages ran concurrently rather than atomically at wait4.
+document.getElementById('jspi').onclick = () => run({
+  wasm: 'busybox.wasm', manifest: MANIFEST, jspi: true,
+  argv: ['busybox', 'hush', '-c',
+    'echo == concurrent 3-stage pipeline:; ' +
+    'seq 200 | grep 1 | wc -l; ' +
+    'echo == large streaming pipe:; ' +
+    'seq 100000 | wc -l; ' +
+    'echo == done, see jspi suspends in the status line'] });
 
 document.getElementById('cc').onclick = () => run({
   wasm: 'busybox.wasm', manifest: MANIFEST,

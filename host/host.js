@@ -68,6 +68,22 @@ const modCache = new Map();          // resolved path -> WebAssembly.Module
 let syscallTotal = 0, procCount = 0;
 const unknownSyscalls = new Set();
 
+// ---- concurrent scheduler (JSPI) ----
+// Default host runs the synchronous model (children run to completion at wait4).
+// With WALI_JSPI=1 on node 24 (--experimental-wasm-jspi), each fork+exec'd child
+// runs as a CONCURRENT task (WebAssembly.promising(_start)); blocking syscalls
+// (read on an empty pipe, wait4, poll, nanosleep) SUSPEND the calling process
+// (WebAssembly.Suspending) and yield to the event loop so siblings run. This is
+// what makes live interactive sessions (a shell driving a running pipeline, sshd)
+// possible instead of atomic run-at-wait4.
+const JSPI = !!process.env.WALI_JSPI && typeof WebAssembly.Suspending === 'function'
+          && typeof WebAssembly.promising === 'function';
+if (process.env.WALI_JSPI && !JSPI) process.stderr.write('[wali-host] WALI_JSPI set but JSPI unavailable (need node 24 + --experimental-wasm-jspi); using synchronous model\n');
+// syscalls that may block -> wrapped as WebAssembly.Suspending in JSPI mode
+const BLOCKING = new Set(['read', 'readv', 'wait4', 'poll', 'ppoll', 'nanosleep', 'clock_nanosleep']);
+const inflight = new Set();           // live child task promises (keeps event loop alive)
+let pipeSuspends = 0, waitSuspends = 0; // JSPI concurrency evidence: times a process actually suspended
+
 // binary manifest: how execve paths resolve to wasm modules
 function resolveModulePath(p, selfPath) {
   if (p === '/proc/self/exe') return selfPath;
@@ -77,8 +93,11 @@ function resolveModulePath(p, selfPath) {
     if (b.readUInt32LE(0) === 0x6d736100) return p;
   }
   const base = path.basename(p);
-  if (base === 'busybox' || base === 'sh' || base === 'hush') return path.join(process.env.HOME || '', 'busybox-1.36.1', 'busybox');
   if (base.startsWith('python')) return path.join(process.env.HOME || '', 'wali-py', 'python');
+  // busybox multi-call: sh/hush and every applet (tr, rev, cat, grep, sort, ...) map
+  // to the busybox binary; it dispatches on argv[0]. Fallback for any unresolved name.
+  const bb = path.join(process.env.HOME || '', 'busybox-1.36.1', 'busybox');
+  if (fs.existsSync(bb)) return bb;
   return null;
 }
 function getModule(p) {
@@ -115,15 +134,24 @@ function ptySlaveWrite(p, bytes) { // program output -> ONLCR -> master
 }
 
 // ---- pipes ----
-function mkPipe() { return { chunks: [], writers: 1, readers: 1 }; }
+// writers/readers are reference counts (bumped on fork/dup of an end, dropped on
+// close). In JSPI mode a reader on an empty pipe suspends until a write wakes it
+// or the last writer closes (writers==0 => EOF). readWaiters holds suspend
+// resolvers; wakePipe() releases them.
+function mkPipe() { return { chunks: [], writers: 1, readers: 1, readWaiters: [] }; }
+function wakePipe(fifo) { if (fifo.readWaiters && fifo.readWaiters.length) { const w = fifo.readWaiters; fifo.readWaiters = []; for (const f of w) f(); } }
 function pipeRead(fifo, n) {
-  if (!fifo.chunks.length) return new Uint8Array(0); // sequential model: empty = EOF
+  if (!fifo.chunks.length) return new Uint8Array(0); // empty: 0 bytes = EOF (writers==0 guaranteed by the JSPI await, or sequential model)
   let out = Buffer.concat(fifo.chunks);
   const take = out.subarray(0, n);
   const rest = out.subarray(n);
   fifo.chunks = rest.length ? [rest] : [];
   return take;
 }
+// a process exited: release its pipe ends so EOF propagates to the other side (JSPI)
+function releaseFds(fdMap) { for (const h of fdMap.values()) { if (h && h.fifo) { if (h.end === 'w') { if (--h.fifo.writers <= 0) wakePipe(h.fifo); } else if (h.end === 'r') h.fifo.readers--; } } }
+// wake a process suspended in wait4 (a child just finished)
+function wakeWaiters(S) { if (S.waitWaiters.length) { const w = S.waitWaiters; S.waitWaiters = []; for (const f of w) f(); } }
 
 // ---- one process = one instance + its syscall state ----
 class Process {
@@ -137,8 +165,10 @@ class Process {
     this.heapBrk = 0;
     this.childStack = [];            // active in-place child contexts
     this.dirState = new Map();
-    this.pending = [];
-    this.reaped = new Map();
+    this.pending = [];               // exit-parked children (sequential + non-exec)
+    this.reaped = new Map();         // pid -> exit code, awaiting wait4
+    this.childTasks = new Map();     // JSPI: pid -> in-flight concurrent task promise
+    this.waitWaiters = [];           // JSPI: resolvers for a process suspended in wait4
     this.syscalls = 0;
   }
 
@@ -204,7 +234,7 @@ class Process {
         const h = S.fds.get(a[0]); if (!h) return err(E.BADF);
         S.refresh();
         if (h.std !== undefined) { try { return BigInt(fs.writeSync(h.std === 0 ? 1 : h.std, S.u8, a[1], a[2])); } catch (e) { return sysErr(e); } }
-        if (h.fifo) { h.fifo.chunks.push(Buffer.from(S.u8.slice(a[1], a[1] + a[2]))); return BigInt(a[2]); }
+        if (h.fifo) { h.fifo.chunks.push(Buffer.from(S.u8.slice(a[1], a[1] + a[2]))); wakePipe(h.fifo); return BigInt(a[2]); }
         if (h.devnull) return BigInt(a[2]);
         if (h.pty !== undefined) { const p = ptys.get(h.pty); const b = S.u8.slice(a[1], a[1] + a[2]);
           if (h.master) ptyMasterWrite(p, b); else ptySlaveWrite(p, b); return BigInt(a[2]); }
@@ -218,6 +248,9 @@ class Process {
       case 'open': return S.openAt(S.rpath(S.cstr(a[0])), a[1], a[2]);
       case 'openat': return S.openAt(S.atPath(a[0], S.cstr(a[1])), a[2], a[3]);
       case 'close': { const h = S.fds.get(a[0]); if (!h) return err(E.BADF);
+        if (h.fifo) { // drop this end's refcount; last writer closing => readers see EOF
+          if (h.end === 'w') { if (--h.fifo.writers <= 0) wakePipe(h.fifo); } else if (h.end === 'r') { h.fifo.readers--; }
+          S.fds.delete(a[0]); return 0n; }
         if (h.sock && h.sock.id && !S.shared(h)) { const br = initSockBridge(); br.call(br.OP.CLOSE, h.sock.id, 0, 0); }
         else if (h.fd > 2 && !S.shared(h)) { try { fs.closeSync(h.fd); } catch {} }
         S.fds.delete(a[0]); S.dirState.delete(a[0]); return 0n; }
@@ -256,8 +289,10 @@ class Process {
       case 'chmod': { try { fs.chmodSync(S.rpath(S.cstr(a[0])), a[1]); return 0n; } catch (e) { return sysErr(e); } }
       case 'fchmod': case 'chown': return 0n;
       case 'umask': return 0o22n;
-      case 'dup': { const h = S.fds.get(a[0]); if (!h) return err(E.BADF); h.shared = true; const g = S.nextFd++; S.fds.set(g, { ...h }); return BigInt(g); }
-      case 'dup2': case 'dup3': { const h = S.fds.get(a[0]); if (!h) return err(E.BADF); h.shared = true; if (a[0] !== a[1]) S.fds.set(a[1], { ...h }); return BigInt(a[1]); }
+      case 'dup': { const h = S.fds.get(a[0]); if (!h) return err(E.BADF); h.shared = true; const g = S.nextFd++; S.fds.set(g, { ...h }); S.bumpFifo(h); return BigInt(g); }
+      case 'dup2': case 'dup3': { const h = S.fds.get(a[0]); if (!h) return err(E.BADF); h.shared = true;
+        if (a[0] !== a[1]) { const old = S.fds.get(a[1]); if (old && old.fifo) { if (old.end === 'w') { if (--old.fifo.writers <= 0) wakePipe(old.fifo); } else old.fifo.readers--; } // dup2 closes the target first
+          S.fds.set(a[1], { ...h }); S.bumpFifo(h); } return BigInt(a[1]); }
       case 'pipe': case 'pipe2': {
         const fifo = mkPipe();
         const r = S.nextFd++, w = S.nextFd++;
@@ -269,6 +304,7 @@ class Process {
         const pid = nextPid++;
         const savedFds = S.fds;
         S.fds = new Map([...savedFds].map(([k, v]) => [k, { ...v, shared: true }]));
+        for (const v of S.fds.values()) S.bumpFifo(v); // child inherits a ref on each pipe end
         S.childStack.push({ pid, savedFds });
         return BigInt(pid); }
       case 'execve': {
@@ -281,6 +317,15 @@ class Process {
           throw new ExitError(code);
         }
         const fdsnap = S.fds;
+        if (JSPI) { // spawn the child as a CONCURRENT task; parent longjmps back and keeps running
+          const ctx = S.childStack.pop(); S.fds = ctx.savedFds; // restore parent's fd view
+          const childPid = ctx.pid;
+          const task = runProgramAsync(p, argv, envp, fdsnap, S.cwd.p, S.modPath)
+            .then((code) => { S.reaped.set(childPid, code === null ? 127 : code); releaseFds(fdsnap); S.childTasks.delete(childPid); wakeWaiters(S); });
+          inflight.add(task); task.finally(() => inflight.delete(task));
+          S.childTasks.set(childPid, task);
+          return CHILD_DONE;
+        }
         const r = S.parkChild({ exec: { path: p, argv, envp, fds: fdsnap, cwd: S.cwd.p, selfPath: S.modPath } });
         return r; }
       case 'exit': case 'exit_group': {
@@ -360,7 +405,7 @@ class Process {
           const min = Number(a[2]) || 0;
           let g = Math.max(S.nextFd, min); while (S.fds.has(g)) g++;
           S.nextFd = Math.max(S.nextFd, g + 1);
-          h.shared = true; S.fds.set(g, { ...h }); return BigInt(g);
+          h.shared = true; S.fds.set(g, { ...h }); S.bumpFifo(h); return BigInt(g);
         }
         if (a[1] === 3) return 2n; return 0n; }
       case 'clock_gettime': { if (a[0] === 1 || a[0] === 4) { const t = process.hrtime(); S.i64(a[1], BigInt(t[0])); S.i64(a[1] + 8, BigInt(t[1])); return 0n; }
@@ -462,7 +507,75 @@ class Process {
     }
   }
 
+  // ---- JSPI: async syscall path (only the blocking ones; the rest delegate to sys) ----
+  async sysAsync(name, a) {
+    const S = this;
+    switch (name) {
+      case 'read': case 'readv': {
+        const h = S.fds.get(a[0]);
+        if (h && h.fifo) { // suspend until a writer produces data or the last writer closes (EOF)
+          while (!h.fifo.chunks.length && h.fifo.writers > 0) { pipeSuspends++; await new Promise(res => h.fifo.readWaiters.push(res)); }
+          return S.sys(name, a);
+        }
+        return S.sys(name, a);
+      }
+      case 'nanosleep': case 'clock_nanosleep': {
+        const tp = name === 'nanosleep' ? a[0] : a[2];
+        let ms = 0; if (tp) { S.refresh(); ms = Number(S.r64(tp)) * 1000 + Number(S.r64(tp + 8)) / 1e6; }
+        if (ms > 0) await new Promise(res => setTimeout(res, Math.min(ms, 3600000)));
+        return 0n;
+      }
+      case 'wait4': return await S.wait4Async(a);
+      case 'poll': case 'ppoll': return await S.pollAsync(name, a);
+      default: return S.sys(name, a);
+    }
+  }
+  async wait4Async(a) {
+    const S = this; const want = a[0] | 0;
+    while (S.pending.length) { const c = S.pending.shift(); if (c.exited !== undefined) S.reaped.set(c.pid, c.exited); } // exit-parked (non-exec) children
+    for (;;) {
+      let pid = -1;
+      if (want > 0) { if (S.reaped.has(want)) pid = want; }
+      else if (S.reaped.size) pid = S.reaped.keys().next().value;
+      if (pid >= 0) { const code = S.reaped.get(pid); S.reaped.delete(pid); if (a[1]) S.i32(a[1], (code & 0xff) << 8); return BigInt(pid); }
+      const stillRunning = want > 0 ? S.childTasks.has(want) : S.childTasks.size > 0;
+      if (!stillRunning) return err(E.CHILD);
+      waitSuspends++;
+      await new Promise(res => S.waitWaiters.push(res)); // suspend until a child finishes
+    }
+  }
+  async pollAsync(name, a) {
+    const S = this; const nfds = a[1];
+    const timeout = name === 'poll' ? (a[2] | 0) : -1; // ppoll: treat as blocking
+    const evalReady = () => { S.refresh(); let ready = 0; const waitFifos = [];
+      for (let i = 0; i < nfds; i++) {
+        const fd = S.r32(a[0] + i * 8), ev = S.dv.getInt16(a[0] + i * 8 + 4, true);
+        const h = S.fds.get(fd); let re = 0;
+        if (h && h.fifo) { const rdy = h.fifo.chunks.length || h.fifo.writers <= 0;
+          if ((ev & 1) && rdy) re |= 1; if (ev & 4) re |= 4; if (!rdy) waitFifos.push(h.fifo); }
+        else if (h && h.sock && h.sock.id) { const pk = initSockBridge().call(initSockBridge().OP.POLL, h.sock.id, 0, 0); if ((ev & 1) && pk.res > 0) re |= 1; if (ev & 4) re |= 4; }
+        else if (h && h.pty !== undefined) { const p = ptys.get(h.pty); const q = h.master ? p.toMaster : p.toSlave; if ((ev & 1) && q.length) re |= 1; if (ev & 4) re |= 4; }
+        else re = ev & 5; // stdio/file: ready
+        S.dv.setInt16(a[0] + i * 8 + 6, re, true); if (re) ready++;
+      }
+      return { ready, waitFifos };
+    };
+    for (;;) {
+      const r = evalReady();
+      if (r.ready > 0) return BigInt(r.ready);
+      if (timeout === 0) return 0n;
+      const woke = await new Promise(res => { let done = false; const fin = (v) => { if (!done) { done = true; res(v); } };
+        for (const f of r.waitFifos) f.readWaiters.push(() => fin(true));
+        if (timeout > 0) setTimeout(() => fin(false), timeout);
+        else if (!r.waitFifos.length) setTimeout(() => fin(false), 50); // nothing to wait on: poll again shortly
+      });
+      if (timeout > 0 && woke === false) return BigInt(evalReady().ready); // timed out
+    }
+  }
+
   shared(h) { return h.shared; }
+  // bump the refcount of a pipe end when its fd is duplicated (dup/dup2/fcntl/fork)
+  bumpFifo(h) { if (h && h.fifo) { if (h.end === 'w') h.fifo.writers++; else if (h.end === 'r') h.fifo.readers++; } }
   openAt(fp, flags, mode) {
     const O_DIRECTORY = 0o200000;
     const c = fs.constants;
@@ -525,12 +638,22 @@ class Process {
       else if (name === 'longjmp' || name === 'siglongjmp' || name === '_longjmp') wali[name] = () => { throw new Error('host-import longjmp (old binary)'); };
       else if (name.startsWith('SYS_')) {
         const sysname = name.slice(4);
-        wali[name] = (...a2) => {
-          S.syscalls++; syscallTotal++;
-          const r = S.sys(sysname, a2.map(x => typeof x === 'bigint' && sysname !== 'mmap' ? Number(x) : x));
-          if (process.env.WALI_TRACE) process.stderr.write(`[p${S.pid}:${S.syscalls}] ${sysname}(${a2.join(',')}) = ${r}\n`);
-          return r;
-        };
+        const map = (a2) => a2.map(x => typeof x === 'bigint' && sysname !== 'mmap' ? Number(x) : x);
+        if (JSPI && BLOCKING.has(sysname)) { // suspend-capable: yields to the scheduler while blocked
+          wali[name] = new WebAssembly.Suspending(async (...a2) => {
+            S.syscalls++; syscallTotal++;
+            const r = await S.sysAsync(sysname, map(a2));
+            if (process.env.WALI_TRACE) process.stderr.write(`[p${S.pid}:${S.syscalls}] ${sysname}(${a2.join(',')}) = ${r} (async)\n`);
+            return r;
+          });
+        } else {
+          wali[name] = (...a2) => {
+            S.syscalls++; syscallTotal++;
+            const r = S.sys(sysname, map(a2));
+            if (process.env.WALI_TRACE) process.stderr.write(`[p${S.pid}:${S.syscalls}] ${sysname}(${a2.join(',')}) = ${r}\n`);
+            return r;
+          };
+        }
       } else wali[name] = () => 0n;
     }
     return { wali, ...extra };
@@ -591,6 +714,21 @@ class Process {
       return 139;
     }
   }
+
+  // JSPI: run _start as a promising export so its blocking syscalls can suspend
+  async runAsync() {
+    procCount++;
+    const mod = getModule(this.modPath);
+    const inst = new WebAssembly.Instance(mod, this.makeImports(mod));
+    this.memory = inst.exports.memory; this.membuf = null; this.refresh();
+    const start = WebAssembly.promising(inst.exports._start);
+    try { await start(); return 0; }
+    catch (e) {
+      if (e instanceof ExitError) return e.code & 0xff;
+      process.stderr.write(`[wali-host] trap in pid ${this.pid}: ${e.stack || e}\n`);
+      return 139;
+    }
+  }
 }
 class ExitError extends Error { constructor(code) { super('exit'); this.code = code; } }
 
@@ -617,12 +755,25 @@ function runProgram(p, argv, envp, fdTable, cwd, selfPath) {
   return proc.run();
 }
 
+// JSPI variant: run the child concurrently (its blocking syscalls suspend, not stall)
+async function runProgramAsync(p, argv, envp, fdTable, cwd, selfPath) {
+  const base = path.basename(p);
+  if (base === 'cc' || base === 'clang' || base === 'wcc') return runProgram(p, argv, envp, fdTable, cwd, selfPath); // native compile stays sync
+  const pabs = (p.startsWith('/') || !p.includes('/')) ? p : path.resolve(cwd, p);
+  const mp = resolveModulePath(pabs, selfPath);
+  if (!mp) { process.stderr.write(`[wali-host] execve: cannot resolve ${p}\n`); return null; }
+  const proc = new Process(mp, argv, envp, fdTable, cwd);
+  return await proc.runAsync();
+}
+
 // ---- main ----
 const rootFds = new Map([[0, { std: 0 }], [1, { std: 1 }], [2, { std: 2 }]]);
 const rootEnv = Object.entries(process.env).filter(([k]) => k.startsWith('WALIENV_')).map(([k, v]) => k.slice(8) + '=' + v);
 const rootArgv = process.argv.slice(2).map((x, i) => i === 0 ? path.basename(x).replace(/\.wasm$/, '') : x);
-const t0 = Date.now();
-const root = new Process(path.resolve(wasmPath), rootArgv, rootEnv, rootFds, process.cwd());
-const code = root.run();
-process.stderr.write(`[wali-host] exit=${code} procs=${procCount} syscalls=${syscallTotal} wall=${((Date.now() - t0) / 1000).toFixed(2)}s\n`);
-process.exit(code);
+(async () => {
+  const t0 = Date.now();
+  const root = new Process(path.resolve(wasmPath), rootArgv, rootEnv, rootFds, process.cwd());
+  const code = JSPI ? await root.runAsync() : root.run();
+  process.stderr.write(`[wali-host] exit=${code} procs=${procCount} syscalls=${syscallTotal} wall=${((Date.now() - t0) / 1000).toFixed(2)}s${JSPI ? ` [jspi] suspends=${pipeSuspends}pipe/${waitSuspends}wait` : ''}\n`);
+  process.exit(code);
+})();

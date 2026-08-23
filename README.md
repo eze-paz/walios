@@ -14,12 +14,22 @@ Measured on a real workload (GasN2 CSV parse+aggregate, CPython 3.14):
   - `host.js` — full host: ~40 Linux syscalls + process model (fork/execve/wait4/
     pipes, vfork-as-macro + wasm-EH setjmp/longjmp), sockets (via `sock-bridge.js`),
     and a **WASI preview1** shim so it also runs standard `wasm32-wasi` binaries.
+    With `WALI_JSPI=1` (node 24 + `--experimental-wasm-jspi`) it runs the
+    **concurrent scheduler**: fork+exec'd children run as concurrent
+    `WebAssembly.promising(_start)` tasks, and blocking syscalls (read on an empty
+    pipe, wait4, poll, nanosleep) suspend via `WebAssembly.Suspending` instead of
+    stalling — so a shell can drive a *live* pipeline instead of run-at-wait4.
+  - `jspi-sched.mjs` / `jspi-proto.mjs` — standalone proofs of the JSPI mechanism:
+    two real WALI binaries over a bounded pipe interleave (writer suspends on a full
+    pipe, reader on an empty one) to completion with no deadlock.
   - `sock-bridge.js` — worker_thread giving the synchronous guest blocking TCP/UDP
     (SAB + Atomics.wait); the node stand-in for the browser WISP relay.
   - `wali-ld` — wrapper stripping GNU-ld-only flags for `wasm-ld`.
 - `browser/` — the same OS running in a **browser tab**.
   - `wali-worker.js` — Worker host: in-memory VFS (tar.gz preload) + OPFS mount,
-    stdin over SAB, process model, VFS-exec, WASI shim.
+    stdin over SAB, process model, VFS-exec, WASI shim. Passing `jspi:true` in the
+    run message enables the same **concurrent scheduler** as the node host (Chrome
+    has JSPI): pipeline stages run concurrently, readers suspend on empty pipes.
   - `wali-test.html` — test page (lua, CPython, GasN2 bench, busybox, hush,
     in-browser microcc compile, real wasi binary).
   - `coi.py` — COOP/COEP static server (SharedArrayBuffer needs cross-origin isolation).
@@ -69,11 +79,20 @@ Shipped & verified:
   http://neverssl.com` fetches the real page **in the tab**. Synthetic DNS hands the
   hostname to the relay (avoids COEP-blocked in-browser DoH). Defaults to this
   origin's `/wisp` (same relay the riscv-vm uses); a bundled dev relay runs on :8790.
+- **PTY layer** — `/dev/ptmx` + `/dev/pts/N`, termios line discipline
+  (canonical/ECHO/ICRNL/ONLCR), winsize, `TIOCGPTN`/`TIOCSCTTY` etc. — in both hosts.
+- **Concurrent scheduler (JSPI)** — fork+exec'd children run concurrently; blocking
+  syscalls suspend and yield instead of stalling. Verified in **node 24** and in a
+  real **Chrome tab**: `seq 200 | grep 1 | wc -l` and `seq 100000 | wc -l` produce
+  correct output with measured pipe/wait suspends (readers genuinely suspended on
+  empty pipes and were resumed by the concurrent upstream). Default stays the
+  synchronous model; opt in with `WALI_JSPI=1` (node) / `jspi:true` (browser).
 
-Genuinely remaining (not faked): **PTY** layer for interactive `sshd`; a few
-per-package source walls (oniguruma `st.h`, ncurses native `tic`); farm scale-out.
-The `clang.wasm` from-scratch build recipe is in `ci/` + `farm/` but is moot now
-that a maintained prebuilt exists.
+Genuinely remaining (not faked): wiring interactive `sshd` on top of the PTY +
+scheduler; async stdin under JSPI (still SAB-blocking); a few per-package source
+walls (oniguruma `st.h`, ncurses native `tic`); farm scale-out. The `clang.wasm`
+from-scratch build recipe is in `ci/` + `farm/` but is moot now that a maintained
+prebuilt exists.
 
 Not a from-scratch build: this rides the WALI project (github.com/arjunr2/WALI) for
 the toolchain/ABI, and @yowasp/clang for the in-browser compiler. This repo is the
