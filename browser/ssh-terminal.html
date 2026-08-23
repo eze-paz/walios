@@ -1,0 +1,56 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>WALI — live SSH terminal in a browser tab</title>
+<link rel="stylesheet" href="xterm.css">
+<style>
+  body { font: 14px system-ui; margin: 0; background: #0b0b0b; color: #ddd; height: 100vh; display: flex; flex-direction: column; }
+  header { padding: 8px 12px; border-bottom: 1px solid #222; display: flex; gap: 10px; align-items: center; }
+  header b { color: #9cf; } header .muted { color: #777; font-size: 12px; }
+  button { font: inherit; padding: 5px 12px; }
+  #wrap { flex: 1; min-height: 0; padding: 6px; }
+  #term { height: 100%; }
+</style>
+<header>
+  <b>WALI SSH terminal</b>
+  <button id="connect">connect</button>
+  <span class="muted">real OpenSSH 9.9 (privsep) over a loopback — type into it. <span id="stat">idle</span></span>
+</header>
+<div id="wrap"><div id="term"></div></div>
+<script src="xterm.js"></script>
+<script src="xterm-addon-fit.js"></script>
+<script>
+const term = new Terminal({ cursorBlink: true, fontSize: 14, fontFamily: 'monospace',
+  theme: { background: '#0b0b0b', foreground: '#d0f0d0' }, convertEol: false });
+const fit = new FitAddon.FitAddon(); term.loadAddon(fit);
+term.open(document.getElementById('term')); fit.fit();
+window.addEventListener('resize', () => { try { fit.fit(); sendWinsize(); } catch {} });
+const stat = document.getElementById('stat');
+const MANIFEST = { ssh: 'ssh.wasm', sshd: 'sshd.wasm', 'sshd-session': 'sshd-session.wasm', sh: 'busybox.wasm', hush: 'busybox.wasm', busybox: 'busybox.wasm' };
+let worker = null, running = false;
+
+function sendWinsize() { if (worker && running) worker.postMessage({ t: 'winsize', cols: term.cols, rows: term.rows }); }
+
+document.getElementById('connect').onclick = () => {
+  if (running) { term.write('\r\n[already connected]\r\n'); return; }
+  running = true; term.clear(); term.focus(); stat.textContent = 'booting…';
+  if (worker) worker.terminate();
+  worker = new Worker('wali-worker.js');
+  worker.onmessage = (ev) => {
+    const m = ev.data;
+    if (m.t === 'out') {                                        // pty output -> screen
+      if (m.fd === 2 && /^\[host\]/.test(m.s)) { console.debug('worker:', m.s.trim()); return; } // hide worker diagnostics
+      term.write(m.fd === 2 ? m.s.replace(/\r?\n/g, '\r\n') : m.s); // normalize stray \n on stderr
+    }
+    else if (m.t === 'boot') stat.textContent = 'connected';
+    else if (m.t === 'exit') { running = false; stat.textContent = `closed (exit ${m.code})`;
+      term.write(`\r\n\x1b[90m[session closed: exit=${m.code}]\x1b[0m\r\n`); }
+  };
+  worker.postMessage({ t: 'run', wasm: 'ssh.wasm', manifest: MANIFEST,
+    tars: [['sshvfs.tar.gz', '/']], env: { HOME: '/root', TERM: 'xterm', COLUMNS: String(term.cols), LINES: String(term.rows) },
+    cwd: '/root', argv: ['ssh', '-tt', '-F', '/etc/ssh/ssh_config', 'me@localhost'], jspi: true });
+  sendWinsize();
+};
+// every keystroke -> the OS worker's stdin (async); the remote pty echoes it back
+term.onData(d => { if (worker && running) worker.postMessage({ t: 'stdin', data: d }); });
+term.write('\x1b[90mClick "connect" to open a live SSH session (real OpenSSH, all WALI wasm in this tab).\x1b[0m\r\n');
+</script>
