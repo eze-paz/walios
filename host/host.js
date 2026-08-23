@@ -475,7 +475,8 @@ class Process {
       case 'getppid': return 1n; case 'gettid': return BigInt(S.pid);
       case 'getpgid': return BigInt(S.pid); case 'setpgid': case 'setsid': return 0n;
       case 'set_tid_address': return BigInt(S.pid);
-      case 'tkill': case 'kill': { if (S.inChild()) return S.parkChild({ exited: 128 + (a[1] | 0) }); throw new ExitError(128 + (a[1] | 0)); }
+      case 'tkill': case 'kill': { if (!(a[1] | 0)) return 0n; // sig 0 = liveness probe, never kills
+        if (S.inChild()) return S.parkChild({ exited: 128 + (a[1] | 0) }); throw new ExitError(128 + (a[1] | 0)); }
       case 'rt_sigaction': case 'rt_sigprocmask': case 'sigaltstack': case 'setitimer': return 0n;
       case 'futex': return 0n;
       case 'sched_getaffinity': { S.i64(a[2], 1n); return 8n; }
