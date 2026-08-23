@@ -810,12 +810,13 @@ class Process {
   }
 }
 
-function runProgram(p, argv, envp, fdTable, cwd, selfKey) {
+function resolveExecKey(p, cwd, selfKey) {
   let key = resolveModuleKey(p, selfKey);
   if (!key) {
     // not in the manifest — maybe it's a wasm binary sitting in the VFS
-    // (e.g. one microcc just emitted). Compile it from its bytes and run.
+    // (e.g. one microcc just emitted, or a file under the OPFS mount).
     const vp = p.startsWith('/') ? norm(p, '/') : norm(p, cwd);
+    opfsFault(vp);
     const f = files.get(vp);
     if (f) {
       const bytes = f.br !== undefined ? fileRead(f, 0, f.size) : f.data.subarray(0, f.size);
@@ -825,26 +826,24 @@ function runProgram(p, argv, envp, fdTable, cwd, selfKey) {
       }
     }
   }
+  // busybox multi-call fallback (same as the node host): any still-unresolved
+  // name runs busybox, which dispatches on argv[0].
+  if ((!key || !modCache.has(key)) && manifest['busybox']) key = manifest['busybox'];
   if (!key || !modCache.has(key)) { post(`[host] execve: cannot resolve ${p}\n`, 2); return null; }
+  return key;
+}
+
+function runProgram(p, argv, envp, fdTable, cwd, selfKey) {
+  const key = resolveExecKey(p, cwd, selfKey);
+  if (!key) return null;
   const proc = new Process(key, argv, envp, fdTable, cwd);
   return proc.run();
 }
 
 // JSPI variant: run the child concurrently (its blocking syscalls suspend, not stall)
 async function runProgramAsync(p, argv, envp, fdTable, cwd, selfKey) {
-  let key = resolveModuleKey(p, selfKey);
-  if (!key) {
-    const vp = p.startsWith('/') ? norm(p, '/') : norm(p, cwd);
-    const f = files.get(vp);
-    if (f) {
-      const bytes = f.br !== undefined ? fileRead(f, 0, f.size) : f.data.subarray(0, f.size);
-      if (bytes[0] === 0 && bytes[1] === 0x61 && bytes[2] === 0x73 && bytes[3] === 0x6d) {
-        key = 'vfs:' + vp;
-        if (!modCache.has(key)) modCache.set(key, new WebAssembly.Module(bytes.slice()));
-      }
-    }
-  }
-  if (!key || !modCache.has(key)) { post(`[host] execve: cannot resolve ${p}\n`, 2); return null; }
+  const key = resolveExecKey(p, cwd, selfKey);
+  if (!key) return null;
   const proc = new Process(key, argv, envp, fdTable, cwd);
   return await proc.runAsync();
 }
