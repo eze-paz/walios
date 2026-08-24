@@ -1633,8 +1633,13 @@ self.onmessage = async (ev) => {
     addFile('/etc/hosts', te.encode('127.0.0.1 localhost\n'));
     // seed VFS with inline binaries (e.g. wasm just produced by clang.wasm)
     if (m.blobs) for (const [p, buf] of Object.entries(m.blobs)) addFile(norm(p, '/'), new Uint8Array(buf));
-    // compile URL-based modules (root + manifest); skip when running a VFS binary
-    for (const key of new Set([m.vfsMain ? null : m.wasm, ...Object.values(manifest)])) {
+    // Compile the ROOT module up front. Under JSPI the rest of the manifest
+    // (python.wasm 31 MB, lua, ssh, ...) is NOT fetched here — each lazy-compiles
+    // on its first exec via ensureModule(). The sync fallback can't lazy-fetch, so
+    // it still has to preload the whole manifest. (skip all when running a VFS binary)
+    const canLazy = !!m.jspi && jspiAvailable;
+    const preload = canLazy ? [m.vfsMain ? null : m.wasm] : [m.vfsMain ? null : m.wasm, ...Object.values(manifest)];
+    for (const key of new Set(preload)) {
       if (key && !modCache.has(key)) modCache.set(key, await WebAssembly.compileStreaming(fetch(key)));
     }
     let rootKey = m.wasm;
