@@ -118,7 +118,7 @@ term.open(document.getElementById('term')); fit.fit(); term.focus();
 let worker = null, running = false;
 const BB = 'busybox.wasm?v=net3';  // version-bust: ash+networking, --export-table (shell ^C)
 const MANIFEST = { busybox: BB, sh: BB, hush: BB, ash: BB, python: 'python.wasm', 'python3': 'python.wasm', lua: 'lua.wasm',
-                   ssh: 'ssh.wasm', slogin: 'ssh.wasm' };
+                   ssh: 'ssh.wasm?v=ssl', slogin: 'ssh.wasm?v=ssl' };  // ?v=ssl: build with libcrypto (RSA/ECDSA)
 
 // FULL origin OPFS root, so the shell can see/edit this app's files (Pyodide
 // /files, conversations, ...). No subdir sandbox — `rm` here really deletes them.
