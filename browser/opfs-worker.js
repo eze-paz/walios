@@ -37,8 +37,12 @@ async function handle(op) {
         const d = await walkDir(td.decode(data.slice(0, a0)));
         const out = [];
         for await (const [name, h] of d.entries()) {
-          if (h.kind === 'directory') out.push({ n: name, d: 1 });
-          else { const f = await h.getFile(); out.push({ n: name, s: f.size, m: f.lastModified }); }
+          if (h.kind === 'directory') { out.push({ n: name, d: 1 }); continue; }
+          // getFile() throws while another handle (the host app / Pyodide) holds an
+          // exclusive sync-access lock on the file. Still list it (size unknown)
+          // rather than aborting the whole directory on one locked entry.
+          try { const f = await h.getFile(); out.push({ n: name, s: f.size, m: f.lastModified }); }
+          catch { out.push({ n: name, s: 0, m: 0 }); }
         }
         const b = te.encode(JSON.stringify(out));
         if (b.length > data.length) return finish(EINVAL, 0);
