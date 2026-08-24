@@ -1229,7 +1229,7 @@ class Process {
     S.refresh();
     const timeout = name === 'poll' ? (a[2] | 0)
       : (a[2] ? Math.ceil(Number(S.r64(a[2])) * 1000 + Number(S.r64(a[2] + 8)) / 1e6) : -1); // ppoll: timespec or NULL=block
-    const evalReady = () => { S.refresh(); let ready = 0; const waitFifos = []; const waitPtys = []; let waitStdin = false;
+    const evalReady = () => { S.refresh(); let ready = 0; const waitFifos = []; const waitPtys = []; let waitStdin = false, waitSock = false;
       for (let i = 0; i < nfds; i++) {
         const fd = S.r32(a[0] + i * 8), ev = S.dv.getInt16(a[0] + i * 8 + 4, true);
         const h = S.fds.get(fd); let re = 0;
@@ -1242,28 +1242,31 @@ class Process {
         else if (h && h.pty !== undefined) { const p = ptys.get(h.pty); const q = h.master ? p.toMaster : p.toSlave;
           if ((ev & 1) && q.length) re |= 1; if (ev & 4) re |= 4; if (!q.length) waitPtys.push(h.master ? p.masterWaiters : p.slaveWaiters); }
         else if (h && h.tfd) { S.pollTfd(h.tfd); if ((ev & 1) && h.tfd.count > 0) re |= 1; if (!h.tfd.count) waitPtys.push(h.tfd.waiters); }
-        else if (h && h.sock && h.sock.id) { const pk = initSockBridge().call(initSockBridge().OP.POLL, h.sock.id, 0, 0); if ((ev & 1) && pk.res > 0) re |= 1; if (ev & 4) re |= 4; }
-        else if (h && h.pty !== undefined) { const p = ptys.get(h.pty); const q = h.master ? p.toMaster : p.toSlave; if ((ev & 1) && q.length) re |= 1; if (ev & 4) re |= 4; }
+        else if (h && h.sock && h.sock.id) { const pk = initSockBridge().call(initSockBridge().OP.POLL, h.sock.id, 0, 0); if ((ev & 1) && pk.res > 0) re |= 1; else if (ev & 1) waitSock = true; if (ev & 4) re |= 4; }
         else if (fd < 0) re = 0; // POSIX: negative fds are ignored
         else if (!h) re = 0x20; // POLLNVAL
         else re = ev & 5; // stdio/file: ready
         S.dv.setInt16(a[0] + i * 8 + 6, re, true); if (re) ready++;
       }
-      return { ready, waitFifos, waitPtys, waitStdin };
+      return { ready, waitFifos, waitPtys, waitStdin, waitSock };
     };
+    const deadline = timeout >= 0 ? Date.now() + timeout : Infinity;
     for (;;) {
       const r = evalReady();
       if (r.ready > 0) return BigInt(r.ready);
-      if (timeout === 0) return 0n;
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) return 0n;
       const woke = await S.sigRace((fin) => {
         for (const f of r.waitFifos) f.readWaiters.push(() => fin(true));
         for (const wl of r.waitPtys) wl.push(() => fin(true));
         if (r.waitStdin) { startStdin(); stdinWaiters.push(() => fin(true)); }
-        if (timeout > 0) setTimeout(() => fin(false), timeout);
-        else if (!r.waitFifos.length && !r.waitPtys.length && !r.waitStdin) setTimeout(() => fin(false), 50);
+        // A WISP socket has no event-driven waiter — re-poll it on a short ticker even
+        // when another waiter is armed, else poll([socket, stdin]) misses socket data.
+        let ms = r.waitSock ? 15 : ((!r.waitFifos.length && !r.waitPtys.length && !r.waitStdin) ? 50 : Infinity);
+        ms = Math.min(ms, remaining);
+        if (Number.isFinite(ms)) setTimeout(() => fin(false), ms);
       });
       if (woke === 'sig') { const v = await S.onSigWakeAsync(); if (v !== null) return v; }
-      if (timeout > 0 && woke === false) return BigInt(evalReady().ready); // timed out
     }
   }
 
