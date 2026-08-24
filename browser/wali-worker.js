@@ -950,8 +950,10 @@ class Process {
         if (req === 0x5401) S.wbytes(a[2], defaultTermios());
         return 0n; }
       case 'fcntl': { const h = S.fds.get(a[0]); if (!h) return err(E.BADF);
-        if (a[1] === 0 || a[1] === 1030) {
-          const min = Number(a[2]) || 0; let g = min; while (S.fds.has(g)) g++;
+        if (a[1] === 0 || a[1] === 1030) { // F_DUPFD / F_DUPFD_CLOEXEC: arg is a 32-bit int (the
+          // minimum fd). musl passes it variadic as a 64-bit long with garbage high bits, so mask
+          // to 32 bits — else the dup lands at a bogus fd number and poisons the fd table.
+          const min = Number(BigInt.asUintN(32, BigInt(a[2] || 0))); let g = min; while (S.fds.has(g)) g++;
           S.fds.set(g, { ...h }); S.bumpFifo(h); return BigInt(g);
         }
         if (a[1] === 3) return BigInt(2 | (h.nonblock ? 0x800 : 0));
@@ -1667,40 +1669,88 @@ function runProgram(p, argv, envp, fdTable, cwd, selfKey, cred, asPid) {
 // move worker<->page by value; the sysroot lives on the page and is reused per call.
 let __ccSeq = 0; const __ccPending = new Map();
 async function runCc(argv, cwd) {
-  // @yowasp's clang gets a flat root file map (dirs are nested objects). Pass each
-  // source file by BASENAME and rewrite argv to match; map the -o basename back to
-  // the caller's real path when landing the emitted binary. (Good enough for a single
-  // build dir; multi-dir source trees are future work.)
+  // @yowasp clang gets a virtual FS as a nested tree. Mount the WHOLE build dir (cwd)
+  // at the map root — keyed by path RELATIVE to cwd — so local #include "x.h" and
+  // subdir sources resolve, and argv's relative paths (color.c, -o color.o) match. The
+  // sysroot is added on the page. New outputs (files not present as inputs) are landed
+  // back into the VFS.
   const abs = (x) => x.startsWith('/') ? norm(x, '/') : norm(x, cwd);
-  const base = (x) => x.split('/').pop();
-  const inputs = {}, outArgv = [argv[0]]; let outPath = null, outBase = null;
-  for (let i = 1; i < argv.length; i++) { const a = argv[i];
-    if (a === '-o') { outPath = abs(argv[++i]); outBase = base(argv[i]); outArgv.push('-o', outBase); continue; }
-    if (a.startsWith('-')) { outArgv.push(a); continue; }
-    const vp = abs(a); opfsFault(vp); const f = files.get(vp);
-    if (f && !f.dir) { const b = f.br !== undefined ? fileRead(f, 0, f.size) : f.data.subarray(0, f.size); inputs[base(a)] = b.slice(); outArgv.push(base(a)); }
-    else outArgv.push(a);                              // not a VFS file (lib name, etc.) — pass through
+  const inputs = {}, inputSet = new Set();
+  const put = (rel, bytes) => { const parts = rel.split('/').filter(Boolean); let cur = inputs;
+    for (let i = 0; i < parts.length - 1; i++) { if (!cur[parts[i]] || cur[parts[i]] instanceof Uint8Array) cur[parts[i]] = {}; cur = cur[parts[i]]; }
+    cur[parts[parts.length - 1]] = bytes; inputSet.add(rel); };
+  const prefix = cwd === '/' ? '/' : cwd + '/';
+  for (const [vp, f] of files) {                        // every file under cwd
+    if (f.dir || !(vp === cwd || vp.startsWith(prefix))) continue;
+    const rel = vp.slice(prefix.length); if (!rel) continue;
+    const b = f.br !== undefined ? fileRead(f, 0, f.size) : f.data.subarray(0, f.size);
+    put(rel, b.slice());
+  }
+  // absolute source args (rare): mount by basename too so clang can read them
+  const outArgv = argv.slice(); let outRel = null;
+  for (let i = 1; i < outArgv.length; i++) { const a = outArgv[i];
+    if (a === '-o') { outRel = outArgv[++i]; if (outRel && outRel.startsWith('/')) { const bn = outRel.split('/').pop(); outArgv[i] = bn; } continue; }
+    if (a.startsWith('-')) continue;
+    if (a.startsWith('/')) { const vp = abs(a); opfsFault(vp); const f = files.get(vp); if (f && !f.dir) { const bn = a.split('/').pop(); put(bn, (f.br !== undefined ? fileRead(f, 0, f.size) : f.data.subarray(0, f.size)).slice()); outArgv[i] = bn; } }
   }
   const id = ++__ccSeq; const done = new Promise(r => __ccPending.set(id, r));
   self.postMessage({ t: 'cc', id, argv: outArgv, inputs });
-  const res = await done;                              // { files, stderr, code } or { err }
+  const res = await done;                              // { files(flat path->bytes), stderr, code } or { err }
   if (res.stderr) post(res.stderr, 2);
   if (res.err) { post(`${argv[0]}: ${res.err}\n`, 2); return 1; }
-  for (const [name, bytes] of Object.entries(res.files || {})) {   // land emitted outputs (skip echoed inputs)
-    if (inputs[name]) continue;
-    addFile((outBase && name === outBase && outPath) ? outPath : abs(name), new Uint8Array(bytes), 0o755);
+  for (const [name, bytes] of Object.entries(res.files || {})) {   // land NEW outputs only
+    if (inputSet.has(name)) continue;
+    const outAbs = (argv.includes('-o') && name === (outRel && outRel.split('/').pop())) ? abs(outRel || name) : norm(prefix + name, '/');
+    addFile(outAbs, new Uint8Array(bytes), 0o755);
   }
   return res.code | 0;
+}
+
+// wfetch URL [-O out]: fetch over HTTPS via the page's server-side proxy (busybox wget
+// has no TLS, and the browser can't read cross-origin bodies) — used by in-tab package builds.
+async function runWfetch(argv, cwd) {
+  const abs = (x) => x.startsWith('/') ? norm(x, '/') : norm(x, cwd);
+  let url = null, out = null;
+  for (let i = 1; i < argv.length; i++) { const a = argv[i];
+    if (a === '-O' || a === '-o') { out = argv[++i]; continue; }
+    if (a.startsWith('-')) continue;
+    if (!url) url = a; else if (!out) out = a;
+  }
+  if (!url) { post('wfetch: usage: wfetch URL [-O outfile]\n', 2); return 1; }
+  if (!out) out = url.split('/').pop() || 'index.html';
+  const id = ++__ccSeq; const done = new Promise(r => __ccPending.set(id, r));
+  self.postMessage({ t: 'wfetch', id, url });
+  const res = await done;               // { bytes, status } or { err }
+  if (res.err || !res.bytes || (res.status && res.status >= 400)) { post(`wfetch: ${res.err || ('HTTP ' + res.status)} (${url})\n`, 2); return 1; }
+  addFile(abs(out), new Uint8Array(res.bytes), 0o644);
+  return 0;
+}
+
+// wextract TARBALL [destdir]: gunzip + untar on the page (busybox has no tar) into the VFS.
+async function runWextract(argv, cwd) {
+  const abs = (x) => x.startsWith('/') ? norm(x, '/') : norm(x, cwd);
+  const tarball = argv[1], dest = argv[2] || '.';
+  if (!tarball) { post('wextract: usage: wextract TARBALL [destdir]\n', 2); return 1; }
+  const vp = abs(tarball); opfsFault(vp); const f = files.get(vp);
+  if (!f) { post(`wextract: ${tarball}: not found\n`, 2); return 1; }
+  const bytes = (f.br !== undefined ? fileRead(f, 0, f.size) : f.data.subarray(0, f.size)).slice();
+  const id = ++__ccSeq; const done = new Promise(r => __ccPending.set(id, r));
+  self.postMessage({ t: 'wextract', id, bytes }, [bytes.buffer]);
+  const res = await done;
+  if (res.err) { post(`wextract: ${res.err}\n`, 2); return 1; }
+  const d = abs(dest); let n = 0;
+  for (const [name, b] of Object.entries(res.files || {})) { if (b === null) mkdirp(norm(d + '/' + name, '/')); else { addFile(norm(d + '/' + name, '/'), new Uint8Array(b), 0o644); n++; } }
+  return 0;
 }
 
 // JSPI variant: run the child concurrently (its blocking syscalls suspend, not stall)
 async function runProgramAsync(p, argv, envp, fdTable, cwd, selfKey, cred, asPid) {
   const base0 = (p || '').split('/').pop();
   if (base0 === 'cc' || base0 === 'clang' || base0 === 'gcc' || base0 === 'cc.wali') {
-    const code = await runCc(argv, cwd);
-    if (asPid) { const cp = procs.get(asPid); if (cp) cp.retire(); } // no Process ran; drop the fork placeholder
-    return code;
+    return await runCc(argv, cwd);   // the exec caller reaps asPid normally (don't touch it here)
   }
+  if (base0 === 'wfetch') return await runWfetch(argv, cwd);
+  if (base0 === 'wextract') return await runWextract(argv, cwd);
   const key = resolveExecKey(p, cwd, selfKey);
   if (!key) return null;
   if (!(await ensureModule(key))) return null; // LAZY: fetch+compile on first exec
