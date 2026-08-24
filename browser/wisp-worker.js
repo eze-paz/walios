@@ -3,7 +3,7 @@
 // TCP -> WISP frames over the WebSocket; DNS -> DoH fetch. Mirrors the node
 // sock-bridge op protocol so wali-worker.js uses the same call shape.
 'use strict';
-const OP = { CONNECT: 1, SEND: 2, RECV: 3, CLOSE: 4, POLL: 5, UDP: 6, SENDTO: 7, RECVFROM: 8, PING: 9, LISTEN: 10, ACCEPT: 11 };
+const OP = { CONNECT: 1, SEND: 2, RECV: 3, CLOSE: 4, POLL: 5, UDP: 6, SENDTO: 7, RECVFROM: 8, PING: 9, LISTEN: 10, ACCEPT: 11, PINGPOLL: 12 };
 const listenReqs = new Map();     // listen stream id -> {status, port} (0xf5 reply)
 const listeners = new Map();      // listener id -> bound relay port
 const acceptQs = new Map();       // relay port -> [{sid, ip, port}] pending inbound conns
@@ -94,15 +94,24 @@ async function handle(op) {
     wispSend(0x01, id, payload);
     return finish(id);
   }
-  if (op === OP.PING) { // ICMP echo via the relay: a0 = dst IP as u32 (network order in data[0..4])
-    while (!wsReady && !wsErr) await sleep(2); if (wsErr) return finish(EPIPE);
-    const id = nextPing++; pings.set(id, { status: null });
-    const p = new Uint8Array(6); p.set(data.subarray(0, 4), 0); new DataView(p.buffer).setUint16(4, 4000, true);
-    wispSend(F.PING, id, p);
-    let n = 0; while (pings.get(id).status === null && n++ < 4000) await sleep(2);
-    const st = pings.get(id).status; pings.delete(id);
-    return finish(st === 0 ? 0 : -1); // 0 = reachable
+  if (op === OP.PING) { // ICMP kickoff: data = "ip[|port]" spec. Swap the synthetic IP
+    // back to the hostname (like CONNECT) so the relay resolves + pings it. Returns a
+    // ping id immediately; the OS worker polls PINGPOLL, so nothing blocks the worker.
+    for (let i = 0; i < 250 && !wsReady && !wsErr; i++) await sleep(2);
+    const spec = new TextDecoder().decode(data.slice(0, a0)).split('|')[0];
+    const host = ipToName.get(spec) || spec;
+    const id = nextPing++; const rec = { status: null }; pings.set(id, rec);
+    if (wsReady && !wsErr) {
+      const hb = new TextEncoder().encode(host);
+      const p = new Uint8Array(3 + hb.length); p[0] = 0xff; new DataView(p.buffer).setUint16(1, 4000, true); p.set(hb, 3);
+      wispSend(F.PING, id, p);
+      setTimeout(() => { if (rec.status === null) rec.status = 1; }, 6000); // no PONG -> unreachable
+    } else rec.status = 1;
+    return finish(id);
   }
+  if (op === OP.PINGPOLL) { const rec = pings.get(a0); if (!rec) return finish(EBADF);
+    if (rec.status === null) return finish(EAGAIN);         // still in flight
+    const st = rec.status; pings.delete(a0); return finish(st === 0 ? 0 : 1); } // 0 = replied
   if (op === OP.LISTEN) { // a0 = wanted port -> res = listener id, ctl[7] = actual relay port
     while (!wsReady && !wsErr) await sleep(2);
     if (wsErr) return finish(ECONNREFUSED);

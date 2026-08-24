@@ -298,7 +298,7 @@ function initWisp() {
     while (Atomics.load(ctl, 1) === prev) Atomics.wait(ctl, 1, prev);
     return { res: ctl[6], aux: ctl[7], data: wdata };
   };
-  wisp = { call, OP: { CONNECT: 1, SEND: 2, RECV: 3, CLOSE: 4, POLL: 5, UDP: 6, SENDTO: 7, RECVFROM: 8, LISTEN: 10, ACCEPT: 11 } };
+  wisp = { call, OP: { CONNECT: 1, SEND: 2, RECV: 3, CLOSE: 4, POLL: 5, UDP: 6, SENDTO: 7, RECVFROM: 8, LISTEN: 10, ACCEPT: 11, PING: 9, PINGPOLL: 12 } };
   return wisp;
 }
 function readSockaddr(S, p) { S.refresh();
@@ -308,6 +308,26 @@ function readSockaddr(S, p) { S.refresh();
 function writeSockaddr(S, p, d) { S.refresh(); S.u8.fill(0, p, p + 16);
   S.dv.setUint16(p, 2, true); S.dv.setUint16(p + 2, d.port, false);
   const o = d.ip.split('.').map(Number); S.u8[p+4]=o[0]; S.u8[p+5]=o[1]; S.u8[p+6]=o[2]; S.u8[p+7]=o[3]; return 16; }
+
+// Internet checksum (RFC 1071): 16-bit one's-complement sum, for our synthetic
+// ICMP echo replies (the relay confirms reachability; the client owns the packet).
+function inetChecksum(b) { let s = 0; for (let i = 0; i + 1 < b.length; i += 2) s += (b[i] << 8) | b[i + 1];
+  if (b.length & 1) s += b[b.length - 1] << 8; while (s >> 16) s = (s & 0xffff) + (s >> 16); return (~s) & 0xffff; }
+// Build the ICMP echo REPLY the guest's ping expects: echo the request's id/seq and
+// data (so its RTT timestamp round-trips), and — for a SOCK_RAW socket — prepend a
+// minimal IPv4 header with the pinged host as source (ping reads ihl then the ICMP).
+function buildIcmpReply(pg) { const data = pg.data || new Uint8Array(0);
+  const icmp = new Uint8Array(8 + data.length);
+  icmp[0] = 0; icmp[1] = 0; icmp[4] = (pg.icmpId >> 8) & 255; icmp[5] = pg.icmpId & 255;
+  icmp[6] = (pg.icmpSeq >> 8) & 255; icmp[7] = pg.icmpSeq & 255; icmp.set(data, 8);
+  const ck = inetChecksum(icmp); icmp[2] = (ck >> 8) & 255; icmp[3] = ck & 255;
+  if (!pg.rawhdr) return icmp;
+  const ip = new Uint8Array(20 + icmp.length), dv = new DataView(ip.buffer);
+  ip[0] = 0x45; dv.setUint16(2, ip.length, false); ip[8] = 64; ip[9] = 1;   // ttl=64, proto=ICMP
+  const src = pg.dst.ip.split('.').map(Number); for (let i = 0; i < 4; i++) ip[12 + i] = src[i] || 0;
+  ip[16] = 127; ip[17] = 0; ip[18] = 0; ip[19] = 1;                          // dst = 127.0.0.1 (loopback)
+  const ick = inetChecksum(ip.subarray(0, 20)); ip[10] = (ick >> 8) & 255; ip[11] = ick & 255;
+  ip.set(icmp, 20); return ip; }
 
 function readStdin(n) {
   if (!stdinCtl) return new Uint8Array(0);
@@ -427,8 +447,15 @@ class Process {
   async sockWait(h) {
     const br = initWisp();
     while (true) {
-      const pk = br.call(br.OP.POLL, h.sock.id, 0, 0);
-      if (pk.res !== 0) return null;                 // readable, or error/closed -> let S.sys report it
+      if (h.sock.icmp) {
+        const pg = h.sock.ping;
+        if (pg && pg.status === null) { const pk = br.call(br.OP.PINGPOLL, pg.id, 0, 0);
+          if (pk.res === 0) { pg.status = 0; return null; }       // got a reply -> recv synthesises it
+          if (pk.res !== -11) { pg.status = pk.res; h.sock.ping = null; } } // unreachable: wait for ping's own timeout
+      } else {
+        const pk = br.call(br.OP.POLL, h.sock.id, 0, 0);
+        if (pk.res !== 0) return null;                            // readable, or error/closed -> let S.sys report it
+      }
       const w = await this.sigRace(res => setTimeout(() => res('t'), 20));
       if (w === 'sig') { const v = this.onSigWake(true); if (v !== null) return v; }
     }
@@ -1032,15 +1059,22 @@ class Process {
       case 'poll': { S.refresh(); let ready = 0;
         for (let i = 0; i < a[1]; i++) { const fd = S.r32(a[0] + i * 8), ev = S.dv.getInt16(a[0] + i * 8 + 4, true);
           const h = S.fds.get(fd); let re = 0;
-          if (h && h.sock && h.sock.id) { const pk = initWisp().call(initWisp().OP.POLL, h.sock.id, 0, 0); if ((ev & 1) && pk.res > 0) re |= 1; if (ev & 4) re |= 4; }
+          if (h && h.sock && h.sock.icmp) { const pg = h.sock.ping;   // readable once the relay's ping resolves
+            if (pg && pg.status === null) { const pk = initWisp().call(initWisp().OP.PINGPOLL, pg.id, 0, 0); if (pk.res === 0) pg.status = 0; else if (pk.res !== -11) pg.status = pk.res; }
+            if ((ev & 1) && pg && pg.status === 0) re |= 1; if (ev & 4) re |= 4; }
+          else if (h && h.sock && h.sock.id) { const pk = initWisp().call(initWisp().OP.POLL, h.sock.id, 0, 0); if ((ev & 1) && pk.res > 0) re |= 1; if (ev & 4) re |= 4; }
           else if (h && h.pty !== undefined) { const p = ptys.get(h.pty); const q = h.master ? p.toMaster : p.toSlave; if ((ev & 1) && q.length) re |= 1; if (ev & 4) re |= 4; }
           else if (fd < 0) re = 0; else if (!h) re = 0x20; else re = ev & 5;
           S.dv.setInt16(a[0] + i * 8 + 6, re, true); if (re) ready++; }
         return BigInt(ready); }
       case 'select': case 'pselect6': return 1n;
-      case 'socket': { const dom = a[0] & 0xff, type = a[1] & 0xff, nonblock = !!(a[1] & 0x800);
+      case 'socket': { const dom = a[0] & 0xff, type = a[1] & 0xff, proto = a[2] | 0, nonblock = !!(a[1] & 0x800);
         if (dom !== 2 && dom !== 10) return err(E.NOSYS);
         const br = initWisp();
+        // ICMP: SOCK_RAW (rawhdr -> recv includes the IP header) or the unprivileged
+        // SOCK_DGRAM "ping socket" (IPPROTO_ICMP). Reachability comes from the relay.
+        if (type === 3 || (type === 2 && (proto === 1 || proto === 58))) {
+          const g = S.allocFd(); S.fds.set(g, { sock: { id: 0, icmp: true, rawhdr: type === 3, v6: dom === 10, nonblock } }); return BigInt(g); }
         if (type === 2) { const r = br.call(br.OP.UDP, 0, 0, 0); if (r.res < 0) return BigInt(r.res); const g = S.allocFd(); S.fds.set(g, { sock: { id: r.res, udp: true, nonblock } }); return BigInt(g); }
         const g = S.allocFd(); S.fds.set(g, { sock: { id: 0, dom, nonblock } }); return BigInt(g); }
       case 'bind': { const h = S.fds.get(a[0]); if (!h || !h.sock) return err(E.BADF);
@@ -1063,7 +1097,7 @@ class Process {
         return BigInt(g); }
       case 'connect': { const h = S.fds.get(a[0]); if (!h || !h.sock) return err(E.BADF); S.refresh();
         const dst = readSockaddr(S, a[1]);
-        if (h.sock.udp) { h.sock.dest = dst; return 0n; }
+        if (h.sock.udp || h.sock.icmp) { h.sock.dest = dst; return 0n; }
         const br = initWisp(); const spec = te.encode(`${dst.ip}|${dst.port}`);
         const r = br.call(br.OP.CONNECT, spec.length, 0, 0, spec); if (r.res < 0) return BigInt(r.res); h.sock.id = r.res; return 0n; }
       case 'sendto': case 'sendmsg': { const h = S.fds.get(a[0]); if (!h) return err(E.BADF);
@@ -1085,6 +1119,15 @@ class Process {
           for (let i = 0; i < iovn; i++) { const p = S.r32(iov + i * 8), l = S.r32(iov + i * 8 + 4); if (l) parts.push(S.u8.slice(p, p + l)); }
           payload = new Uint8Array(parts.reduce((n, x) => n + x.length, 0)); let o = 0; for (const x of parts) { payload.set(x, o); o += x.length; } }
         else { payload = S.u8.slice(a[1], a[1] + a[2]); if (a[4]) dest = readSockaddr(S, a[4]); }
+        if (h.sock.icmp) { if (!dest) return err(E.INVAL); h.sock.lastDest = dest;
+          // payload = ICMP echo request; ask the relay to ping the host (it resolves
+          // the synthetic IP back to a name), and remember id/seq/data for the reply.
+          const icmpId = payload.length >= 6 ? ((payload[4] << 8) | payload[5]) : 0;
+          const icmpSeq = payload.length >= 8 ? ((payload[6] << 8) | payload[7]) : 0;
+          const spec = te.encode(dest.ip);
+          const kr = br.call(br.OP.PING, spec.length, 0, 0, spec);   // kickoff -> ping id
+          h.sock.ping = { id: kr.res, dst: dest, icmpId, icmpSeq, data: payload.slice(8), rawhdr: h.sock.rawhdr, status: null };
+          return BigInt(payload.length); }
         if (h.sock.udp) { if (!dest) return err(E.INVAL); h.sock.lastDest = dest;
           const addr = te.encode(`${dest.ip}|${dest.port}`); const packed = new Uint8Array(payload.length + addr.length); packed.set(payload, 0); packed.set(addr, payload.length);
           const r = br.call(br.OP.SENDTO, h.sock.id, payload.length, addr.length, packed); return BigInt(r.res); }
@@ -1100,6 +1143,18 @@ class Process {
           } else if (ctl) S.i32(a[1] + 24, 0);
           return BigInt(total); }
         if (!h.sock) return err(E.BADF);
+        if (h.sock.icmp) { const pg = h.sock.ping;   // reply synthesised locally once the relay confirms
+          if (pg && pg.status === null) { const pk = initWisp().call(initWisp().OP.PINGPOLL, pg.id, 0, 0);  // self-drive (nonblock ping via poll)
+            if (pk.res === 0) pg.status = 0; else if (pk.res !== -11) pg.status = pk.res; }
+          if (!pg || pg.status !== 0) return err(E.AGAIN);   // no reply yet / unreachable -> ping's own timeout ends it
+          const pkt = buildIcmpReply(pg); h.sock.ping = null;
+          if (name === 'recvfrom') { const k = Math.min(pkt.length, a[2]); S.wbytes(a[1], pkt.subarray(0, k));
+            if (a[4]) { const n = writeSockaddr(S, a[4], pg.dst); if (a[5]) S.i32(a[5], n); } return BigInt(k); }
+          const np = S.r32(a[1]); if (np) { const n = writeSockaddr(S, np, pg.dst); S.i32(a[1] + 4, n); }
+          const iov = S.r32(a[1] + 8), iovn = S.r32(a[1] + 12); let off = 0, tot = 0;
+          for (let i = 0; i < iovn && off < pkt.length; i++) { const p = S.r32(iov + i * 8), l = S.r32(iov + i * 8 + 4); if (!l) continue;
+            const k = Math.min(l, pkt.length - off); S.wbytes(p, pkt.subarray(off, off + k)); off += k; tot += k; }
+          return BigInt(tot); }
         const br = initWisp(); const op = h.sock.udp ? br.OP.RECVFROM : br.OP.RECV;
         if (h.sock.nonblock) { const pk = br.call(br.OP.POLL, h.sock.id, 0, 0); if (pk.res <= 0) return err(E.AGAIN); }
         if (name === 'recvfrom') { const r = br.call(op, h.sock.id, a[2], 0); if (r.res <= 0) return BigInt(r.res); S.wbytes(a[1], r.data.subarray(0, r.res));
@@ -1146,7 +1201,7 @@ class Process {
           S.i64(a[1], BigInt(h.tfd.count)); h.tfd.count = 0; return 8n; }
         // Blocking socket read: poll the WISP bridge with a signal race instead of a
         // frozen Atomics.wait, so ^C (SIGINT) can interrupt a stuck recv (e.g. telnet).
-        if (h && h.sock && h.sock.id && !h.nonblock) { const v = await S.sockWait(h); if (v !== null) return v; }
+        if (h && h.sock && (h.sock.id || h.sock.icmp) && !h.nonblock) { const v = await S.sockWait(h); if (v !== null) return v; }
         return S.sys(name, a);
       }
       case 'recvmsg': case 'recvfrom': {
@@ -1154,7 +1209,7 @@ class Process {
         if (h && h.spair && !h.nonblock) { while (!h.spair.rd.chunks.length && (!h.spair.rd.fds || !h.spair.rd.fds.length) && h.spair.rd.writers > 0) { pipeSuspends++;
           const w = await S.sigRace(res => h.spair.rd.readWaiters.push(() => res('ev')));
           if (w === 'sig') { const v = S.onSigWake(true); if (v !== null) return v; } } }
-        if (h && h.sock && h.sock.id && !h.nonblock) { const v = await S.sockWait(h); if (v !== null) return v; }
+        if (h && h.sock && (h.sock.id || h.sock.icmp) && !h.nonblock) { const v = await S.sockWait(h); if (v !== null) return v; }
         return S.sys(name, a);
       }
       case 'execve': {
@@ -1472,31 +1527,8 @@ class Process {
   }
 }
 
-let lazyTars = {};                 // moduleKey -> [[tarUrl, mountPrefix], ...] (loaded once, on first exec)
-const lazyTarsDone = new Set();
-// lazily fetch+compile a manifest URL on first use, plus any companion tar the
-// program needs (e.g. python.wasm -> pylib.tar.gz at /py). Returns whether the
-// key is (now) compiled. VFS keys are compiled at resolve time.
-async function ensureModule(key) {
-  if (!key || key.startsWith('vfs:')) return !!modCache.has(key);
-  if (!modCache.has(key)) {
-    try {
-      const t0 = performance.now();
-      modCache.set(key, await WebAssembly.compileStreaming(fetch(key)));
-      post(`[host] loaded ${key} (${(performance.now() - t0).toFixed(0)}ms)\n`, 2);
-    } catch (e) { post(`[host] failed to load ${key}: ${e.message || e}\n`, 2); return false; }
-  }
-  if (lazyTars[key] && !lazyTarsDone.has(key)) { lazyTarsDone.add(key); // companion data (stdlib, etc.)
-    for (const [url, prefix] of lazyTars[key]) { try { await loadTar(url, prefix); } catch (e) { post(`[host] companion ${url} failed: ${e.message || e}\n`, 2); } }
-  }
-  return true;
-}
-
-// Resolve a program name to a module key WITHOUT requiring it compiled yet — the
-// async exec path calls ensureModule() on the result. VFS binaries are compiled
-// here (bytes are local). Returns the key, or null if unresolvable.
 function resolveExecKey(p, cwd, selfKey) {
-  let key = resolveModuleKey(p, selfKey);   // manifest URL (maybe uncompiled) or null
+  let key = resolveModuleKey(p, selfKey);
   if (!key) {
     // not in the manifest — maybe it's a wasm binary sitting in the VFS
     // (e.g. one microcc just emitted, or a file under the OPFS mount).
@@ -1511,17 +1543,16 @@ function resolveExecKey(p, cwd, selfKey) {
       }
     }
   }
-  // busybox multi-call fallback: any still-unresolved name runs busybox, which
-  // dispatches on argv[0] (busybox itself may still be a lazy manifest URL).
-  if (!key && manifest['busybox']) key = manifest['busybox'];
-  if (!key) { post(`[host] execve: cannot resolve ${p}\n`, 2); return null; }
+  // busybox multi-call fallback (same as the node host): any still-unresolved
+  // name runs busybox, which dispatches on argv[0].
+  if ((!key || !modCache.has(key)) && manifest['busybox']) key = manifest['busybox'];
+  if (!key || !modCache.has(key)) { post(`[host] execve: cannot resolve ${p}\n`, 2); return null; }
   return key;
 }
 
 function runProgram(p, argv, envp, fdTable, cwd, selfKey, cred, asPid) {
   const key = resolveExecKey(p, cwd, selfKey);
   if (!key) return null;
-  if (!modCache.has(key)) { post(`[host] ${key} not preloaded (sync exec cannot lazy-fetch; use JSPI)\n`, 2); return null; }
   const proc = new Process(key, argv, envp, fdTable, cwd);
   if (cred) proc.cred = { ...cred };
   if (asPid) { procs.delete(proc.pid); proc.pid = asPid; procs.set(asPid, proc); }
@@ -1532,7 +1563,6 @@ function runProgram(p, argv, envp, fdTable, cwd, selfKey, cred, asPid) {
 async function runProgramAsync(p, argv, envp, fdTable, cwd, selfKey, cred, asPid) {
   const key = resolveExecKey(p, cwd, selfKey);
   if (!key) return null;
-  if (!(await ensureModule(key))) return null; // LAZY: fetch+compile on first exec
   const proc = new Process(key, argv, envp, fdTable, cwd);
   if (cred) proc.cred = { ...cred };
   if (asPid) { procs.delete(proc.pid); proc.pid = asPid; procs.set(asPid, proc); }
@@ -1563,17 +1593,6 @@ self.onmessage = async (ev) => {
       post(opfsSab ? `[host] OPFS lazily mounted at ${opfsMount}\n` : `[host] OPFS requested but no opfs-sab bridge; ${opfsMount} is RAM-only\n`, 2);
     }
     manifest = m.manifest || {};
-    lazyTars = m.lazyTars || {};   // moduleKey -> companion tars, mounted on first exec of that program
-    // PATH discoverability: the shell stat()s $PATH for a command before exec'ing
-    // it, so give every manifest program a tiny executable stub at /bin/<name>.
-    // execve resolves the real module by basename via the manifest (the stub's
-    // bytes are never run), so this only lets `python`, `ssh`, etc. be found by
-    // name and appear in tab-completion. Non-applet programs would be "not found"
-    // otherwise (rootfs /bin is empty).
-    for (const name of new Set(Object.keys(manifest))) {
-      const bp = '/bin/' + name;
-      if (!files.has(bp)) addFile(bp, te.encode('#!wali-manifest\n'), 0o100755);
-    }
     addFile('/etc/resolv.conf', te.encode('nameserver 1.1.1.1\n')); // DNS goes via DoH in the WISP worker
     addFile('/etc/hosts', te.encode('127.0.0.1 localhost\n'));
     // seed VFS with inline binaries (e.g. wasm just produced by clang.wasm)
