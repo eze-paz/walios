@@ -171,7 +171,13 @@ self.onmessage = async (ev) => {
   self.postMessage({ ready: true });
   let last = 0;
   while (true) {
-    Atomics.wait(ctl, 0, last);
+    // waitAsync (not the blocking Atomics.wait) so this worker's event loop stays
+    // live to deliver ws.onmessage — otherwise a blocked thread never processes
+    // relay->browser frames (PONG/DATA) that arrive while we're parked, which broke
+    // ping (the ICMP PONG was never delivered). One op is ever in flight (the OS
+    // worker blocks on the reply), so this stays a clean request/response loop.
+    const r = Atomics.waitAsync(ctl, 0, last);
+    if (r.async) await r.value;
     const seq = Atomics.load(ctl, 0); if (seq === last) continue; last = seq;
     if (ctl[2] === 0) break;
     await handle(ctl[2]);

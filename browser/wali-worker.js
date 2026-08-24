@@ -435,9 +435,49 @@ class Process {
     }
     return null;
   }
-  onSigWake(restartable) {
+  // Async delivery (JSPI): run the handler via WebAssembly.promising so a handler
+  // that makes a syscall can suspend. Calling table.get(ptr)(sig) directly re-enters
+  // wasm outside a promising execution, where any Suspending import (every syscall)
+  // throws "trying to suspend without WebAssembly.promising" — even non-blocking.
+  // Nested promising establishes a suspender for the handler (verified). This is
+  // what makes busybox ping (SIGALRM handler -> sendto) work.
+  async predeliverAsync() {
+    if (!this.sig.pending.size) return null;
+    for (const sig of [...this.sig.pending]) {
+      if (this.sig.mask & (1n << BigInt(sig - 1))) continue;
+      this.sig.pending.delete(sig);
+      const h = this.sig.handlers.get(sig);
+      if (h && (h.ptr === -2 || h.ptr === 1)) continue;      // SIG_IGN
+      if (h && h.ptr > 1 && sig !== SIG.KILL) {
+        const table = this.inst && this.inst.exports.__indirect_function_table;
+        if (table) {
+          const savedMask = this.sig.mask;
+          this.sig.mask |= (1n << BigInt(sig - 1)) | BigInt(h.mask || 0n); // POSIX: block this signal (+ sa_mask) during its handler
+          try { await WebAssembly.promising(table.get(h.ptr))(sig); this.sigDelivered = true;
+            if (!(h.flags & 0x10000000)) this.sigAllRestart = false;
+            continue; }
+          catch (e) { if (e instanceof ExitError) throw e;   // a real exit from the handler must propagate
+            post(`[host] signal handler trap pid ${this.pid} sig ${sig}: ${e}\n`, 2); }
+          finally { this.sig.mask = savedMask; }
+        } else if (!this.warnedNoTable) { this.warnedNoTable = true;
+          post(`[host] pid ${this.pid}: signal handler set but binary lacks --export-table; default action\n`, 2); }
+      }
+      if (SIG_DFL_IGNORE.has(sig)) continue;
+      if (SIG_STOPPERS.has(sig)) { if (JSPI && !this.inChild()) { this.stopped = sig; this.stopReported = false; } continue; }
+      if (this.inChild()) return this.parkChild({ exited: 128 + sig });
+      throw new ExitError(128 + sig);
+    }
+    return null;
+  }
+  onSigWake(restartable) {   // sync-model callers (non-JSPI): handlers can't suspend anyway
     this.sigDelivered = false; this.sigAllRestart = true;
     const dv = this.predeliver(); if (dv !== null) return dv;
+    if (!this.sigDelivered) return null;
+    return (restartable && this.sigAllRestart) ? null : err(E.INTR);
+  }
+  async onSigWakeAsync(restartable) {   // JSPI: deliver via promising so handlers can suspend
+    this.sigDelivered = false; this.sigAllRestart = true;
+    const dv = await this.predeliverAsync(); if (dv !== null) return dv;
     if (!this.sigDelivered) return null;
     return (restartable && this.sigAllRestart) ? null : err(E.INTR);
   }
@@ -457,7 +497,7 @@ class Process {
         if (pk.res !== 0) return null;                            // readable, or error/closed -> let S.sys report it
       }
       const w = await this.sigRace(res => setTimeout(() => res('t'), 20));
-      if (w === 'sig') { const v = this.onSigWake(true); if (v !== null) return v; }
+      if (w === 'sig') { const v = await this.onSigWakeAsync(true); if (v !== null) return v; }
     }
   }
   sigRace(arm) {
@@ -1015,7 +1055,7 @@ class Process {
           targets.push(T);
         }
         for (const T of targets) postSignal(T, sig);
-        if (targets.includes(S)) { const dv = S.predeliver(); if (dv !== null) return dv; }
+        if (targets.includes(S) && !JSPI) { const dv = S.predeliver(); if (dv !== null) return dv; } // JSPI: defer to async boundary
         return 0n; }
       case 'rt_sigaction': { const sig = a[0] | 0; S.refresh();
         const old = S.sig.handlers.get(sig);
@@ -1026,7 +1066,7 @@ class Process {
         if (a[2]) S.i64(a[2], BigInt.asIntN(64, S.sig.mask));
         if (a[1]) { const m = BigInt.asUintN(64, S.r64(a[1]));
           if (how === 0) S.sig.mask |= m; else if (how === 1) S.sig.mask &= ~m; else S.sig.mask = m;
-          if (S.sig.pending.size) { const dv = S.predeliver(); if (dv !== null) return dv; } }
+          if (S.sig.pending.size && !JSPI) { const dv = S.predeliver(); if (dv !== null) return dv; } }
         return 0n; }
       case 'rt_sigpending': { S.refresh(); let m = 0n; for (const s of S.sig.pending) m |= 1n << BigInt(s - 1); S.i64(a[0], BigInt.asIntN(64, m)); return 0n; }
       case 'sigaltstack': case 'prctl': case 'rt_sigreturn': return 0n;
@@ -1183,20 +1223,20 @@ class Process {
         const h = S.fds.get(a[0]);
         if (h && h.std === 0 && !h.nonblock) { while (!stdinChunks.length && !stdinEOF) { pipeSuspends++;
           const w = await S.sigRace(res => stdinWaiters.push(() => res('ev')));
-          if (w === 'sig') { const v = S.onSigWake(true); if (v !== null) return v; } } return S.sys(name, a); }
+          if (w === 'sig') { const v = await S.onSigWakeAsync(true); if (v !== null) return v; } } return S.sys(name, a); }
         if (h && h.pty !== undefined && !h.nonblock) { const p = ptys.get(h.pty); const q = () => h.master ? p.toMaster : p.toSlave; const wl = h.master ? p.masterWaiters : p.slaveWaiters;
           while (!q().length) { pipeSuspends++;
             const w = await S.sigRace(res => wl.push(() => res('ev')));
-            if (w === 'sig') { const v = S.onSigWake(true); if (v !== null) return v; } } return S.sys(name, a); }
+            if (w === 'sig') { const v = await S.onSigWakeAsync(true); if (v !== null) return v; } } return S.sys(name, a); }
         if (h && h.fifo && !h.nonblock) { while (!h.fifo.chunks.length && h.fifo.writers > 0) { pipeSuspends++;
           const w = await S.sigRace(res => h.fifo.readWaiters.push(() => res('ev')));
-          if (w === 'sig') { const v = S.onSigWake(true); if (v !== null) return v; } } return S.sys(name, a); }
+          if (w === 'sig') { const v = await S.onSigWakeAsync(true); if (v !== null) return v; } } return S.sys(name, a); }
         if (h && h.spair && !h.nonblock) { while (!h.spair.rd.chunks.length && h.spair.rd.writers > 0) { pipeSuspends++;
           const w = await S.sigRace(res => h.spair.rd.readWaiters.push(() => res('ev')));
-          if (w === 'sig') { const v = S.onSigWake(true); if (v !== null) return v; } } return S.sys(name, a); }
+          if (w === 'sig') { const v = await S.onSigWakeAsync(true); if (v !== null) return v; } } return S.sys(name, a); }
         if (h && h.tfd && !h.nonblock) { while (!h.tfd.count) {
             const w = await S.sigRace(res => h.tfd.waiters.push(res));
-            if (w === 'sig') { const v = S.onSigWake(true); if (v !== null) return v; } }
+            if (w === 'sig') { const v = await S.onSigWakeAsync(true); if (v !== null) return v; } }
           S.refresh(); if (a[2] < 8) return err(E.INVAL);
           S.i64(a[1], BigInt(h.tfd.count)); h.tfd.count = 0; return 8n; }
         // Blocking socket read: poll the WISP bridge with a signal race instead of a
@@ -1208,7 +1248,7 @@ class Process {
         const h = S.fds.get(a[0]);
         if (h && h.spair && !h.nonblock) { while (!h.spair.rd.chunks.length && (!h.spair.rd.fds || !h.spair.rd.fds.length) && h.spair.rd.writers > 0) { pipeSuspends++;
           const w = await S.sigRace(res => h.spair.rd.readWaiters.push(() => res('ev')));
-          if (w === 'sig') { const v = S.onSigWake(true); if (v !== null) return v; } } }
+          if (w === 'sig') { const v = await S.onSigWakeAsync(true); if (v !== null) return v; } } }
         if (h && h.sock && (h.sock.id || h.sock.icmp) && !h.nonblock) { const v = await S.sockWait(h); if (v !== null) return v; }
         return S.sys(name, a);
       }
@@ -1224,7 +1264,7 @@ class Process {
         const end = Date.now() + S.sleepMs(name, a);
         while (Date.now() < end) {
           const w = await S.sigRace(res => setTimeout(() => res('t'), Math.min(end - Date.now(), 3600000)));
-          if (w === 'sig') { const v = S.onSigWake(false); if (v !== null) return v; }
+          if (w === 'sig') { const v = await S.onSigWakeAsync(false); if (v !== null) return v; }
         }
         return 0n;
       }
@@ -1233,7 +1273,7 @@ class Process {
         if (name !== 'pause' && a[0]) { S.refresh(); S.sig.mask = BigInt.asUintN(64, S.r64(a[0])); }
         try {
           for (;;) {
-            if (S.sig.pending.size) { const v = S.onSigWake(false); if (v !== null) return v; }
+            if (S.sig.pending.size) { const v = await S.onSigWakeAsync(false); if (v !== null) return v; }
             await S.sigRace(() => {});
           }
         } finally { S.sig.mask = oldMask; }
@@ -1244,7 +1284,7 @@ class Process {
           const r = S.sys(name, a);
           if (r !== BigInt(-E.AGAIN) || h.nonblock || h.sock.nonblock) return r;
           const w = await S.sigRace(res => setTimeout(() => res('t'), 20));
-          if (w === 'sig') { const v = S.onSigWake(true); if (v !== null) return v; }
+          if (w === 'sig') { const v = await S.onSigWakeAsync(true); if (v !== null) return v; }
         }
       }
       case 'wait4': return await S.wait4Async(a);
@@ -1273,7 +1313,7 @@ class Process {
       if (a[2] & 1) return 0n; // WNOHANG
       waitSuspends++;
       const w = await S.sigRace(res => S.waitWaiters.push(() => res('ev')));
-      if (w === 'sig') { const v = S.onSigWake(true); if (v !== null) return v; }
+      if (w === 'sig') { const v = await S.onSigWakeAsync(true); if (v !== null) return v; }
     }
   }
   async pollAsync(name, a) {
@@ -1307,7 +1347,7 @@ class Process {
         if (timeout > 0) setTimeout(() => fin(false), timeout);
         else if (!r.waitFifos.length && !r.waitPtys.length && !r.waitStdin) setTimeout(() => fin(false), 50);
       });
-      if (woke === 'sig') { const v = S.onSigWake(false); if (v !== null) return v; }
+      if (woke === 'sig') { const v = await S.onSigWakeAsync(false); if (v !== null) return v; }
       if (timeout > 0 && woke === false) return BigInt(evalReady().ready);
     }
   }
@@ -1381,9 +1421,9 @@ class Process {
             S.pollTimers();
             S.sigDelivered = false;
             if (S.shmAt.size) S.syncShm();          // shm coherence at every boundary
-            const dv = S.predeliver(); if (dv !== null) return dv;
+            const dv = await S.predeliverAsync(); if (dv !== null) return dv;   // handlers run under promising
             while (S.stopped) { await new Promise(res => S.contWaiters.push(res)); // SIGSTOP parks until SIGCONT
-              const dv2 = S.predeliver(); if (dv2 !== null) return dv2; }
+              const dv2 = await S.predeliverAsync(); if (dv2 !== null) return dv2; }
             const now = Date.now();
             if (now - S.lastYield >= QUANTUM_MS) { S.lastYield = now; await new Promise(res => setTimeout(res, 0)); }
             return BLOCKING.has(sysname) ? await S.sysAsync(sysname, map(a2)) : S.sys(sysname, map(a2));
