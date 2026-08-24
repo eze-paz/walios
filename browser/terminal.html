@@ -16,7 +16,7 @@ const fit = new FitAddon.FitAddon(); term.loadAddon(fit);
 term.open(document.getElementById('term')); fit.fit(); term.focus();
 
 let worker = null, running = false;
-const BB = 'busybox.wasm?v=net1';  // version-bust: the ash+networking build
+const BB = 'busybox.wasm?v=net2';  // version-bust: the ash+networking build
 const MANIFEST = { busybox: BB, sh: BB, hush: BB, ash: BB, python: 'python.wasm', 'python3': 'python.wasm', lua: 'lua.wasm',
                    ssh: 'ssh.wasm', slogin: 'ssh.wasm' };
 

@@ -176,7 +176,7 @@ const modCache = new Map();   // key -> WebAssembly.Module
 // sessions (a shell driving a running pipeline, sshd) instead of run-at-wait4.
 let JSPI = false;
 const jspiAvailable = typeof WebAssembly.Suspending === 'function' && typeof WebAssembly.promising === 'function';
-const BLOCKING = new Set(['read', 'readv', 'wait4', 'poll', 'ppoll', 'nanosleep', 'clock_nanosleep', 'execve', 'recvmsg', 'pause', 'sigsuspend', 'rt_sigsuspend', 'accept', 'accept4']);
+const BLOCKING = new Set(['read', 'readv', 'wait4', 'poll', 'ppoll', 'nanosleep', 'clock_nanosleep', 'execve', 'recvmsg', 'recvfrom', 'pause', 'sigsuspend', 'rt_sigsuspend', 'accept', 'accept4']);
 const ASYNC_PAGES = 16;       // 1MB asyncify unwind buffer (grown at first fork)
 const inflight = new Set();   // live child task promises
 let pipeSuspends = 0, waitSuspends = 0; // JSPI concurrency evidence
@@ -420,6 +420,18 @@ class Process {
     const dv = this.predeliver(); if (dv !== null) return dv;
     if (!this.sigDelivered) return null;
     return (restartable && this.sigAllRestart) ? null : err(E.INTR);
+  }
+  // Wait (JSPI) until a WISP socket is readable or a signal arrives. Polls the bridge
+  // on a short timer and races it against a pending signal so a stuck recv stays
+  // interruptible by ^C. Returns an EINTR (or restart) sentinel, or null once readable.
+  async sockWait(h) {
+    const br = initWisp();
+    while (true) {
+      const pk = br.call(br.OP.POLL, h.sock.id, 0, 0);
+      if (pk.res !== 0) return null;                 // readable, or error/closed -> let S.sys report it
+      const w = await this.sigRace(res => setTimeout(() => res('t'), 20));
+      if (w === 'sig') { const v = this.onSigWake(true); if (v !== null) return v; }
+    }
   }
   sigRace(arm) {
     return new Promise((res) => {
@@ -1132,13 +1144,17 @@ class Process {
             if (w === 'sig') { const v = S.onSigWake(true); if (v !== null) return v; } }
           S.refresh(); if (a[2] < 8) return err(E.INVAL);
           S.i64(a[1], BigInt(h.tfd.count)); h.tfd.count = 0; return 8n; }
+        // Blocking socket read: poll the WISP bridge with a signal race instead of a
+        // frozen Atomics.wait, so ^C (SIGINT) can interrupt a stuck recv (e.g. telnet).
+        if (h && h.sock && h.sock.id && !h.nonblock) { const v = await S.sockWait(h); if (v !== null) return v; }
         return S.sys(name, a);
       }
-      case 'recvmsg': {
+      case 'recvmsg': case 'recvfrom': {
         const h = S.fds.get(a[0]);
         if (h && h.spair && !h.nonblock) { while (!h.spair.rd.chunks.length && (!h.spair.rd.fds || !h.spair.rd.fds.length) && h.spair.rd.writers > 0) { pipeSuspends++;
           const w = await S.sigRace(res => h.spair.rd.readWaiters.push(() => res('ev')));
           if (w === 'sig') { const v = S.onSigWake(true); if (v !== null) return v; } } }
+        if (h && h.sock && h.sock.id && !h.nonblock) { const v = await S.sockWait(h); if (v !== null) return v; }
         return S.sys(name, a);
       }
       case 'execve': {
