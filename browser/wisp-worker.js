@@ -15,7 +15,8 @@ let ctl, data, ws, wsReady = false, wsErr = false, RELAY;
 const streams = new Map();        // wisp stream id -> {rxq:[Uint8Array], closed}
 const udpSocks = new Map();       // our udp id -> {rxq:[Uint8Array]}
 const pings = new Map();          // ping id -> {status|null}
-let nextStream = 1, nextUdp = 1, nextPing = 1;
+const resolves = new Map();       // resolve id -> {ip|null, done} (0xf6 reply)
+let nextStream = 1, nextUdp = 1, nextPing = 1, nextResolve = 1;
 // default to the SAME relay the riscv-vm uses (this origin's /wisp); dev override
 // via the 'sab' message's url (e.g. the local wisp-relay.js on :8790).
 function defaultRelay() { return `${self.location.protocol === 'https:' ? 'wss' : 'ws'}://${self.location.host}/wisp`; }
@@ -29,6 +30,7 @@ function connectWS() {
     const b = new Uint8Array(ev.data); if (b.length < 5) return;
     const type = b[0], id = new DataView(b.buffer, b.byteOffset).getUint32(1, true), payload = b.subarray(5);
     if (type === F.PONG) { const p = pings.get(id); if (p) p.status = payload[0]; return; } // ICMP reply
+    if (type === 0xf6) { const r = resolves.get(id); if (r) { r.ip = (payload.length >= 4 && (payload[0] || payload[1] || payload[2] || payload[3])) ? `${payload[0]}.${payload[1]}.${payload[2]}.${payload[3]}` : null; r.done = true; } return; } // RESOLVE reply
     if (type === 0xf5) { const r = listenReqs.get(id); if (r) { r.status = payload[0]; r.port = payload[1] | (payload[2] << 8); } return; } // LISTEN reply
     if (type === 0xf4) { // relay-pushed inbound connection: [lport:u16][ip:4][pport:u16]
       const lport = payload[0] | (payload[1] << 8);
@@ -49,14 +51,29 @@ function wispSend(type, id, payload) {
 }
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-// synthetic DNS: hand out fake 10.x IPs and remember name<->ip, then hand the
-// HOSTNAME to WISP CONNECT so the RELAY resolves it (avoids COEP-blocked DoH; this
-// is how riscv-vm's fake_network + resolveName works).
+// DNS: ask the RELAY to resolve the name (browsers can't: DoH is COEP-blocked here)
+// and hand back the REAL A record so `ping`/tools display the true IP. We still keep
+// a name<->ip map so CONNECT/PING hand the HOSTNAME to the relay (lets it re-resolve
+// / do SNI). If the relay can't resolve (offline/slow), fall back to a synthetic 10.x
+// so name resolution still "works" the way it used to.
 const nameToIp = new Map(), ipToName = new Map(); let synth = (10 << 24) | 1;
 function synthIp(name) {
   if (nameToIp.has(name)) return nameToIp.get(name);
   const n = synth++; const ip = `${(n>>>24)&255}.${(n>>>16)&255}.${(n>>>8)&255}.${n&255}`;
   nameToIp.set(name, ip); ipToName.set(ip, name); return ip;
+}
+async function resolveViaRelay(name) {   // -> real dotted-quad, or null if the relay can't
+  if (!wsReady || wsErr) return null;
+  const id = nextResolve++; const rec = { ip: null, done: false }; resolves.set(id, rec);
+  wispSend(0xf6, id, new TextEncoder().encode(name));
+  for (let i = 0; i < 200 && !rec.done; i++) await sleep(2);   // ~400ms budget
+  resolves.delete(id); return rec.done ? rec.ip : null;
+}
+async function ipForName(name) {         // real IP if the relay resolves it, else synthetic
+  if (nameToIp.has(name)) return nameToIp.get(name);
+  const real = await resolveViaRelay(name);
+  if (real) { nameToIp.set(name, real); ipToName.set(real, name); return real; }
+  return synthIp(name);
 }
 async function answerDns(query) {  // -> DNS response carrying a synthetic A record
   const parseQ = (buf, off) => { const l = []; while (buf[off]) { const n = buf[off]; l.push(String.fromCharCode(...buf.subarray(off + 1, off + 1 + n))); off += 1 + n; } return { name: l.join('.'), end: off + 1 }; };
@@ -65,7 +82,7 @@ async function answerDns(query) {  // -> DNS response carrying a synthetic A rec
   const qtype = (query[end] << 8) | query[end + 1];
   const question = query.subarray(12, end + 4);
   // only answer A (IPv4); AAAA -> empty so glibc/musl falls back to A
-  const ips = qtype === 1 ? [synthIp(name)] : [];
+  const ips = qtype === 1 ? [await ipForName(name)] : [];
   const hdr = new Uint8Array(12); hdr.set(id, 0); const dv = new DataView(hdr.buffer);
   dv.setUint16(2, 0x8180); dv.setUint16(4, 1); dv.setUint16(6, ips.length);
   const ans = ips.map(ip => { const v6 = ip.includes(':');
