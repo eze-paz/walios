@@ -1661,8 +1661,46 @@ function runProgram(p, argv, envp, fdTable, cwd, selfKey, cred, asPid) {
   return proc.run();
 }
 
+// ---- in-tab C compiler bridge ----
+// exec("cc"/"clang") runs @yowasp clang on the MAIN thread (its own wasi runtime),
+// which emits a WALI binary we then run as a normal OS process. Source/output files
+// move worker<->page by value; the sysroot lives on the page and is reused per call.
+let __ccSeq = 0; const __ccPending = new Map();
+async function runCc(argv, cwd) {
+  // @yowasp's clang gets a flat root file map (dirs are nested objects). Pass each
+  // source file by BASENAME and rewrite argv to match; map the -o basename back to
+  // the caller's real path when landing the emitted binary. (Good enough for a single
+  // build dir; multi-dir source trees are future work.)
+  const abs = (x) => x.startsWith('/') ? norm(x, '/') : norm(x, cwd);
+  const base = (x) => x.split('/').pop();
+  const inputs = {}, outArgv = [argv[0]]; let outPath = null, outBase = null;
+  for (let i = 1; i < argv.length; i++) { const a = argv[i];
+    if (a === '-o') { outPath = abs(argv[++i]); outBase = base(argv[i]); outArgv.push('-o', outBase); continue; }
+    if (a.startsWith('-')) { outArgv.push(a); continue; }
+    const vp = abs(a); opfsFault(vp); const f = files.get(vp);
+    if (f && !f.dir) { const b = f.br !== undefined ? fileRead(f, 0, f.size) : f.data.subarray(0, f.size); inputs[base(a)] = b.slice(); outArgv.push(base(a)); }
+    else outArgv.push(a);                              // not a VFS file (lib name, etc.) — pass through
+  }
+  const id = ++__ccSeq; const done = new Promise(r => __ccPending.set(id, r));
+  self.postMessage({ t: 'cc', id, argv: outArgv, inputs });
+  const res = await done;                              // { files, stderr, code } or { err }
+  if (res.stderr) post(res.stderr, 2);
+  if (res.err) { post(`${argv[0]}: ${res.err}\n`, 2); return 1; }
+  for (const [name, bytes] of Object.entries(res.files || {})) {   // land emitted outputs (skip echoed inputs)
+    if (inputs[name]) continue;
+    addFile((outBase && name === outBase && outPath) ? outPath : abs(name), new Uint8Array(bytes), 0o755);
+  }
+  return res.code | 0;
+}
+
 // JSPI variant: run the child concurrently (its blocking syscalls suspend, not stall)
 async function runProgramAsync(p, argv, envp, fdTable, cwd, selfKey, cred, asPid) {
+  const base0 = (p || '').split('/').pop();
+  if (base0 === 'cc' || base0 === 'clang' || base0 === 'gcc' || base0 === 'cc.wali') {
+    const code = await runCc(argv, cwd);
+    if (asPid) { const cp = procs.get(asPid); if (cp) cp.retire(); } // no Process ran; drop the fork placeholder
+    return code;
+  }
   const key = resolveExecKey(p, cwd, selfKey);
   if (!key) return null;
   if (!(await ensureModule(key))) return null; // LAZY: fetch+compile on first exec
@@ -1681,6 +1719,7 @@ self.onmessage = async (ev) => {
   const m = ev.data;
   if (m.t === 'stdin-sab') { stdinCtl = new Int32Array(m.sab, 0, 4); stdinData = new Uint8Array(m.sab, 16); return; }
   if (m.t === 'wisp-sab') { wispSab = m.sab; return; }
+  if (m.t === 'cc-result') { const r = __ccPending.get(m.id); if (r) { __ccPending.delete(m.id); r(m); } return; }
   if (m.t === 'add-pkg') { // register an aports package into the live manifest -> runnable (lazy-compiled on first exec)
     if (m.name && m.url) { manifest[m.name] = m.url; if (m.lazyTars) lazyTars[m.name] = m.lazyTars; }
     return; }
