@@ -131,7 +131,7 @@ const BB = 'busybox.wasm?v=net3';  // version-bust: ash+networking, --export-tab
 const MANIFEST = { busybox: BB, sh: BB, hush: BB, ash: BB, python: 'python.wasm', 'python3': 'python.wasm', lua: 'lua.wasm',
                    ssh: 'ssh.wasm?v=ssl2', slogin: 'ssh.wasm?v=ssl2',  // libcrypto (RSA/ECDSA), built --without-hardening (no -ftrapv → fast crypto)
                    make: 'make.wasm', 'gmake': 'make.wasm',  // GNU Make 4.4.1 (WALI) — lazy-loaded for in-tab package builds
-                   cc: 'cc:bridge', clang: 'cc:bridge', gcc: 'cc:bridge' };  // host-bridged to @yowasp clang (worker intercepts exec by name; value unused)
+                   cc: 'cc:bridge', clang: 'cc:bridge', gcc: 'cc:bridge', wfetch: 'cc:bridge', wextract: 'cc:bridge' };  // host-bridged (worker intercepts exec by name; value unused)
 
 // FULL origin OPFS root, so the shell can see/edit this app's files (Pyodide
 // /files, conversations, ...). No subdir sandbox — `rm` here really deletes them.
@@ -186,6 +186,8 @@ function boot() {
     if (m.t === 'out') { if (m.fd === 2 && /^\[host\]/.test(m.s)) { console.debug(m.s.trim()); return; } term.write(m.s); }
     else if (m.t === 'stats') { onStats(m); }
     else if (m.t === 'cc') { runCcOnPage(m); }
+    else if (m.t === 'wfetch') { runWfetchOnPage(m); }
+    else if (m.t === 'wextract') { runWextractOnPage(m); }
     else if (m.t === 'exit') { running = false; term.write('\r\n\x1b[90m[shell exited (' + m.code + ') — reloading…]\x1b[0m\r\n'); setTimeout(() => location.reload(), 900); }
   };
   worker.postMessage({ t: 'run', wasm: BB, manifest: MANIFEST,
@@ -227,23 +229,66 @@ async function ensureClang() {
     ({ runClang: __runClang } = await import('./yowasp/gen/bundle.js')); }
   if (!__waliSysroot) __waliSysroot = await fetchTarTree('./wali-sysroot.tar.gz');
 }
-async function runCcOnPage(m) {
+let __ccQueue = Promise.resolve();   // serialize clang runs — the singleton LLVM app is not safe to run concurrently
+function runCcOnPage(m) { __ccQueue = __ccQueue.then(() => runCcOnPage_(m), () => runCcOnPage_(m)); return __ccQueue; }
+async function runCcOnPage_(m) {
   let stderr = '';
   try {
     await ensureClang();
     const a = m.argv.slice(); a[0] = 'clang';
     const hasTarget = a.some(x => x.startsWith('--target'));
     const wali = hasTarget ? [] : ['--target=wasm32-unknown-linux-muslwali', '--sysroot=/sysroot',
+      '-nostdlibinc', '-isystem', '/sysroot/include',   // use ONLY the wali musl headers, not yowasp's bundled wasi ones
+      '-D_GNU_SOURCE',                                  // enable POSIX/GNU types up front (many recipes set it too late, after -std=c11 locked strict-ANSI)
       '-O2', '-mllvm', '-wasm-enable-sjlj', '-fwasm-exceptions', '-matomics', '-mbulk-memory',
       '-mexception-handling', '-L/sysroot/lib', '-nodefaultlibs',
       '-Wl,--shared-memory,--export-memory,--max-memory=2147483648,-z,stack-size=8388608'];
     const linking = a.includes('-o') && !a.includes('-c');
     const libs = (!hasTarget && linking) ? ['-lc', '/sysroot/lib/libclang_rt.builtins.a'] : [];
     const args = [a[0], ...wali, ...a.slice(1), ...libs];
-    const files = await __runClang(args, { sysroot: __waliSysroot, ...m.inputs },
+    // Mount a fresh sysroot each call. It goes LAST so it always wins over any stale
+    // `sysroot` entry the cwd tree may carry (see the delete below for why one can exist).
+    const sysroot = await fetchTarTree('./wali-sysroot.tar.gz');
+    const out = await __runClang(args, { ...m.inputs, sysroot },
       { stderr: (bb) => { if (bb) stderr += new TextDecoder().decode(bb); }, decodeASCII: true });
+    // runClang echoes every input back in its output tree — including the whole mounted
+    // sysroot. Drop it so the worker doesn't persist a bogus /<cwd>/sysroot dir that would
+    // then clobber the real sysroot on the next compile (off_t/uid_t "unknown type name").
+    if (out && out.sysroot) delete out.sysroot;
+    const files = {};   // flatten the returned tree to path->bytes (yowasp may return nested)
+    (function walk(o, pre) { for (const [k, v] of Object.entries(o)) { if (v && v.constructor === Object) walk(v, pre + k + '/'); else files[pre + k] = v; } })(out, '');
     worker.postMessage({ t: 'cc-result', id: m.id, files, stderr, code: 0 });
   } catch (e) { worker.postMessage({ t: 'cc-result', id: m.id, stderr, err: (e && e.message) || String(e), code: 1 }); }
+}
+// server-side fetch proxy for the in-tab package builder (browser can't do HTTPS over WISP)
+async function runWfetchOnPage(m) {
+  try {
+    const r = await fetch('/proxy/?url=' + encodeURIComponent(m.url), { redirect: 'follow' });
+    const bytes = new Uint8Array(await r.arrayBuffer());
+    worker.postMessage({ t: 'cc-result', id: m.id, bytes, status: r.status }, [bytes.buffer]);
+  } catch (e) { worker.postMessage({ t: 'cc-result', id: m.id, err: (e && e.message) || String(e) }); }
+}
+// gunzip + parse a tar into a flat {path: bytes|null(dir)} map, on the page (busybox has no tar)
+async function runWextractOnPage(m) {
+  try {
+    let buf = new Uint8Array(m.bytes);
+    if (buf[0] === 0x1f && buf[1] === 0x8b) {   // gzip
+      const ds = new DecompressionStream('gzip');
+      buf = new Uint8Array(await new Response(new Blob([buf]).stream().pipeThrough(ds)).arrayBuffer());
+    }
+    const files = {}; const td = new TextDecoder(); let off = 0;
+    while (off + 512 <= buf.length) {
+      const h = buf.subarray(off, off + 512); if (h.every(b => b === 0)) break;
+      let name = td.decode(h.subarray(0, 100)).replace(/\0.*$/, '');
+      const pfx = td.decode(h.subarray(345, 500)).replace(/\0.*$/, ''); if (pfx) name = pfx + '/' + name;
+      const size = parseInt(td.decode(h.subarray(124, 136)).trim(), 8) || 0;
+      const type = String.fromCharCode(h[156] || 48); off += 512;
+      if (name) { if (type === '5') files[name] = null; else if (type === '0' || type === '\0') files[name] = buf.slice(off, off + size); }
+      off += Math.ceil(size / 512) * 512;
+    }
+    const transfer = Object.values(files).filter(b => b).map(b => b.buffer);
+    worker.postMessage({ t: 'cc-result', id: m.id, files }, transfer);
+  } catch (e) { worker.postMessage({ t: 'cc-result', id: m.id, err: (e && e.message) || String(e) }); }
 }
 term.write('\x1b[90mwalios — starting a shell (busybox on a pty, native wasm)…\x1b[0m\r\n');
 boot();
