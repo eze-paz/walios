@@ -260,22 +260,50 @@ async function runCcOnPage_(m) {
     worker.postMessage({ t: 'cc-result', id: m.id, files, stderr, code: 0 });
   } catch (e) { worker.postMessage({ t: 'cc-result', id: m.id, stderr, err: (e && e.message) || String(e), code: 1 }); }
 }
-// server-side fetch proxy for the in-tab package builder (browser can't do HTTPS over WISP)
+// server-side fetch proxy for the in-tab package builder (browser can't do HTTPS over WISP).
+// Prod runs an NGINX proxy keyed by host-in-path (/proxy/<host>/<path>?<query>, SSO-gated +
+// SSRF-guarded, HTTPS upstream only); the local mirror uses /proxy/?url=<enc>. Try the prod
+// shape first, fall back to the mirror shape so the same page works in both.
 async function runWfetchOnPage(m) {
   try {
-    const r = await fetch('/proxy/?url=' + encodeURIComponent(m.url), { redirect: 'follow' });
+    let r, u;
+    try { u = new URL(m.url); } catch { u = null; }
+    if (u && u.protocol === 'https:') {
+      r = await fetch('/proxy/' + u.host + u.pathname + u.search, { redirect: 'follow' });
+      if (!r.ok) r = null;   // fall through to the mirror shape (e.g. 404 on the mirror)
+    }
+    if (!r) r = await fetch('/proxy/?url=' + encodeURIComponent(m.url), { redirect: 'follow' });
     const bytes = new Uint8Array(await r.arrayBuffer());
     worker.postMessage({ t: 'cc-result', id: m.id, bytes, status: r.status }, [bytes.buffer]);
   } catch (e) { worker.postMessage({ t: 'cc-result', id: m.id, err: (e && e.message) || String(e) }); }
 }
 // gunzip + parse a tar into a flat {path: bytes|null(dir)} map, on the page (busybox has no tar)
+// gunzip that tolerates concatenated multi-member gzip (e.g. Alpine APKINDEX = .SIGN + index).
+// DecompressionStream errors on trailing bytes after the first member, so on failure we split
+// at the gzip magic (1f 8b 08) and decompress each member, then concatenate.
+async function gunzipAll(buf) {
+  const one = async (b) => new Uint8Array(await new Response(new Blob([b]).stream().pipeThrough(new DecompressionStream('gzip'))).arrayBuffer());
+  try { return await one(buf); }
+  catch (_) {
+    const starts = [];
+    for (let i = 0; i + 2 < buf.length; i++) if (buf[i] === 0x1f && buf[i + 1] === 0x8b && buf[i + 2] === 0x08) starts.push(i);
+    if (!starts.length || starts[0] !== 0) throw new Error('invalid gzip stream');
+    starts.push(buf.length);
+    const parts = [];
+    for (let k = 0; k < starts.length - 1; k++) {
+      try { parts.push(await one(buf.subarray(starts[k], starts[k + 1]))); }
+      catch (e) { /* magic byte was inside deflate data, not a real boundary — skip */ }
+    }
+    if (!parts.length) throw new Error('gzip decode failed');
+    let n = 0; for (const p of parts) n += p.length;
+    const out = new Uint8Array(n); let o = 0; for (const p of parts) { out.set(p, o); o += p.length; }
+    return out;
+  }
+}
 async function runWextractOnPage(m) {
   try {
     let buf = new Uint8Array(m.bytes);
-    if (buf[0] === 0x1f && buf[1] === 0x8b) {   // gzip
-      const ds = new DecompressionStream('gzip');
-      buf = new Uint8Array(await new Response(new Blob([buf]).stream().pipeThrough(ds)).arrayBuffer());
-    }
+    if (buf[0] === 0x1f && buf[1] === 0x8b) buf = await gunzipAll(buf);   // gzip (single or multi-member)
     const files = {}; const td = new TextDecoder(); let off = 0;
     while (off + 512 <= buf.length) {
       const h = buf.subarray(off, off + 512); if (h.every(b => b === 0)) break;
