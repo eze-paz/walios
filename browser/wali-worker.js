@@ -1619,7 +1619,11 @@ function runProgram(p, argv, envp, fdTable, cwd, selfKey, cred, asPid) {
   if (!modCache.has(key)) { post(`[host] ${key} not preloaded (sync exec cannot lazy-fetch; use JSPI)\n`, 2); return null; }
   const proc = new Process(key, argv, envp, fdTable, cwd);
   if (cred) proc.cred = { ...cred };
-  if (asPid) { procs.delete(proc.pid); proc.pid = asPid; procs.set(asPid, proc); }
+  // execve keeps the process's identity: preserve the pid AND the pgid of the image
+  // being replaced. new Process() seeded pgid from its throwaway temp pid, so without
+  // this the exec'd process would carry a stale pgid and job control (tcsetpgrp/^C)
+  // would signal a group nothing is in.
+  if (asPid) { const old = procs.get(asPid); procs.delete(proc.pid); proc.pid = asPid; proc.pgid = old ? old.pgid : asPid; procs.set(asPid, proc); }
   return proc.run();
 }
 
@@ -1630,7 +1634,10 @@ async function runProgramAsync(p, argv, envp, fdTable, cwd, selfKey, cred, asPid
   if (!(await ensureModule(key))) return null; // LAZY: fetch+compile on first exec
   const proc = new Process(key, argv, envp, fdTable, cwd);
   if (cred) proc.cred = { ...cred };
-  if (asPid) { procs.delete(proc.pid); proc.pid = asPid; procs.set(asPid, proc); }
+  // execve keeps the process's identity: preserve pid AND pgid of the replaced image
+  // (new Process() seeded pgid from a throwaway temp pid). Without this the exec'd
+  // process carries a stale pgid, so tcsetpgrp/^C signal a group with no members.
+  if (asPid) { const old = procs.get(asPid); procs.delete(proc.pid); proc.pid = asPid; proc.pgid = old ? old.pgid : asPid; procs.set(asPid, proc); }
   await new Promise(res => setTimeout(res, 0)); // clean JS stack: child _start must not run inside the parent's suspending import
   return await proc.runAsync();
 }

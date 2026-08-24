@@ -1561,7 +1561,7 @@ function runProgram(p, argv, envp, fdTable, cwd, selfPath, cred, asPid) {
   const pabs = (p.startsWith('/') || !p.includes('/')) ? p : path.resolve(cwd, p);
   const mp = resolveModulePath(pabs, selfPath);
   if (!mp) { process.stderr.write(`[wali-host] execve: cannot resolve ${p}\n`); return null; }
-  const proc = new Process(mp, argv, envp, fdTable, cwd); if (cred) proc.cred = { ...cred }; if (asPid) { procs.delete(proc.pid); proc.pid = asPid; procs.set(asPid, proc); } applySuid(proc, mp);
+  const proc = new Process(mp, argv, envp, fdTable, cwd); if (cred) proc.cred = { ...cred }; if (asPid) { const old = procs.get(asPid); procs.delete(proc.pid); proc.pid = asPid; proc.pgid = old ? old.pgid : asPid; procs.set(asPid, proc); } applySuid(proc, mp);
   return proc.run();
 }
 
@@ -1572,7 +1572,7 @@ async function runProgramAsync(p, argv, envp, fdTable, cwd, selfPath, cred, asPi
   const pabs = (p.startsWith('/') || !p.includes('/')) ? p : path.resolve(cwd, p);
   const mp = resolveModulePath(pabs, selfPath);
   if (!mp) { process.stderr.write(`[wali-host] execve: cannot resolve ${p}\n`); return null; }
-  const proc = new Process(mp, argv, envp, fdTable, cwd); if (cred) proc.cred = { ...cred }; if (asPid) { procs.delete(proc.pid); proc.pid = asPid; procs.set(asPid, proc); } applySuid(proc, mp);
+  const proc = new Process(mp, argv, envp, fdTable, cwd); if (cred) proc.cred = { ...cred }; if (asPid) { const old = procs.get(asPid); procs.delete(proc.pid); proc.pid = asPid; proc.pgid = old ? old.pgid : asPid; procs.set(asPid, proc); } applySuid(proc, mp);
   if (process.env.WALI_SCHED_DBG) process.stderr.write(`[sched] start pid=${proc.pid} ${path.basename(mp)} argv=[${argv.join(' ')}]\n`);
   await new Promise(res => setImmediate(res)); // clean JS stack: the child's _start must not run inside the parent's suspending import (SuspendError)
   const code = await proc.runAsync();
