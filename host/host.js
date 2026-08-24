@@ -924,9 +924,12 @@ class Process {
       case 'sigaltstack': case 'prctl': case 'rt_sigreturn': return 0n;
       case 'sched_getaffinity': { S.i64(a[2], 1n); return 8n; }
       case 'sched_yield': return 0n;
-      case 'prlimit64': { if (a[3]) { S.i64(a[3], 0x800000n); S.i64(a[3] + 8, 0x800000n); } return 0n; }
-      case 'getrlimit': { S.i64(a[1], 0x800000n); S.i64(a[1] + 8, 0x800000n); return 0n; }
+      // RLIMIT_NOFILE (res 7) MUST be small: closefrom()/close-all-fds loops up to it.
+      case 'prlimit64': { const res = a[1] | 0, v = res === 7 ? 1024n : 0x800000n; if (a[3]) { S.i64(a[3], v); S.i64(a[3] + 8, v); } return 0n; }
+      case 'getrlimit': { const res = a[0] | 0, v = res === 7 ? 1024n : 0x800000n; S.i64(a[1], v); S.i64(a[1] + 8, v); return 0n; }
       case 'setrlimit': return 0n;
+      case 'close_range': { const first = a[0] >>> 0, last = a[1] >>> 0;
+        for (const fd of [...S.fds.keys()]) if (fd >= first && fd <= last) S.sys('close', [fd]); return 0n; }
       case 'getrusage': { S.refresh(); S.u8.fill(0, a[1], a[1] + 144); return 0n; }
       case 'sysinfo': { S.refresh(); S.u8.fill(0, a[0], a[0] + 112); S.i64(a[0], 1000n); S.i64(a[0] + 32, 4294967296n); S.i64(a[0] + 40, 2147483648n); return 0n; }
       case 'getrandom': { const b = require('crypto').randomBytes(Math.min(a[1], 65536)); S.wbytes(a[0], b); return BigInt(b.length); }
