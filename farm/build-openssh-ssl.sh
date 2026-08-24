@@ -22,7 +22,7 @@ echo "=== reconfigure openssh WITH openssl ==="
 cd "$ROOT/openssh-9.9p1"
 make clean >/dev/null 2>&1
 ./configure --host=wasm32-unknown-linux-musl --build=x86_64-pc-linux-gnu \
-  --with-ssl-dir="$INST" --with-zlib="$ROOT/zlib-inst" --without-pie --disable-utmp --disable-wtmp \
+  --with-ssl-dir="$INST" --with-zlib="$ROOT/zlib-inst" --without-pie --without-hardening --disable-utmp --disable-wtmp \
   CC="$CC" CFLAGS="-I$INST/include" LDFLAGS="$LDF -L$INST/lib" LIBS="-lpthread" AR="$AR" RANLIB="$RANLIB" LD="$LD" \
   cross_compiling=yes >/tmp/ssh_ssl_cfg.log 2>&1
 echo "configure exit=$?"
