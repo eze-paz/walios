@@ -1,9 +1,19 @@
 # CPython-on-wasm performance notes (measured, i5-1235U, V8/node)
 
-## What works: switch dispatch + --export-table
-The deployed build uses the DEFAULT switch-based opcode dispatch and links with
-`-Wl,--export-table -Wl,--table-base=16` (the table export is required for
-signal-handler dispatch, not for speed). Warm steady-state fib(30) ~185 ms.
+## Required link flags (ALL are correctness, not tuning)
+    -Wl,--export-table -Wl,--table-base=16   # signal-handler dispatch (see below)
+    -Wl,-z,stack-size=8388608                # 8 MB stack — REQUIRED, see next section
+The build uses the DEFAULT switch-based opcode dispatch (computed gotos are
+harmful on wasm — see below). Warm steady-state fib(30) ~185 ms.
+
+## Stack size: MUST set -z,stack-size (default 64 KB overflows)
+wasm-ld defaults __stack_pointer to 65536 (64 KB) placed at the BOTTOM of linear
+memory, so an overflow underflows past address 0 -> "memory access out of bounds".
+CPython's script-path resolution (_PyPathConfig_ComputeSysPath0 -> _Py_wreadlink,
+which puts a char[MAXPATHLEN]=4 KB frame deep in init) overflows 64 KB and traps.
+Symptom: `python script.py` crashes in encode_current_locale but `python -c ...`
+works (the -c path skips the deep wreadlink chain). NOT a CPython bug — our link
+just never set a stack size. Fixed by -Wl,-z,stack-size=8388608 (8 MB).
 
 ## Computed gotos: HARMFUL on wasm (do NOT enable)
 `USE_COMPUTED_GOTOS` is a large win on native CPUs (per-opcode indirect branch =
