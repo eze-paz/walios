@@ -9,6 +9,7 @@
 const http = require('http');
 const net = require('net');
 const crypto = require('crypto');
+const { execFile } = require('child_process');
 const PORT = +process.argv[2] || 8790;
 
 // tiny WebSocket server (RFC6455, no deps)
@@ -107,11 +108,23 @@ function handleWisp(sock) {
         sendFrame(0xf5, id, r);
       });
     }
-    else if (type === 0xf1) { // PING (ICMP echo): [dst:4][timeout:u16]. Real ICMP needs root;
-      const ip = `${payload[0]}.${payload[1]}.${payload[2]}.${payload[3]}`;   // proxy reachability via a quick TCP probe.
-      const probe = net.connect({ host: ip, port: 443 }); let done = false;
-      const reply = (status) => { if (done) return; done = true; probe.destroy(); sendFrame(0xf2, id, Buffer.from([status])); };
-      probe.on('connect', () => reply(0)); probe.on('error', () => reply(1)); setTimeout(() => reply(1), 3000);
+    else if (type === 0xf1) { // PING (ICMP echo). Two payload shapes (mirror the prod relay):
+      //   legacy   [dst:4][timeout:u16]              (v86 / riscv-vm)
+      //   hostname [0xff][timeout:u16][host:utf8]    (walios — DNS resolved here)
+      const pong = (status) => sendFrame(0xf2, id, Buffer.from([status]));
+      const doPing = (ip, ms) => {
+        const secs = Math.max(1, Math.round(ms / 1000));
+        execFile('ping', ['-n', '-c', '1', '-W', String(secs), ip], { timeout: ms + 1000 }, (err) => {
+          if (err && (err.code === 'ENOENT' || err.code === 'EACCES')) console.error(`[relay] ping unavailable (${err.code})`);
+          pong(err ? 1 : 0);
+        });
+      };
+      if (payload.length >= 4 && payload[0] === 0xff) {
+        const ms = payload.readUInt16LE(1) || 1000, host = payload.subarray(3).toString('utf8');
+        resolveHost(host).then((ip) => doPing(ip, ms)).catch(() => pong(2));
+      } else if (payload.length >= 6) {
+        doPing(`${payload[0]}.${payload[1]}.${payload[2]}.${payload[3]}`, payload.readUInt16LE(4) || 1000);
+      } else pong(2);
     }
   }, state));
   sock.on('close', () => { for (const s of streams.values()) if (s.sock) s.sock.destroy(); for (const l of listeners.values()) l.close(); });
