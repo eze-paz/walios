@@ -603,6 +603,14 @@ class Process {
     opfsFault(path2);
     if (path2 === '/dev/ptmx') { const id = newPty(); const g = this.allocFd(); this.fds.set(g, { pty: id, master: true }); return BigInt(g); }
     if (path2 === '/dev/null') { const g = this.allocFd(); this.fds.set(g, { devnull: true }); return BigInt(g); }
+    // /dev/tty = the process's CONTROLLING terminal. ssh (and sudo, passwd, git) read
+    // prompts here, NOT from stdin — so without this an unknown-host "yes/no" or a
+    // password prompt can't be answered and the tool fails outright.
+    if (path2 === '/dev/tty') { let ptyId = this.ctty;
+      if (ptyId === undefined) for (const fd of [0, 1, 2]) { const h0 = this.fds.get(fd); if (h0 && h0.pty !== undefined) { ptyId = h0.pty; break; } }
+      if (ptyId === undefined || ptyId === null) ptyId = termPty;
+      if (ptyId !== undefined && ptyId !== null && ptys.has(ptyId)) { const g = this.allocFd(); this.fds.set(g, { pty: ptyId, master: false }); return BigInt(g); }
+      return err(E.NXIO); }
     { const m = path2.match(/^\/dev\/pts\/(\d+)$/); if (m) { const id = +m[1]; if (!ptys.has(id)) return err(E.NOENT); ptys.get(id).fg = this; const g = this.allocFd(); this.fds.set(g, { pty: id, master: false }); return BigInt(g); } }
     if (dirs.has(path2)) { const g = this.allocFd(); this.fds.set(g, { path: path2, dir: true }); return BigInt(g); }
     if (flags & O_DIRECTORY) return err(E.NOTDIR);

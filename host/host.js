@@ -1287,7 +1287,9 @@ class Process {
       if (fp === '/dev/ptmx') { const id = newPty(); const g = this.allocFd(); this.fds.set(g, { pty: id, master: true }); return BigInt(g); }
       let m;
       if ((m = fp.match(/^\/dev\/pts\/(\d+)$/))) { const id = +m[1]; if (!ptys.has(id)) return err(E.NOENT); ptys.get(id).fg = this; const g = this.allocFd(); this.fds.set(g, { pty: id, master: false }); return BigInt(g); }
-      if (fp === '/dev/tty' && this.ctty !== undefined) { const g = this.allocFd(); this.fds.set(g, { pty: this.ctty, master: false }); return BigInt(g); }
+      if (fp === '/dev/tty') { let ptyId = this.ctty;  // controlling terminal (ssh/sudo/git read prompts here, not stdin)
+        if (ptyId === undefined) for (const fd of [0, 1, 2]) { const h0 = this.fds.get(fd); if (h0 && h0.pty !== undefined) { ptyId = h0.pty; break; } }
+        if (ptyId !== undefined && ptys.has(ptyId)) { const g = this.allocFd(); this.fds.set(g, { pty: ptyId, master: false }); return BigInt(g); } }
       if (fp === '/dev/null') { const g = this.allocFd(); this.fds.set(g, { devnull: true }); return BigInt(g); }
       const ex = fs.existsSync(fp) && fs.statSync(fp);
       if (ex && ex.isDirectory()) {
