@@ -1,47 +1,117 @@
 <!doctype html>
 <meta charset="utf-8">
 <title>walios — terminal</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <link rel="stylesheet" href="xterm.css">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap">
 <style>
-  html, body { margin: 0; height: 100%; background: #0b0d10; font: 13px/1.5 system-ui, sans-serif; color: #d7dde3; }
-  #term { position: fixed; inset: 0; padding: 6px; }
-  #pkgbtn { position: fixed; top: 8px; right: 12px; z-index: 10; cursor: pointer;
-    background: #101c17; color: #9fe0a0; border: 1px solid #2a5; border-radius: 999px;
-    padding: 4px 12px; font: 12px system-ui, sans-serif; opacity: .85; }
-  #pkgbtn:hover { opacity: 1; }
-  #pkgpanel { position: fixed; inset: 0; z-index: 20; display: none; background: rgba(6,8,10,.72);
-    backdrop-filter: blur(2px); }
-  #pkgpanel.open { display: flex; }
-  #pkgbox { margin: auto; width: min(640px, 92vw); max-height: 82vh; display: flex; flex-direction: column;
-    background: #10151b; border: 1px solid #24303c; border-radius: 14px; overflow: hidden; box-shadow: 0 20px 60px rgba(0,0,0,.5); }
-  #pkghead { display: flex; align-items: center; gap: 10px; padding: 14px 16px; border-bottom: 1px solid #1b232c; }
-  #pkghead b { font-size: 15px; color: #eaf0f6; } #pkghead .sub { color: #8a94a0; font-size: 12px; }
-  #pkghead .x { margin-left: auto; cursor: pointer; color: #8a94a0; font-size: 20px; line-height: 1; }
-  #pkgsearch { margin: 12px 16px 6px; padding: 8px 12px; background: #0b0f14; color: #d7dde3;
-    border: 1px solid #24303c; border-radius: 8px; font-size: 13px; }
-  #pkglist { overflow-y: auto; padding: 6px 10px 14px; }
-  .pkg { display: flex; align-items: center; gap: 12px; padding: 9px 10px; border-radius: 8px; }
-  .pkg:hover { background: #141b23; }
-  .pkg .n { font-family: Consolas, monospace; color: #cfe3cf; font-weight: 600; min-width: 90px; }
-  .pkg .d { color: #8a94a0; flex: 1; font-size: 12px; }
-  .pkg button { cursor: pointer; background: #14261c; color: #9fe0a0; border: 1px solid #2a5;
-    border-radius: 6px; padding: 3px 12px; font: 12px system-ui, sans-serif; }
-  .pkg button:hover { background: #1a3324; }
-  .pkg.added button { background: transparent; color: #6a7480; border-color: #2a3540; cursor: default; }
-  .pkg.vm { opacity: .45; } .pkg.vm button { display: none; }
+  :root{
+    --bg:#07090c; --ink:#c9d4de; --dim:#6b7683; --line:#1b212a;
+    --mint:#34e5a0; --mint-dim:#1c8f66; --cyan:#56c7ff;
+    --mono:"IBM Plex Mono",ui-monospace,Menlo,Consolas,monospace;
+    --sans:"IBM Plex Sans",system-ui,sans-serif;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%}
+  body{
+    background:radial-gradient(1200px 700px at 50% -10%, #10161d 0%, rgba(16,22,29,0) 60%), var(--bg);
+    color:var(--ink); font-family:var(--sans); overflow:hidden;
+  }
+  /* ---------- the monitor ---------- */
+  #rig{position:fixed;inset:0;padding:14px;display:flex}
+  #monitor{flex:1;min-height:0;display:flex;flex-direction:column;border-radius:22px;padding:12px;
+    background:linear-gradient(180deg,#20262e,#0c0f13);
+    box-shadow:inset 0 1px 0 rgba(255,255,255,.10),inset 0 0 0 1px rgba(0,0,0,.55),0 40px 90px -34px rgba(0,0,0,.9);}
+  #monitor::after{content:"";position:absolute;inset:14px;border-radius:22px;pointer-events:none;
+    box-shadow:inset 0 0 0 1px rgba(255,255,255,.05)}
+  #bezel{flex:1;min-height:0;display:flex;flex-direction:column;border-radius:14px;overflow:hidden;
+    background:#080b0e;border:1px solid #05070a}
+
+  /* ---------- header / chrome ---------- */
+  #chrome{display:flex;align-items:center;gap:14px;padding:10px 14px;flex:none;
+    background:linear-gradient(180deg,#12171d,#0c1116);border-bottom:1px solid var(--line)}
+  .brand{display:flex;align-items:center;gap:9px}
+  .glyph{width:22px;height:22px;color:var(--mint);flex:none}
+  .brand b{font:700 14px/1 var(--sans)} .brand b span{color:var(--mint)}
+  .ver{font:500 10px/1 var(--mono);color:var(--dim);border:1px solid var(--line);border-radius:5px;padding:3px 6px;letter-spacing:.04em}
+  .live{display:flex;align-items:center;gap:6px;font:500 11px/1 var(--mono);color:var(--dim)}
+  .led{width:7px;height:7px;border-radius:50%;background:var(--mint);box-shadow:0 0 8px var(--mint);animation:pulse 2.4s ease-in-out infinite}
+  @keyframes pulse{50%{opacity:.35}}
+  #stats{display:flex;gap:8px;margin-left:auto}
+  .chip{display:flex;flex-direction:column;gap:3px;padding:6px 10px;border-radius:9px;
+    background:rgba(255,255,255,.025);border:1px solid var(--line);min-width:74px}
+  .chip .k{font:600 9px/1 var(--mono);letter-spacing:.16em;text-transform:uppercase;color:var(--dim)}
+  .chip .v{font:600 13px/1 var(--mono);color:var(--ink);font-variant-numeric:tabular-nums}
+  .chip .v u{color:var(--dim);text-decoration:none;font-size:10px;font-weight:500}
+  .chip .v.mint{color:var(--mint)} .chip .v.cyan{color:var(--cyan)}
+  .spark{display:block;width:100%;height:12px;margin-top:1px}
+  #pkgbtn{flex:none;display:flex;align-items:center;gap:7px;cursor:pointer;
+    background:linear-gradient(180deg,#123024,#0d211a);color:var(--mint);border:1px solid #1f5a41;
+    border-radius:10px;padding:9px 14px;font:600 12.5px/1 var(--sans);transition:.18s}
+  #pkgbtn:hover{border-color:var(--mint);box-shadow:0 0 22px -6px var(--mint)}
+  #pkgbtn .plus{font:600 15px/1 var(--mono)}
+
+  /* ---------- screen ---------- */
+  #screen{flex:1;min-height:0;position:relative;
+    background:radial-gradient(150% 130% at 50% 0%,#0c1014 0%,#070a0d 100%)}
+  #term{position:absolute;inset:0;padding:10px 12px}
+
+  /* ---------- packages panel ---------- */
+  #pkgpanel{position:fixed;inset:0;z-index:30;display:none;background:rgba(6,8,10,.72);backdrop-filter:blur(2px)}
+  #pkgpanel.open{display:flex}
+  #pkgbox{margin:auto;width:min(640px,92vw);max-height:82vh;display:flex;flex-direction:column;
+    background:#10151b;border:1px solid #24303c;border-radius:14px;overflow:hidden;box-shadow:0 24px 70px rgba(0,0,0,.6)}
+  #pkghead{display:flex;align-items:center;gap:10px;padding:14px 16px;border-bottom:1px solid #1b232c}
+  #pkghead b{font-size:15px;color:#eaf0f6} #pkghead .sub{color:var(--dim);font-size:12px;font-family:var(--mono)}
+  #pkghead .x{margin-left:auto;cursor:pointer;color:var(--dim);font-size:20px;line-height:1}
+  #pkgsearch{margin:12px 16px 6px;padding:8px 12px;background:#0b0f14;color:var(--ink);
+    border:1px solid #24303c;border-radius:8px;font:13px var(--sans)}
+  #pkglist{overflow-y:auto;padding:6px 10px 14px}
+  .pkg{display:flex;align-items:center;gap:12px;padding:9px 10px;border-radius:8px}
+  .pkg:hover{background:#141b23}
+  .pkg .n{font:600 13px/1 var(--mono);color:#cfe3cf;min-width:96px}
+  .pkg .d{color:var(--dim);flex:1;font-size:12px}
+  .pkg button{cursor:pointer;background:#14261c;color:var(--mint);border:1px solid #2a5;border-radius:6px;padding:4px 13px;font:600 12px var(--sans)}
+  .pkg button:hover{background:#1a3324}
+  .pkg.added button{background:transparent;color:#6a7480;border-color:#2a3540;cursor:default}
+  .pkg.vm{opacity:.45} .pkg.vm button{display:none}
+  @media (max-width:720px){ #stats .chip:nth-child(n+3){display:none} .ver,.live{display:none} }
+  @media (prefers-reduced-motion:reduce){.led{animation:none}}
 </style>
-<div id="term"></div>
-<button id="pkgbtn">＋ packages</button>
+
+<div id="rig"><div id="monitor"><div id="bezel">
+  <div id="chrome">
+    <div class="brand">
+      <span class="glyph" aria-hidden="true"><svg width="22" height="22" viewBox="0 0 24 24" fill="none"><path d="M12 2 3 7v10l9 5 9-5V7l-9-5Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><path d="M12 7 7 9.5v5L12 17l5-2.5v-5L12 7Z" fill="currentColor" opacity=".28"/></svg></span>
+      <b>wal<span>ios</span></b>
+    </div>
+    <span class="ver">native wasm</span>
+    <span class="live"><span class="led"></span>online</span>
+    <div id="stats">
+      <div class="chip"><span class="k">Mem</span><span class="v mint" id="s-mem">—</span><canvas class="spark" id="sp-mem"></canvas></div>
+      <div class="chip"><span class="k">Speed</span><span class="v cyan" id="s-sys">—</span><canvas class="spark" id="sp-sys"></canvas></div>
+      <div class="chip"><span class="k">Procs</span><span class="v" id="s-proc">—</span></div>
+      <div class="chip"><span class="k">Uptime</span><span class="v" id="s-up">00:00</span></div>
+    </div>
+    <button id="pkgbtn"><span class="plus">＋</span> packages</button>
+  </div>
+  <div id="screen"><div id="term"></div></div>
+</div></div></div>
+
 <div id="pkgpanel"><div id="pkgbox">
   <div id="pkghead"><b>Packages</b><span class="sub">add an Alpine package as a command</span><span class="x" id="pkgx">✕</span></div>
   <input id="pkgsearch" placeholder="search 1600+ packages… (bc, bzip2, diffutils, python)">
   <div id="pkglist"></div>
 </div></div>
+
 <script src="xterm.js"></script>
 <script src="xterm-addon-fit.js"></script>
 <script>
-const term = new Terminal({ cursorBlink: true, fontSize: 14, fontFamily: 'Menlo, Consolas, monospace',
-  theme: { background: '#0b0d10', foreground: '#cfe3cf' }, scrollback: 5000 });
+const term = new Terminal({ cursorBlink: true, fontSize: 14, fontFamily: '"IBM Plex Mono", Menlo, Consolas, monospace',
+  theme: { background: '#080b0e', foreground: '#b9c6cf', cursor: '#34e5a0',
+           green: '#34e5a0', brightGreen: '#8bf7ab', cyan: '#56c7ff', brightBlack: '#4a5560' }, scrollback: 5000 });
 const fit = new FitAddon.FitAddon(); term.loadAddon(fit);
 term.open(document.getElementById('term')); fit.fit(); term.focus();
 
@@ -52,14 +122,12 @@ const MANIFEST = { busybox: BB, sh: BB, hush: BB, ash: BB, python: 'python.wasm'
 
 // FULL origin OPFS root, so the shell can see/edit this app's files (Pyodide
 // /files, conversations, ...). No subdir sandbox — `rm` here really deletes them.
-// A sibling worker owns the OPFS handles (SAB bridge).
 const opfsSab = new SharedArrayBuffer(32 + (1 << 20));
 const opfsWorker = new Worker('opfs-worker.js');
 opfsWorker.postMessage({ t: 'sab', sab: opfsSab });
 
 // WISP socket bridge: a persistent sibling worker owns the WebSocket to the relay,
-// giving the shell real TCP/UDP/ICMP (wget, nc, telnet, ssh, ping). Relay defaults
-// to this origin's /wisp; local dev (:8791) uses the bundled relay on :8790.
+// giving the shell real TCP/UDP/ICMP (wget, nc, telnet, ssh, ping).
 const wispSab = new SharedArrayBuffer(32 + 65536);
 const wispWorker = new Worker('wisp-worker.js');
 const RELAY_URL = (location.port === '8791')
@@ -67,20 +135,48 @@ const RELAY_URL = (location.port === '8791')
   : `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/wisp`;
 wispWorker.postMessage({ t: 'sab', sab: wispSab, url: RELAY_URL });
 
+// ---- live header gauges. UPTIME ticks page-side; MEM/SPEED/PROCS come from the
+// worker's periodic {t:'stats'} (total wasm memory, syscall counter, live procs). ----
+let bootAt = 0, lastSys = null, lastMs = 0;
+const memHist = [], sysHist = [];
+function fmtSys(rate){ return rate >= 1e6 ? (rate/1e6).toFixed(1)+' M/s' : rate >= 1e3 ? Math.round(rate/1e3)+' K/s' : Math.round(rate)+' /s'; }
+function setVal(id, num, unit){ const e = document.getElementById(id); e.firstChild ? (e.firstChild.nodeValue = num) : (e.textContent = num);
+  if (unit && !e.querySelector('u')) { const u = document.createElement('u'); u.textContent = ' ' + unit; e.appendChild(u); } }
+function drawSpark(id, hist, accent){ const c = document.getElementById(id); if (!c || !hist.length) return;
+  const dpr = devicePixelRatio||1, w = c.clientWidth||70, h = c.clientHeight||12;
+  c.width = w*dpr; c.height = h*dpr; const x = c.getContext('2d'); x.setTransform(dpr,0,0,dpr,0,0);
+  const max = Math.max(...hist, 1), n = hist.length, X = i => i/(Math.max(n-1,1))*w, Y = v => h - (v/max)*h*0.92 - 1;
+  x.clearRect(0,0,w,h);
+  x.beginPath(); hist.forEach((v,i)=>{ i?x.lineTo(X(i),Y(v)):x.moveTo(X(i),Y(v)); }); x.lineTo(w,h); x.lineTo(0,h); x.closePath();
+  const g = x.createLinearGradient(0,0,0,h); g.addColorStop(0,accent+'55'); g.addColorStop(1,accent+'00'); x.fillStyle = g; x.fill();
+  x.beginPath(); hist.forEach((v,i)=>{ i?x.lineTo(X(i),Y(v)):x.moveTo(X(i),Y(v)); }); x.strokeStyle = accent; x.lineWidth = 1.25; x.stroke();
+}
+function onStats(m){
+  const mb = Math.round(m.mem / 1048576); setVal('s-mem', mb, 'MB');
+  memHist.push(mb); if (memHist.length > 26) memHist.shift(); drawSpark('sp-mem', memHist, '#34e5a0');
+  setVal('s-proc', m.procs);
+  if (lastSys !== null && m.ms > lastMs) { const rate = (m.syscalls - lastSys) / ((m.ms - lastMs)/1000);
+    setVal('s-sys', fmtSys(Math.max(0,rate))); sysHist.push(Math.max(0,rate)); if (sysHist.length > 26) sysHist.shift(); drawSpark('sp-sys', sysHist, '#56c7ff'); }
+  lastSys = m.syscalls; lastMs = m.ms;
+}
+setInterval(() => { if (!bootAt) return; const t = Math.floor((performance.now()-bootAt)/1000);
+  const h = Math.floor(t/3600), mm = String(Math.floor(t/60)%60).padStart(2,'0'), ss = String(t%60).padStart(2,'0');
+  document.getElementById('s-up').textContent = h ? h+':'+mm+':'+ss : mm+':'+ss; }, 1000);
+
 function boot() {
-  running = true;
+  running = true; bootAt = performance.now();
   worker = new Worker('wali-worker.js');
   worker.postMessage({ t: 'opfs-sab', sab: opfsSab });
   worker.postMessage({ t: 'wisp-sab', sab: wispSab });
   worker.onmessage = (ev) => {
     const m = ev.data;
     if (m.t === 'out') { if (m.fd === 2 && /^\[host\]/.test(m.s)) { console.debug(m.s.trim()); return; } term.write(m.s); }
+    else if (m.t === 'stats') { onStats(m); }
     else if (m.t === 'exit') { running = false; term.write('\r\n\x1b[90m[shell exited (' + m.code + ') — reloading…]\x1b[0m\r\n'); setTimeout(() => location.reload(), 900); }
   };
   worker.postMessage({ t: 'run', wasm: BB, manifest: MANIFEST,
     tars: [['rootfs.tar.gz', '/']], opfs: '/root',   // /root is a persistent OPFS home
-    // Lazy companions: the Python stdlib (~4 MB) is fetched+mounted only when
-    // `python` is first run, not at shell startup — same idea as the lazy .wasm.
+    // Lazy companions: the Python stdlib (~4 MB) is fetched+mounted only on first `python`.
     lazyTars: { 'python.wasm': [['pylib.tar.gz', '/py']] },
     env: { HOME: '/root', TERM: 'xterm', PATH: '/bin:/usr/bin', PS1: 'walios:$PWD$ ', HOSTNAME: 'walios',
            PYTHONHOME: '/py', PYTHONPATH: '/py/Lib', PYTHONDONTWRITEBYTECODE: '1', LC_ALL: 'C.UTF-8' },
@@ -88,13 +184,11 @@ function boot() {
     cols: term.cols, rows: term.rows });
 }
 term.onData(d => { if (worker && running) worker.postMessage({ t: 'stdin', data: d }); });
-window.addEventListener('resize', () => { try { fit.fit(); if (worker && running) worker.postMessage({ t: 'winsize', cols: term.cols, rows: term.rows }); } catch {} });
+window.addEventListener('resize', () => { try { fit.fit(); if (worker && running) worker.postMessage({ t: 'winsize', cols: term.cols, rows: term.rows }); drawSpark('sp-mem', memHist, '#34e5a0'); drawSpark('sp-sys', sysHist, '#56c7ff'); } catch {} });
 term.write('\x1b[90mwalios — starting a shell (busybox on a pty, native wasm)…\x1b[0m\r\n');
 boot();
 
 // ---- Packages panel: browse the aports catalog, add one as a live shell command ----
-// "Add" registers the package in the running worker's manifest; it then lazy-compiles
-// on its first exec (same path as python/lua). No reload, no separate page.
 const pkgpanel = document.getElementById('pkgpanel'), pkglist = document.getElementById('pkglist'),
       pkgsearch = document.getElementById('pkgsearch');
 const added = new Set(), builtin = new Set(Object.keys(MANIFEST));
