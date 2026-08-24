@@ -5,7 +5,10 @@
 set -uo pipefail
 W=~/wali/build; WO=~/binaryen-version_132/bin/wasm-opt
 CCBASE="$W/llvm/bin/clang --target=wasm32-unknown-linux-muslwali --sysroot=$W/sysroot -L$W/sysroot/lib -Wno-unused-command-line-argument -Wno-ignored-optimization-argument"
-CC="$CCBASE -O2 -D__WALI_ASYNCIFY_FORK -pthread -fwasm-exceptions -mllvm -wasm-enable-sjlj -matomics -mbulk-memory -mexception-handling -Wno-implicit-function-declaration -Wno-int-conversion -Wno-incompatible-function-pointer-types -Wno-incompatible-pointer-types -Wl,--shared-memory -Wl,--export-memory -Wl,--max-memory=2147483648 -Wl,-z,stack-size=8388608"
+CC="$CCBASE -O2 -D__WALI_ASYNCIFY_FORK -pthread -fwasm-exceptions -mllvm -wasm-enable-sjlj -matomics -mbulk-memory -mexception-handling -Wno-implicit-function-declaration -Wno-int-conversion -Wno-incompatible-function-pointer-types -Wno-incompatible-pointer-types -Wl,--shared-memory -Wl,--export-memory -Wl,--max-memory=2147483648 -Wl,-z,stack-size=8388608 -Wl,--export-table -Wl,--table-base=16"
+# --export-table + --table-base=16: lets the host invoke ash's signal handlers
+# (job control, ^C to the foreground group). Without it, delivered signals fall
+# back to the default action and interactive Ctrl-C in the shell degrades.
 LD="$CCBASE -nostdlib"   # -r applet-combine: no memory flags (they conflict with -r)
 cd ~/busybox-1.36.1
 
