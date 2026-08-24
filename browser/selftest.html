@@ -32,7 +32,7 @@ function run(argvLine, opts = {}) {
     };
     w.postMessage({ t: 'stdin-sab', sab: stdinSab });
     w.postMessage({ t: 'opfs-sab', sab: opfsSab });
-    w.postMessage({ t: 'run', wasm: 'busybox.wasm', manifest: MANIFEST,
+    w.postMessage({ t: 'run', wasm: 'busybox.wasm', manifest: MANIFEST, jspi: true, // JSPI like the real terminal (the ash+net busybox needs it)
       argv: ['busybox', 'hush', '-c', argvLine], opfs: '/files', ...opts });
   });
 }
@@ -79,6 +79,22 @@ function check(name, ok, detail) {
   // 7. permissions + symlinks as a NON-ROOT user (uid 1000)
   r = await run('umask 027; echo secret > /f.txt; busybox ln -s /f.txt /l.txt; cat /l.txt; busybox chmod 400 /f.txt; if test -w /f.txt; then echo BAD-writable; else echo not-writable; fi; if test -r /f.txt; then echo readable; fi', { uid: 1000 });
   check('perms + symlink as uid 1000', /secret/.test(r.out) && /not-writable/.test(r.out) && /readable/.test(r.out) && !/BAD/.test(r.out), r.out);
+
+  // 8. mv: directory rename + executable bit preserved across rename
+  r = await run('mkdir -p /d1/sub; echo deep > /d1/sub/f.txt; busybox mv /d1 /d2; cat /d2/sub/f.txt; echo bin > /x1; busybox chmod +x /x1; busybox mv /x1 /x2; if test -x /x2; then echo exec-kept; fi');
+  check('mv dir + mv keeps +x', /deep/.test(r.out) && /exec-kept/.test(r.out), r.out);
+
+  // 9. touch works (utimensat used to be ENOSYS)
+  r = await run('echo a > /old.txt; busybox touch /old.txt && echo touch-ok; busybox touch /fresh.txt; if test -f /fresh.txt; then echo created; fi');
+  check('touch (utimensat)', /touch-ok/.test(r.out) && /created/.test(r.out), r.out);
+
+  // 10. shebang script + no-shebang executable both run via execve
+  r = await run("printf '#!/bin/sh\\necho sb-$1\\n' > /s.sh; busybox chmod +x /s.sh; /s.sh one; printf 'echo plain-ok\\n' > /p.sh; busybox chmod +x /p.sh; /p.sh");
+  check('#! script + ENOEXEC fallback exec', /sb-one/.test(r.out) && /plain-ok/.test(r.out), r.out);
+
+  // 11. an infinite writer into `head` terminates (SIGPIPE kills it) — spun forever before
+  r = await run('sh -c "while :; do echo y; done" | busybox head -n 2; echo pipe-done');
+  check('SIGPIPE ends infinite-writer|head', /y\s+y\s+pipe-done/.test(r.out.replace(/\r/g, '')), r.out);
 
   sumEl.textContent = `pass=${pass} fail=${fail}`;
   sumEl.className = fail ? 'bad' : 'ok';
