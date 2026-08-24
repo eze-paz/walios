@@ -1600,6 +1600,9 @@ self.onmessage = async (ev) => {
   const m = ev.data;
   if (m.t === 'stdin-sab') { stdinCtl = new Int32Array(m.sab, 0, 4); stdinData = new Uint8Array(m.sab, 16); return; }
   if (m.t === 'wisp-sab') { wispSab = m.sab; return; }
+  if (m.t === 'add-pkg') { // register an aports package into the live manifest -> runnable (lazy-compiled on first exec)
+    if (m.name && m.url) { manifest[m.name] = m.url; if (m.lazyTars) lazyTars[m.name] = m.lazyTars; }
+    return; }
   if (m.t === 'opfs-sab') { opfsSab = m.sab; return; }
   if (m.t === 'winsize') { if (m.rows) winRows = m.rows; if (m.cols) winCols = m.cols; for (const p of ptys.values()) { p.rows = winRows; p.cols = winCols; } return; }
   if (m.t === 'sigint') { // page-level Ctrl-C -> guest foreground group (pty pgrp if set, else the root)

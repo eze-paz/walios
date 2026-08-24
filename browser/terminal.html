@@ -3,10 +3,40 @@
 <title>walios — terminal</title>
 <link rel="stylesheet" href="xterm.css">
 <style>
-  html, body { margin: 0; height: 100%; background: #0b0d10; }
+  html, body { margin: 0; height: 100%; background: #0b0d10; font: 13px/1.5 system-ui, sans-serif; color: #d7dde3; }
   #term { position: fixed; inset: 0; padding: 6px; }
+  #pkgbtn { position: fixed; top: 8px; right: 12px; z-index: 10; cursor: pointer;
+    background: #101c17; color: #9fe0a0; border: 1px solid #2a5; border-radius: 999px;
+    padding: 4px 12px; font: 12px system-ui, sans-serif; opacity: .85; }
+  #pkgbtn:hover { opacity: 1; }
+  #pkgpanel { position: fixed; inset: 0; z-index: 20; display: none; background: rgba(6,8,10,.72);
+    backdrop-filter: blur(2px); }
+  #pkgpanel.open { display: flex; }
+  #pkgbox { margin: auto; width: min(640px, 92vw); max-height: 82vh; display: flex; flex-direction: column;
+    background: #10151b; border: 1px solid #24303c; border-radius: 14px; overflow: hidden; box-shadow: 0 20px 60px rgba(0,0,0,.5); }
+  #pkghead { display: flex; align-items: center; gap: 10px; padding: 14px 16px; border-bottom: 1px solid #1b232c; }
+  #pkghead b { font-size: 15px; color: #eaf0f6; } #pkghead .sub { color: #8a94a0; font-size: 12px; }
+  #pkghead .x { margin-left: auto; cursor: pointer; color: #8a94a0; font-size: 20px; line-height: 1; }
+  #pkgsearch { margin: 12px 16px 6px; padding: 8px 12px; background: #0b0f14; color: #d7dde3;
+    border: 1px solid #24303c; border-radius: 8px; font-size: 13px; }
+  #pkglist { overflow-y: auto; padding: 6px 10px 14px; }
+  .pkg { display: flex; align-items: center; gap: 12px; padding: 9px 10px; border-radius: 8px; }
+  .pkg:hover { background: #141b23; }
+  .pkg .n { font-family: Consolas, monospace; color: #cfe3cf; font-weight: 600; min-width: 90px; }
+  .pkg .d { color: #8a94a0; flex: 1; font-size: 12px; }
+  .pkg button { cursor: pointer; background: #14261c; color: #9fe0a0; border: 1px solid #2a5;
+    border-radius: 6px; padding: 3px 12px; font: 12px system-ui, sans-serif; }
+  .pkg button:hover { background: #1a3324; }
+  .pkg.added button { background: transparent; color: #6a7480; border-color: #2a3540; cursor: default; }
+  .pkg.vm { opacity: .45; } .pkg.vm button { display: none; }
 </style>
 <div id="term"></div>
+<button id="pkgbtn">＋ packages</button>
+<div id="pkgpanel"><div id="pkgbox">
+  <div id="pkghead"><b>Packages</b><span class="sub">add an Alpine package as a command</span><span class="x" id="pkgx">✕</span></div>
+  <input id="pkgsearch" placeholder="search 1600+ packages… (bc, bzip2, diffutils, python)">
+  <div id="pkglist"></div>
+</div></div>
 <script src="xterm.js"></script>
 <script src="xterm-addon-fit.js"></script>
 <script>
@@ -61,4 +91,52 @@ term.onData(d => { if (worker && running) worker.postMessage({ t: 'stdin', data:
 window.addEventListener('resize', () => { try { fit.fit(); if (worker && running) worker.postMessage({ t: 'winsize', cols: term.cols, rows: term.rows }); } catch {} });
 term.write('\x1b[90mwalios — starting a shell (busybox on a pty, native wasm)…\x1b[0m\r\n');
 boot();
+
+// ---- Packages panel: browse the aports catalog, add one as a live shell command ----
+// "Add" registers the package in the running worker's manifest; it then lazy-compiles
+// on its first exec (same path as python/lua). No reload, no separate page.
+const pkgpanel = document.getElementById('pkgpanel'), pkglist = document.getElementById('pkglist'),
+      pkgsearch = document.getElementById('pkgsearch');
+const added = new Set(), builtin = new Set(Object.keys(MANIFEST));
+let CAT = null;
+function renderPkgs(q) {
+  if (!CAT) return;
+  q = (q || '').toLowerCase();
+  const match = CAT.filter(p => !q || p.name.toLowerCase().includes(q) || (p.desc || '').toLowerCase().includes(q));
+  const wasm = match.filter(p => p.tier === 'wasm'), vm = match.filter(p => p.tier !== 'wasm');
+  const rows = [...wasm, ...vm.slice(0, 80)].slice(0, 200);
+  pkglist.innerHTML = '';
+  for (const p of rows) {
+    const runnable = p.tier === 'wasm', bi = builtin.has(p.name), on = added.has(p.name);
+    const row = document.createElement('div');
+    row.className = 'pkg' + (runnable ? '' : ' vm') + (on || bi ? ' added' : '');
+    row.innerHTML = `<span class="n"></span><span class="d"></span>`;
+    row.querySelector('.n').textContent = p.name;
+    row.querySelector('.d').textContent = (p.desc || '') + (runnable ? '' : ' — not built to wasm yet');
+    if (runnable) { const b = document.createElement('button');
+      b.textContent = bi ? 'built-in' : on ? '✓ added' : 'add';
+      if (!bi && !on) b.onclick = () => addPkg(p, row, b);
+      row.appendChild(b); }
+    pkglist.appendChild(row);
+  }
+}
+function addPkg(p, row, b) {
+  if (worker) worker.postMessage({ t: 'add-pkg', name: p.name, url: p.wasm,
+    lazyTars: p.name === 'python' ? { [p.wasm]: [['pylib.tar.gz', '/py']] } : undefined });
+  added.add(p.name); row.classList.add('added'); b.textContent = '✓ added';
+  term.write(`\r\n\x1b[92m＋ added \x1b[1m${p.name}\x1b[22m — run it: \x1b[1m${p.name}\x1b[0m\r\n`);
+}
+function openPkgs() {
+  pkgpanel.classList.add('open'); pkgsearch.focus();
+  if (CAT) return;
+  fetch('aports-catalog.json').then(r => r.json()).then(c => { CAT = c;
+    document.querySelector('#pkghead .sub').textContent = `${c.filter(p => p.tier === 'wasm').length} runnable of ${c.length}`;
+    renderPkgs(''); }).catch(e => { pkglist.innerHTML = '<div style="padding:14px;color:#f9b">catalog unavailable: ' + e + '</div>'; });
+}
+function closePkgs() { pkgpanel.classList.remove('open'); term.focus(); }
+document.getElementById('pkgbtn').onclick = openPkgs;
+document.getElementById('pkgx').onclick = closePkgs;
+pkgpanel.onclick = e => { if (e.target === pkgpanel) closePkgs(); };
+pkgsearch.addEventListener('input', () => renderPkgs(pkgsearch.value));
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && pkgpanel.classList.contains('open')) closePkgs(); });
 </script>
