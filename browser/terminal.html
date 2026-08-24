@@ -77,6 +77,17 @@
   .pkg button:hover{background:#1a3324}
   .pkg.added button{background:transparent;color:#6a7480;border-color:#2a3540;cursor:default}
   .pkg.vm{opacity:.45} .pkg.vm button{display:none}
+
+  /* ---------- themed scrollbars (terminal viewport + panels) ---------- */
+  .xterm-viewport, #pkglist { scrollbar-width: thin; scrollbar-color: #2b3742 transparent; }
+  .xterm-viewport::-webkit-scrollbar, #pkglist::-webkit-scrollbar { width: 11px; height: 11px; }
+  .xterm-viewport::-webkit-scrollbar-track, #pkglist::-webkit-scrollbar-track { background: transparent; }
+  .xterm-viewport::-webkit-scrollbar-thumb, #pkglist::-webkit-scrollbar-thumb {
+    background: #2b3742; border-radius: 8px; border: 3px solid transparent; background-clip: padding-box; }
+  .xterm-viewport::-webkit-scrollbar-thumb:hover, #pkglist::-webkit-scrollbar-thumb:hover {
+    background: var(--mint-dim); background-clip: padding-box; }
+  .xterm-viewport::-webkit-scrollbar-corner, #pkglist::-webkit-scrollbar-corner { background: transparent; }
+
   @media (max-width:720px){ #stats .chip:nth-child(n+3){display:none} .ver,.live{display:none} }
   @media (prefers-reduced-motion:reduce){.led{animation:none}}
 </style>
@@ -119,6 +130,7 @@ let worker = null, running = false;
 const BB = 'busybox.wasm?v=net3';  // version-bust: ash+networking, --export-table (shell ^C)
 const MANIFEST = { busybox: BB, sh: BB, hush: BB, ash: BB, python: 'python.wasm', 'python3': 'python.wasm', lua: 'lua.wasm',
                    ssh: 'ssh.wasm?v=ssl2', slogin: 'ssh.wasm?v=ssl2',  // libcrypto (RSA/ECDSA), built --without-hardening (no -ftrapv → fast crypto)
+                   make: 'make.wasm', 'gmake': 'make.wasm',  // GNU Make 4.4.1 (WALI) — lazy-loaded for in-tab package builds
                    cc: 'cc:bridge', clang: 'cc:bridge', gcc: 'cc:bridge' };  // host-bridged to @yowasp clang (worker intercepts exec by name; value unused)
 
 // FULL origin OPFS root, so the shell can see/edit this app's files (Pyodide
