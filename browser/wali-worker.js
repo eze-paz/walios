@@ -1472,8 +1472,31 @@ class Process {
   }
 }
 
+let lazyTars = {};                 // moduleKey -> [[tarUrl, mountPrefix], ...] (loaded once, on first exec)
+const lazyTarsDone = new Set();
+// lazily fetch+compile a manifest URL on first use, plus any companion tar the
+// program needs (e.g. python.wasm -> pylib.tar.gz at /py). Returns whether the
+// key is (now) compiled. VFS keys are compiled at resolve time.
+async function ensureModule(key) {
+  if (!key || key.startsWith('vfs:')) return !!modCache.has(key);
+  if (!modCache.has(key)) {
+    try {
+      const t0 = performance.now();
+      modCache.set(key, await WebAssembly.compileStreaming(fetch(key)));
+      post(`[host] loaded ${key} (${(performance.now() - t0).toFixed(0)}ms)\n`, 2);
+    } catch (e) { post(`[host] failed to load ${key}: ${e.message || e}\n`, 2); return false; }
+  }
+  if (lazyTars[key] && !lazyTarsDone.has(key)) { lazyTarsDone.add(key); // companion data (stdlib, etc.)
+    for (const [url, prefix] of lazyTars[key]) { try { await loadTar(url, prefix); } catch (e) { post(`[host] companion ${url} failed: ${e.message || e}\n`, 2); } }
+  }
+  return true;
+}
+
+// Resolve a program name to a module key WITHOUT requiring it compiled yet — the
+// async exec path calls ensureModule() on the result. VFS binaries are compiled
+// here (bytes are local). Returns the key, or null if unresolvable.
 function resolveExecKey(p, cwd, selfKey) {
-  let key = resolveModuleKey(p, selfKey);
+  let key = resolveModuleKey(p, selfKey);   // manifest URL (maybe uncompiled) or null
   if (!key) {
     // not in the manifest — maybe it's a wasm binary sitting in the VFS
     // (e.g. one microcc just emitted, or a file under the OPFS mount).
@@ -1488,16 +1511,17 @@ function resolveExecKey(p, cwd, selfKey) {
       }
     }
   }
-  // busybox multi-call fallback (same as the node host): any still-unresolved
-  // name runs busybox, which dispatches on argv[0].
-  if ((!key || !modCache.has(key)) && manifest['busybox']) key = manifest['busybox'];
-  if (!key || !modCache.has(key)) { post(`[host] execve: cannot resolve ${p}\n`, 2); return null; }
+  // busybox multi-call fallback: any still-unresolved name runs busybox, which
+  // dispatches on argv[0] (busybox itself may still be a lazy manifest URL).
+  if (!key && manifest['busybox']) key = manifest['busybox'];
+  if (!key) { post(`[host] execve: cannot resolve ${p}\n`, 2); return null; }
   return key;
 }
 
 function runProgram(p, argv, envp, fdTable, cwd, selfKey, cred, asPid) {
   const key = resolveExecKey(p, cwd, selfKey);
   if (!key) return null;
+  if (!modCache.has(key)) { post(`[host] ${key} not preloaded (sync exec cannot lazy-fetch; use JSPI)\n`, 2); return null; }
   const proc = new Process(key, argv, envp, fdTable, cwd);
   if (cred) proc.cred = { ...cred };
   if (asPid) { procs.delete(proc.pid); proc.pid = asPid; procs.set(asPid, proc); }
@@ -1508,6 +1532,7 @@ function runProgram(p, argv, envp, fdTable, cwd, selfKey, cred, asPid) {
 async function runProgramAsync(p, argv, envp, fdTable, cwd, selfKey, cred, asPid) {
   const key = resolveExecKey(p, cwd, selfKey);
   if (!key) return null;
+  if (!(await ensureModule(key))) return null; // LAZY: fetch+compile on first exec
   const proc = new Process(key, argv, envp, fdTable, cwd);
   if (cred) proc.cred = { ...cred };
   if (asPid) { procs.delete(proc.pid); proc.pid = asPid; procs.set(asPid, proc); }
@@ -1538,6 +1563,17 @@ self.onmessage = async (ev) => {
       post(opfsSab ? `[host] OPFS lazily mounted at ${opfsMount}\n` : `[host] OPFS requested but no opfs-sab bridge; ${opfsMount} is RAM-only\n`, 2);
     }
     manifest = m.manifest || {};
+    lazyTars = m.lazyTars || {};   // moduleKey -> companion tars, mounted on first exec of that program
+    // PATH discoverability: the shell stat()s $PATH for a command before exec'ing
+    // it, so give every manifest program a tiny executable stub at /bin/<name>.
+    // execve resolves the real module by basename via the manifest (the stub's
+    // bytes are never run), so this only lets `python`, `ssh`, etc. be found by
+    // name and appear in tab-completion. Non-applet programs would be "not found"
+    // otherwise (rootfs /bin is empty).
+    for (const name of new Set(Object.keys(manifest))) {
+      const bp = '/bin/' + name;
+      if (!files.has(bp)) addFile(bp, te.encode('#!wali-manifest\n'), 0o100755);
+    }
     addFile('/etc/resolv.conf', te.encode('nameserver 1.1.1.1\n')); // DNS goes via DoH in the WISP worker
     addFile('/etc/hosts', te.encode('127.0.0.1 localhost\n'));
     // seed VFS with inline binaries (e.g. wasm just produced by clang.wasm)

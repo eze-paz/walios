@@ -48,7 +48,11 @@ function boot() {
   };
   worker.postMessage({ t: 'run', wasm: BB, manifest: MANIFEST,
     tars: [['rootfs.tar.gz', '/']], opfs: '/root',   // /root is a persistent OPFS home
-    env: { HOME: '/root', TERM: 'xterm', PATH: '/bin:/usr/bin', PS1: 'walios:$PWD$ ', HOSTNAME: 'walios' },
+    // Lazy companions: the Python stdlib (~4 MB) is fetched+mounted only when
+    // `python` is first run, not at shell startup — same idea as the lazy .wasm.
+    lazyTars: { 'python.wasm': [['pylib.tar.gz', '/py']] },
+    env: { HOME: '/root', TERM: 'xterm', PATH: '/bin:/usr/bin', PS1: 'walios:$PWD$ ', HOSTNAME: 'walios',
+           PYTHONHOME: '/py', PYTHONPATH: '/py/Lib', PYTHONDONTWRITEBYTECODE: '1', LC_ALL: 'C.UTF-8' },
     cwd: '/root', argv: ['busybox', 'ash', '-i'], jspi: true, pty: true,
     cols: term.cols, rows: term.rows });
 }
