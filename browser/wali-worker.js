@@ -1711,7 +1711,15 @@ self.onmessage = async (ev) => {
     rootProc = root;
     self.postMessage({ t: 'boot', ms: performance.now() - boot0 });
     const t0 = performance.now();
-    const code = JSPI ? await root.runAsync() : root.run();
+    // Live gauges for the terminal header: total wasm memory across processes,
+    // live process count, and cumulative syscalls (the page derives a rate = speed).
+    const statsTimer = setInterval(() => {
+      let mem = 0; for (const p of procs.values()) { try { mem += p.memory.buffer.byteLength; } catch {} }
+      self.postMessage({ t: 'stats', mem, procs: procs.size, syscalls: syscallTotal, ms: performance.now() - t0 });
+    }, 1000);
+    let code;
+    try { code = JSPI ? await root.runAsync() : root.run(); }
+    finally { clearInterval(statsTimer); }
     if (opfsBr) { try { opfsBr.call(OFS.RELEASE, 0, 0, 0, null); } catch {} for (const f of files.values()) if (f.brId) f.brId = 0; }
     self.postMessage({ t: 'exit', code, ms: performance.now() - t0, syscalls: syscallTotal, procs: procCount, jspi: JSPI, pipeSuspends, waitSuspends });
   } catch (e) {
