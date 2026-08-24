@@ -902,7 +902,13 @@ class Process {
       case 'getdents64': {
         const h = S.fds.get(a[0]); if (!h || !h.dir) return err(E.BADF);
         let st = S.dirState.get(a[0]);
-        if (!st) { st = { names: ['.', '..', ...dirs.get(h.path)], pos: 0 }; S.dirState.set(a[0], st); }
+        if (!st) {
+          // Re-read the OPFS listing at the start of each enumeration, so entries
+          // created by another tab / the host app since we first looked show up
+          // (the fault-in cache is once-only and would otherwise be stale).
+          if (inOpfs(h.path)) { opfsLoaded.delete(h.path); opfsLoadDir(h.path); }
+          st = { names: ['.', '..', ...dirs.get(h.path)], pos: 0 }; S.dirState.set(a[0], st);
+        }
         let off = 0;
         while (st.pos < st.names.length) {
           const nm = st.names[st.pos]; const nb = te.encode(nm);
