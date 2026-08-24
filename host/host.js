@@ -1066,6 +1066,13 @@ class Process {
         const n = writeSockaddr(S, a[1], { ip: ba.ip === '::' ? '0.0.0.0' : ba.ip, port: h.sock.boundPort || ba.port });
         if (a[2]) S.i32(a[2], n); return 0n; }
       case 'setsockopt': case 'getpeername': case 'shutdown': return 0n;
+      case 'getsockopt': { // enough for ssh/curl: SO_ERROR=0 (connect succeeded), SO_TYPE by socket, else 0
+        const level = a[1] | 0, opt = a[2] | 0, optval = a[3], optlen = a[4];
+        if (optval) { let v = 0;
+          if (level === 1 && opt === 3) { const h = S.fds.get(a[0]); v = (h && h.sock && (h.sock.udp || h.sock.icmp)) ? 2 : 1; } // SO_TYPE
+          S.i32(optval, v); }
+        if (optlen) S.i32(optlen, 4);
+        return 0n; }
       default:
         if (!unknownSyscalls.has(name)) { unknownSyscalls.add(name); process.stderr.write(`[wali-host] ENOSYS SYS_${name}\n`); }
         return err(E.NOSYS);

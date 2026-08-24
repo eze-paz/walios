@@ -1209,6 +1209,16 @@ class Process {
         const n = writeSockaddr(S, a[1], { ip: ba.ip === '::' ? '0.0.0.0' : ba.ip, port: h.sock.boundPort || ba.port });
         if (a[2]) S.i32(a[2], n); return 0n; }
       case 'setsockopt': case 'getpeername': case 'shutdown': return 0n;
+      case 'getsockopt': { // enough for ssh/curl. SOL_SOCKET=1: SO_ERROR=4 ->0 (connected),
+        // SO_TYPE=3 -> socket type, SO_SNDBUF=7/SO_RCVBUF=8 -> a real size (ssh sizes its
+        // channel window from these; returning 0 stalls the session). Everything else -> 0.
+        const level = a[1] | 0, opt = a[2] | 0, optval = a[3], optlen = a[4];
+        if (optval) { let v = 0;
+          if (level === 1 && opt === 3) { const h = S.fds.get(a[0]); v = (h && h.sock && (h.sock.udp || h.sock.icmp)) ? 2 : 1; } // SO_TYPE
+          else if (level === 1 && (opt === 7 || opt === 8)) v = 262144; // SO_SNDBUF / SO_RCVBUF
+          S.i32(optval, v); }
+        if (optlen) S.i32(optlen, 4);
+        return 0n; }
       default:
         if (!unknownSyscalls.has(name)) { unknownSyscalls.add(name); post(`[host] ENOSYS SYS_${name}\n`, 2); }
         return err(E.NOSYS);
