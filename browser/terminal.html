@@ -20,11 +20,12 @@ const BB = 'busybox.wasm?v=net3';  // version-bust: ash+networking, --export-tab
 const MANIFEST = { busybox: BB, sh: BB, hush: BB, ash: BB, python: 'python.wasm', 'python3': 'python.wasm', lua: 'lua.wasm',
                    ssh: 'ssh.wasm', slogin: 'ssh.wasm' };
 
-// Persistent home via OPFS, isolated to a "walios-home" subdir so the shell can't
-// touch the host app's OPFS data. A sibling worker owns the OPFS handles (SAB bridge).
+// FULL origin OPFS root, so the shell can see/edit this app's files (Pyodide
+// /files, conversations, ...). No subdir sandbox — `rm` here really deletes them.
+// A sibling worker owns the OPFS handles (SAB bridge).
 const opfsSab = new SharedArrayBuffer(32 + (1 << 20));
 const opfsWorker = new Worker('opfs-worker.js');
-opfsWorker.postMessage({ t: 'sab', sab: opfsSab, subdir: 'walios-home' });
+opfsWorker.postMessage({ t: 'sab', sab: opfsSab });
 
 // WISP socket bridge: a persistent sibling worker owns the WebSocket to the relay,
 // giving the shell real TCP/UDP/ICMP (wget, nc, telnet, ssh, ping). Relay defaults
