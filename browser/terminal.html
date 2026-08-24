@@ -16,7 +16,9 @@ const fit = new FitAddon.FitAddon(); term.loadAddon(fit);
 term.open(document.getElementById('term')); fit.fit(); term.focus();
 
 let worker = null, running = false;
-const MANIFEST = { busybox: 'busybox.wasm', sh: 'busybox.wasm', hush: 'busybox.wasm', python: 'python.wasm', 'python3': 'python.wasm', lua: 'lua.wasm' };
+const BB = 'busybox.wasm?v=net1';  // version-bust: the ash+networking build
+const MANIFEST = { busybox: BB, sh: BB, hush: BB, ash: BB, python: 'python.wasm', 'python3': 'python.wasm', lua: 'lua.wasm',
+                   ssh: 'ssh.wasm', slogin: 'ssh.wasm' };
 
 // Persistent home via OPFS, isolated to a "walios-home" subdir so the shell can't
 // touch the host app's OPFS data. A sibling worker owns the OPFS handles (SAB bridge).
@@ -24,16 +26,27 @@ const opfsSab = new SharedArrayBuffer(32 + (1 << 20));
 const opfsWorker = new Worker('opfs-worker.js');
 opfsWorker.postMessage({ t: 'sab', sab: opfsSab, subdir: 'walios-home' });
 
+// WISP socket bridge: a persistent sibling worker owns the WebSocket to the relay,
+// giving the shell real TCP/UDP/ICMP (wget, nc, telnet, ssh, ping). Relay defaults
+// to this origin's /wisp; local dev (:8791) uses the bundled relay on :8790.
+const wispSab = new SharedArrayBuffer(32 + 65536);
+const wispWorker = new Worker('wisp-worker.js');
+const RELAY_URL = (location.port === '8791')
+  ? `ws://${location.hostname}:8790`
+  : `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/wisp`;
+wispWorker.postMessage({ t: 'sab', sab: wispSab, url: RELAY_URL });
+
 function boot() {
   running = true;
   worker = new Worker('wali-worker.js');
   worker.postMessage({ t: 'opfs-sab', sab: opfsSab });
+  worker.postMessage({ t: 'wisp-sab', sab: wispSab });
   worker.onmessage = (ev) => {
     const m = ev.data;
     if (m.t === 'out') { if (m.fd === 2 && /^\[host\]/.test(m.s)) { console.debug(m.s.trim()); return; } term.write(m.s); }
     else if (m.t === 'exit') { running = false; term.write('\r\n\x1b[90m[shell exited (' + m.code + ') — reloading…]\x1b[0m\r\n'); setTimeout(() => location.reload(), 900); }
   };
-  worker.postMessage({ t: 'run', wasm: 'busybox.wasm', manifest: MANIFEST,
+  worker.postMessage({ t: 'run', wasm: BB, manifest: MANIFEST,
     tars: [['rootfs.tar.gz', '/']], opfs: '/root',   // /root is a persistent OPFS home
     env: { HOME: '/root', TERM: 'xterm', PATH: '/bin:/usr/bin', PS1: 'walios:$PWD$ ', HOSTNAME: 'walios' },
     cwd: '/root', argv: ['busybox', 'ash', '-i'], jspi: true, pty: true,
