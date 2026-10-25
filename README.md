@@ -97,7 +97,7 @@ and at parity with Pyodide once warm.
 | `browser/wali-proc-worker.js` | per-process worker: instantiates the guest, proxies syscalls over the SAB |
 | `browser/opfs-worker.js`, `browser/wisp-worker.js` | OPFS and network bridges |
 | `browser/walios-backend.js` | boot manifest: programs, bundles, env, the guest-host call channel |
-| `browser/terminal.html`, `browser/selftest.html`, `index.html` | the UI, a scripted self-test, the landing page |
+| `index.html`, `browser/terminal.html`, `browser/selftest.html` | the terminal (root page of the site), the same page served from inside `browser/`, a scripted self-test |
 | `browser/bin/` | in-guest scripts: `cc`, `ld`, `ar`, `nm`, `build-pkg`, `wfetch`, `wextract`, `pkg-config`, `npm-lite` |
 | `browser/src/` | `tlswrap.c`, `openssl-shim.c` (relay-terminated TLS helpers) |
 | `browser/*.wasm`, `browser/*.tar.gz`, `browser/pkgcache/`, `browser/pkgs/` | prebuilt programs and bundles the page serves (see NOTICE for licenses) |
@@ -118,7 +118,7 @@ cd walios/browser && python3 coi.py 8765      # static server with COOP/COEP hea
 
 Any static server works if it sends `Cross-Origin-Opener-Policy: same-origin` and
 `Cross-Origin-Embedder-Policy: require-corp`; without them the page registers
-`coi-sw.js` and reloads once.
+`coi-sw.js` (one copy at the root for `index.html`, one in `browser/`) and reloads once.
 
 ### Networking (WISP)
 

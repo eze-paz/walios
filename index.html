@@ -1,72 +1,496 @@
 <!doctype html>
-<html lang="en">
 <meta charset="utf-8">
 <title>walios — Linux userland as native WebAssembly</title>
+<meta name="description" content="A real Linux userland (busybox, CPython 3.14 + numpy, clang 22, git, ssh) compiled to WebAssembly, run by a JavaScript syscall kernel in your browser tab. No emulator, no server.">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="description" content="walios runs a real Linux userland (busybox, CPython, clang, git, ssh) compiled to WebAssembly, with a JavaScript syscall kernel in your browser tab. No emulator, no server.">
+<link rel="stylesheet" href="browser/xterm.css">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap">
 <style>
-  :root { color-scheme: dark; --bg:#07090c; --ink:#c9d4de; --dim:#7b8794; --line:#1b212a; --mint:#34e5a0; --cyan:#56c7ff; }
-  * { box-sizing: border-box; }
-  body { margin:0; background: radial-gradient(1100px 600px at 50% -10%, #10161d 0%, rgba(16,22,29,0) 60%), var(--bg); color: var(--ink); font: 15px/1.6 "IBM Plex Sans", system-ui, sans-serif; }
-  main { max-width: 820px; margin: 0 auto; padding: 56px 20px 80px; }
-  h1 { font-size: 40px; margin: 0 0 4px; letter-spacing: -0.5px; } h1 span { color: var(--mint); }
-  .sub { color: var(--dim); margin: 0 0 22px; font-size: 17px; }
-  .cap { display:inline-block; font: 500 12px/1 ui-monospace, Menlo, Consolas, monospace; color:#9fe0a0; border:1px solid #244; background:#0f1a12; border-radius:999px; padding:6px 12px; margin-bottom:28px; }
-  .cap.bad { color:#f9b; border-color:#533; background:#1a0f12; }
-  a.card { display:block; text-decoration:none; color:inherit; border:1px solid var(--line); border-radius:14px; padding:20px 22px; background:#0f141a; margin-bottom:14px; transition:border-color .15s; }
-  a.card:hover { border-color:#2a5a46; } a.primary { background:#0e1a15; border-color:#1c8f66; }
-  a.card b { color:#eaf0f6; font-size:19px; } a.primary b::after { content:" →"; color:var(--mint); }
-  a.card p { margin:6px 0 0; color:var(--dim); font-size:14px; }
-  .row { display:grid; gap:14px; grid-template-columns: 1fr 1fr; } .row a.card { margin-bottom:0; }
-  @media (max-width:640px) { .row { grid-template-columns:1fr; } h1 { font-size:32px; } }
-  h2 { font-size: 14px; letter-spacing:.14em; text-transform:uppercase; color: var(--dim); margin: 40px 0 12px; }
-  ul { padding-left: 20px; } li { margin: 4px 0; }
-  code, pre { font-family: "IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace; } code { color:#fc9; font-size: 13px; }
-  pre { background:#0c1116; border:1px solid var(--line); border-radius:10px; padding:14px 16px; overflow:auto; font-size:13px; color:#b9c6cf; }
-  .foot { margin-top:36px; color:var(--dim); font-size:13px; } .foot a { color:#8ab; }
+  :root{
+    --bg:#07090c; --ink:#c9d4de; --dim:#6b7683; --line:#1b212a;
+    --mint:#34e5a0; --mint-dim:#1c8f66; --cyan:#56c7ff;
+    --mono:"IBM Plex Mono",ui-monospace,Menlo,Consolas,monospace;
+    --sans:"IBM Plex Sans",system-ui,sans-serif;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%}
+  body{
+    background:radial-gradient(1200px 700px at 50% -10%, #10161d 0%, rgba(16,22,29,0) 60%), var(--bg);
+    color:var(--ink); font-family:var(--sans); overflow:hidden;
+  }
+  /* ---------- the monitor ---------- */
+  #rig{position:fixed;inset:0;padding:14px;display:flex}
+  #monitor{flex:1;min-height:0;display:flex;flex-direction:column;border-radius:22px;padding:12px;
+    background:linear-gradient(180deg,#20262e,#0c0f13);
+    box-shadow:inset 0 1px 0 rgba(255,255,255,.10),inset 0 0 0 1px rgba(0,0,0,.55),0 40px 90px -34px rgba(0,0,0,.9);}
+  #monitor::after{content:"";position:absolute;inset:14px;border-radius:22px;pointer-events:none;
+    box-shadow:inset 0 0 0 1px rgba(255,255,255,.05)}
+  #bezel{flex:1;min-height:0;display:flex;flex-direction:column;border-radius:14px;overflow:hidden;
+    background:#080b0e;border:1px solid #05070a}
+
+  /* ---------- header / chrome ---------- */
+  #chrome{display:flex;align-items:center;gap:14px;padding:10px 14px;flex:none;
+    background:linear-gradient(180deg,#12171d,#0c1116);border-bottom:1px solid var(--line)}
+  .brand{display:flex;align-items:center;gap:9px}
+  .glyph{width:22px;height:22px;color:var(--mint);flex:none}
+  .brand b{font:700 14px/1 var(--sans)} .brand b span{color:var(--mint)}
+  .ver{font:500 10px/1 var(--mono);color:var(--dim);border:1px solid var(--line);border-radius:5px;padding:3px 6px;letter-spacing:.04em}
+  .live{display:flex;align-items:center;gap:6px;font:500 11px/1 var(--mono);color:var(--dim)}
+  .led{width:7px;height:7px;border-radius:50%;background:var(--mint);box-shadow:0 0 8px var(--mint);animation:pulse 2.4s ease-in-out infinite}
+  @keyframes pulse{50%{opacity:.35}}
+  #stats{display:flex;gap:8px;margin-left:auto}
+  .chip{display:flex;flex-direction:column;gap:3px;padding:6px 10px;border-radius:9px;
+    background:rgba(255,255,255,.025);border:1px solid var(--line);min-width:74px}
+  .chip .k{font:600 9px/1 var(--mono);letter-spacing:.16em;text-transform:uppercase;color:var(--dim)}
+  .chip .v{font:600 13px/1 var(--mono);color:var(--ink);font-variant-numeric:tabular-nums}
+  .chip .v u{color:var(--dim);text-decoration:none;font-size:10px;font-weight:500}
+  .chip .v.mint{color:var(--mint)} .chip .v.cyan{color:var(--cyan)}
+  .spark{display:block;width:100%;height:12px;margin-top:1px}
+  #pkgbtn{flex:none;display:flex;align-items:center;gap:7px;cursor:pointer;
+    background:linear-gradient(180deg,#123024,#0d211a);color:var(--mint);border:1px solid #1f5a41;
+    border-radius:10px;padding:9px 14px;font:600 12.5px/1 var(--sans);transition:.18s}
+  #pkgbtn:hover{border-color:var(--mint);box-shadow:0 0 22px -6px var(--mint)}
+  #pkgbtn .plus{font:600 15px/1 var(--mono)}
+
+  /* ---------- screen ---------- */
+  #screen{flex:1;min-height:0;position:relative;
+    background:radial-gradient(150% 130% at 50% 0%,#0c1014 0%,#070a0d 100%)}
+  #term{position:absolute;inset:0;padding:10px 12px}
+
+  /* ---------- phones ----------
+     The header is a flex row of four 74px stat chips plus the packages button; on a
+     390px screen that is wider than the viewport, and because flex items do not shrink
+     below their content the WHOLE layout overflowed sideways -- the terminal ran off
+     the right edge. On a phone the terminal is the product: drop the monitor bezel to
+     full-bleed and keep only the brand and the packages button. */
+  @media (max-width: 640px) {
+    #rig{padding:0}
+    #monitor{border-radius:0;padding:0;box-shadow:none}
+    #monitor::after{display:none}
+    #bezel{border-radius:0;border:0}
+    #chrome{gap:10px;padding:8px 11px}
+    #stats,.ver,.live{display:none}
+    #pkgbtn{margin-left:auto;padding:8px 12px}
+    #term{padding:8px 9px}
+  }
+
+  /* ---------- touch keyboard accessory bar ----------
+     Borrowed from /vm/web. A soft keyboard has no Esc, Tab, Ctrl or arrows, which
+     makes a shell unusable on a phone. This floats just above the keyboard (JS sets
+     its bottom offset from the visual viewport) and only exists on coarse-pointer
+     devices, so the desktop layout is untouched. */
+  #keybar{position:fixed;left:0;right:0;bottom:0;z-index:40;display:none;gap:5px;padding:7px 8px;
+    background:linear-gradient(180deg,#131920,#0b0e12);border-top:1px solid var(--line)}
+  #keybar .kb{flex:1 1 0;min-width:0;height:42px;display:flex;align-items:center;justify-content:center;
+    border-radius:9px;border:1px solid #26303a;background:linear-gradient(180deg,#1b222b,#141a21);
+    color:var(--ink);font:500 14px/1 var(--mono);cursor:pointer;
+    user-select:none;-webkit-user-select:none;touch-action:manipulation}
+  #keybar .kb:active{background:#26303a}
+  #keybar .kb.on{background:linear-gradient(180deg,#1c8f66,#136c4c);border-color:var(--mint);color:#04140e}
+
+  /* ---------- packages panel ---------- */
+  #pkgpanel{position:fixed;inset:0;z-index:30;display:none;background:rgba(6,8,10,.72);backdrop-filter:blur(2px)}
+  #pkgpanel.open{display:flex}
+  #pkgbox{margin:auto;width:min(640px,92vw);max-height:82vh;display:flex;flex-direction:column;
+    background:#10151b;border:1px solid #24303c;border-radius:14px;overflow:hidden;box-shadow:0 24px 70px rgba(0,0,0,.6)}
+  #pkghead{display:flex;align-items:center;gap:10px;padding:14px 16px;border-bottom:1px solid #1b232c}
+  #pkghead b{font-size:15px;color:#eaf0f6} #pkghead .sub{color:var(--dim);font-size:12px;font-family:var(--mono)}
+  #pkghead .x{margin-left:auto;cursor:pointer;color:var(--dim);font-size:20px;line-height:1}
+  #pkgsearch{margin:12px 16px 6px;padding:8px 12px;background:#0b0f14;color:var(--ink);
+    border:1px solid #24303c;border-radius:8px;font:13px var(--sans)}
+  #pkglist{overflow-y:auto;padding:6px 10px 14px}
+  .pkg{display:flex;align-items:center;gap:12px;padding:9px 10px;border-radius:8px}
+  .pkg:hover{background:#141b23}
+  .pkg .n{font:600 13px/1 var(--mono);color:#cfe3cf;min-width:96px}
+  .pkg .d{color:var(--dim);flex:1;font-size:12px}
+  .pkg button{cursor:pointer;background:#14261c;color:var(--mint);border:1px solid #2a5;border-radius:6px;padding:4px 13px;font:600 12px var(--sans)}
+  .pkg button:hover{background:#1a3324}
+  .pkg.added button{background:transparent;color:#6a7480;border-color:#2a3540;cursor:default}
+  .pkg.vm .n,.pkg.vm .d{opacity:.5}   /* dim the label, not the build button */
+  .pkg .build{background:#241a0e;color:#e6a94b;border-color:#7a5a1e}
+  .pkg .build:hover{background:#33260f}
+  .pkg .build.busy{color:#8a7a52;border-color:#3a3020;cursor:default}
+
+  /* ---------- themed scrollbars (terminal viewport + panels) ---------- */
+  .xterm-viewport, #pkglist { scrollbar-width: thin; scrollbar-color: #2b3742 transparent; }
+  .xterm-viewport::-webkit-scrollbar, #pkglist::-webkit-scrollbar { width: 11px; height: 11px; }
+  .xterm-viewport::-webkit-scrollbar-track, #pkglist::-webkit-scrollbar-track { background: transparent; }
+  .xterm-viewport::-webkit-scrollbar-thumb, #pkglist::-webkit-scrollbar-thumb {
+    background: #2b3742; border-radius: 8px; border: 3px solid transparent; background-clip: padding-box; }
+  .xterm-viewport::-webkit-scrollbar-thumb:hover, #pkglist::-webkit-scrollbar-thumb:hover {
+    background: var(--mint-dim); background-clip: padding-box; }
+  .xterm-viewport::-webkit-scrollbar-corner, #pkglist::-webkit-scrollbar-corner { background: transparent; }
+
+  @media (max-width:720px){ #stats .chip:nth-child(n+3){display:none} .ver,.live{display:none} }
+  @media (prefers-reduced-motion:reduce){.led{animation:none}}
 </style>
-<main>
-  <h1>wal<span>ios</span></h1>
-  <p class="sub">A real Linux userland compiled to <b>native WebAssembly</b>, run by a JavaScript syscall kernel in this tab. No CPU emulation, no server: every command is a wasm program answering Linux syscalls.</p>
-  <span class="cap" id="cap">checking this browser…</span>
 
-  <a class="card primary" href="browser/terminal.html"><b>Open the terminal</b><p>busybox <code>ash</code> on a real pty: pipes, job control, <code>vi</code>, <code>find</code>; plus <code>python3</code> with numpy, pandas and matplotlib, an in-tab <code>cc</code> (clang 22 + wasm-ld), <code>make</code>, <code>git</code>, <code>jq</code>, <code>lua</code>, <code>qjs</code>, <code>ssh</code>. Files under <code>/root</code> persist in this browser.</p></a>
-  <div class="row">
-    <a class="card" href="browser/selftest.html"><b>Self-test</b><p>Scripted assertions over the kernel: VFS, OPFS persistence, permissions, signals, pipes.</p></a>
-    <a class="card" href="https://github.com/eze-paz/walios"><b>Source</b><p>Kernel workers, pages, the build farm, musl patches and the native test suite.</p></a>
+<div id="rig"><div id="monitor"><div id="bezel">
+  <div id="chrome">
+    <div class="brand">
+      <span class="glyph" aria-hidden="true"><svg width="22" height="22" viewBox="0 0 24 24" fill="none"><path d="M12 2 3 7v10l9 5 9-5V7l-9-5Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><path d="M12 7 7 9.5v5L12 17l5-2.5v-5L12 7Z" fill="currentColor" opacity=".28"/></svg></span>
+      <b>wal<span>ios</span></b>
+    </div>
+    <span class="ver" id="ver">native wasm</span>
+    <span class="live"><span class="led"></span>online</span>
+    <div id="stats">
+      <div class="chip"><span class="k">Mem</span><span class="v mint" id="s-mem">—</span><canvas class="spark" id="sp-mem"></canvas></div>
+      <div class="chip"><span class="k">Speed</span><span class="v cyan" id="s-sys">—</span><canvas class="spark" id="sp-sys"></canvas></div>
+      <div class="chip"><span class="k">Procs</span><span class="v" id="s-proc">—</span></div>
+      <div class="chip"><span class="k">Uptime</span><span class="v" id="s-up">00:00</span></div>
+    </div>
+    <a id="ghlink" href="https://github.com/eze-paz/walios" title="source, README, how it works" style="margin-left:8px;font:500 11px/1 var(--mono);color:var(--dim);text-decoration:none;border:1px solid var(--line);border-radius:9px;padding:9px 10px">GitHub ↗</a>
+    <button id="pkgbtn"><span class="plus">＋</span> packages</button>
   </div>
+  <div id="screen"><div id="term"></div></div>
+</div></div></div>
 
-  <h2>Try</h2>
-<pre>walios:/root$ python3 -c "import numpy as np; print(np.linalg.det(np.eye(3)*2))"
-walios:/root$ printf '#include &lt;stdio.h&gt;\nint main(){puts("hi");}' > a.c && cc a.c -o a && ./a
-walios:/root$ seq 1 1000000 | awk '{s+=$1} END {print s}'
-walios:/root$ git clone https://github.com/jqlang/jq        # needs a WISP relay, see README</pre>
+<div id="pkgpanel"><div id="pkgbox">
+  <div id="pkghead"><b>Packages</b><span class="sub">add an Alpine package as a command</span><span class="x" id="pkgx">✕</span></div>
+  <input id="pkgsearch" placeholder="search 1600+ packages… (bc, bzip2, diffutils, python)">
+  <div id="pkglist"></div>
+</div></div>
 
-  <h2>How it works</h2>
-  <ul>
-    <li>Programs are ordinary Linux builds targeting <code>wasm32-unknown-linux-muslwali</code> (<a href="https://github.com/arjunr2/WALI">WALI</a>): the binary imports <code>wali.SYS_*</code> and the kernel worker answers them with x86-64 struct layouts.</li>
-    <li>Each process runs in its own Web Worker; blocking syscalls park it in <code>Atomics.wait</code> on a shared control block while the never-blocked kernel serves the others. <code>fork()</code> is an Asyncify unwind, memory copy and rewind.</li>
-    <li>The page needs cross-origin isolation for SharedArrayBuffer; on static hosts like GitHub Pages a small service worker adds the COOP/COEP headers and the page reloads once.</li>
-    <li>CPython loads C extensions as PIC wasm side modules through <code>dlopen</code>; package bundles mount lazily on the first import miss.</li>
-    <li>Networking is TCP over a WebSocket (WISP) relay, with relay-side TLS for <code>wget</code> and in-guest OpenSSL for <code>curl</code>, <code>git</code>, <code>ssh</code> and Python.</li>
-  </ul>
-  <p class="foot">Built by <a href="https://github.com/eze-paz">Ezequiel de Paz</a>. MIT licensed; bundled programs keep their own licenses (see NOTICE). Tested in current Chrome and Edge (desktop and Android); Firefox and Safari are untested.</p>
-</main>
+<!-- Shared with sandpie's run_python: same CPython, same package bundles, same env.
+     Source of truth is the sandpie repo (modules/walios-backend.js). -->
+<script src="browser/walios-backend.js?v=19"></script>
+<script src="browser/xterm.js"></script>
+<script src="browser/xterm-addon-fit.js"></script>
+<!-- Cross-origin isolation shim. The worker-per-process engine needs SharedArrayBuffer,
+     which browsers only expose on a cross-origin-isolated page. A static host (GitHub
+     Pages) sends no COOP/COEP headers, so register a service worker that adds them and
+     reload once. ?noisolation skips this. -->
 <script>
-(function () {
-  const el = document.getElementById('cap');
-  const ok = [];
-  const bad = [];
-  (typeof SharedArrayBuffer === 'function' ? ok : bad).push('SharedArrayBuffer');
-  (typeof WebAssembly.Suspending === 'function' ? ok : bad).push('JSPI');
-  ('serviceWorker' in navigator ? ok : bad).push('service worker');
-  (navigator.storage && navigator.storage.getDirectory ? ok : bad).push('OPFS');
-  const canRun = typeof SharedArrayBuffer === 'function' || 'serviceWorker' in navigator;
-  // No SharedArrayBuffer here only means this landing page is not isolated; the terminal
-  // page installs a service worker that adds the headers, so that is not a missing feature.
-  const shown = bad.filter((x) => !(x === 'SharedArrayBuffer' && 'serviceWorker' in navigator));
-  el.textContent = canRun ? 'ready: ' + ok.join(' · ') + (shown.length ? '  (missing: ' + shown.join(', ') + ')' : '') : 'this browser cannot run walios (needs ' + bad.join(', ') + ')';
-  if (!canRun) el.classList.add('bad');
-})();
+if (!crossOriginIsolated && 'serviceWorker' in navigator && !/[?&]noisolation\b/.test(location.search)) {
+  navigator.serviceWorker.register('coi-sw.js').then((r) => {
+    if (sessionStorage.getItem('coi-reloaded')) return;           // one reload only
+    sessionStorage.setItem('coi-reloaded', '1');
+    if (r.active && !navigator.serviceWorker.controller) location.reload();
+    else navigator.serviceWorker.addEventListener('controllerchange', () => location.reload(), { once: true });
+  }).catch(() => {});
+}
 </script>
-</html>
+<script>
+if (typeof SharedArrayBuffer !== 'function') {
+  const el = document.getElementById('term');
+  el.style.cssText = 'padding:24px;font:14px/1.6 "IBM Plex Mono",monospace;color:#b9c6cf';
+  el.textContent = ('serviceWorker' in navigator && !/[?&]noisolation\b/.test(location.search))
+    ? 'walios: enabling cross-origin isolation (one-time reload)…'
+    : 'walios: this page needs cross-origin isolation (SharedArrayBuffer). Serve it with COOP/COEP headers (python3 coi.py) or let coi-sw.js add them.';
+  throw new Error('walios: no SharedArrayBuffer (not cross-origin isolated)');
+}
+const term = new Terminal({ cursorBlink: true, fontSize: 14, fontFamily: '"IBM Plex Mono", Menlo, Consolas, monospace',
+  theme: { background: '#080b0e', foreground: '#b9c6cf', cursor: '#34e5a0',
+           green: '#34e5a0', brightGreen: '#8bf7ab', cyan: '#56c7ff', brightBlack: '#4a5560' }, scrollback: 5000 });
+const fit = new FitAddon.FitAddon(); term.loadAddon(fit);
+term.open(document.getElementById('term')); fit.fit(); term.focus();
+
+let worker = null, running = false;
+const WB = self.WALIOS_BACKEND;   // shared with sandpie's run_python (must come first: everything below reads it)
+const BB = WB.BUSYBOX;            // one busybox for every host; the version (and what changed in it) lives in walios-backend.js
+// Programs: the shared set (WB.manifest: busybox, python, lua, qjs/qjsc, ssh, make, rustc, clang).
+// Nothing host-specific is left.
+const MANIFEST = WB.manifest(BB);
+
+
+// FULL origin OPFS root, so the shell can see/edit this app's files (Pyodide
+// /files, conversations, ...). No subdir sandbox — `rm` here really deletes them.
+const opfsSab = new SharedArrayBuffer(32 + (1 << 20));
+const opfsWorker = new Worker('browser/opfs-worker.js?v=' + WB.WORKER_V);
+// Everything the shell writes into OPFS has to enter the app's sync ledger, or the
+// next dropbox.js cleanup deletes it as an orphan -- that is what wiped a `git clone`
+// down to its bare directory tree. The worker reports paths (it has no localStorage);
+// marking happens here, through the module dropbox.js itself uses.
+// Tombstones: paths the shell deleted. The worker suppresses them from cloud-index
+// listings so a deleted file does not reappear as a Dropbox placeholder, and this
+// keeps the set across reloads (a Worker has no storage). Cleared once the file is
+// really gone from the cloud index, or when something recreates the path.
+const TOMB_KEY = 'walios-deleted';
+const readTombs = () => { try { return JSON.parse(localStorage.getItem(TOMB_KEY) || '[]'); } catch (_) { return []; } };
+const writeTombs = (a) => { try { localStorage.setItem(TOMB_KEY, JSON.stringify(a.slice(-5000))); } catch (_) {} };
+function addTombs(rels) { const t = new Set(readTombs()); for (const r of rels) t.add(String(r).replace(/^\/+/, '')); writeTombs([...t]); }
+function dropTombs(rels) { const t = new Set(readTombs()); let n = 0; for (const r of rels) if (t.delete(String(r).replace(/^\/+/, ''))) n++; if (n) writeTombs([...t]); }
+opfsWorker.postMessage({ t: 'tombstones', rels: readTombs() });
+
+opfsWorker.addEventListener('message', (ev) => {
+  const m = ev.data || {};
+  // No cloud sync on this build: OPFS (/root) is this browser's own persistent disk.
+  if (m.t === 'opfs-changed' && m.rels) dropTombs(m.rels);
+  else if (m.t === 'opfs-removed' && m.rels) addTombs(m.rels);
+});
+opfsWorker.postMessage({ t: 'sab', sab: opfsSab, dbxToken: null, dbxBeta: false });
+
+// WISP socket bridge: a persistent sibling worker owns the WebSocket to the relay,
+// giving the shell real TCP/UDP/ICMP (wget, nc, telnet, ssh, ping).
+// A static host (GitHub Pages) has no relay, so networking is opt-in: pass
+// ?wisp=wss://your-relay/wisp once (remembered in localStorage) or run relay/
+// wisp-standalone.mjs locally. Without one, sockets fail with ECONNREFUSED.
+const RELAY_URL = (() => {
+  const q = new URLSearchParams(location.search).get('wisp');
+  try { if (q !== null) { if (q) localStorage.setItem('walios-wisp', q); else localStorage.removeItem('walios-wisp'); } } catch (_) {}
+  try { return q || localStorage.getItem('walios-wisp') || ''; } catch (_) { return q || ''; }
+})();
+const wispSab = RELAY_URL ? new SharedArrayBuffer(32 + 65536) : null;
+if (wispSab) { const wispWorker = new Worker('browser/wisp-worker.js'); wispWorker.postMessage({ t: 'sab', sab: wispSab, url: RELAY_URL }); }
+
+// ---- live header gauges. UPTIME ticks page-side; MEM/SPEED/PROCS come from the
+// worker's periodic {t:'stats'} (total wasm memory, syscall counter, live procs). ----
+let bootAt = 0, lastSys = null, lastMs = 0;
+const memHist = [], sysHist = [];
+function fmtSys(rate){ return rate >= 1e6 ? (rate/1e6).toFixed(1)+' M/s' : rate >= 1e3 ? Math.round(rate/1e3)+' K/s' : Math.round(rate)+' /s'; }
+function setVal(id, num, unit){ const e = document.getElementById(id); e.firstChild ? (e.firstChild.nodeValue = num) : (e.textContent = num);
+  if (unit && !e.querySelector('u')) { const u = document.createElement('u'); u.textContent = ' ' + unit; e.appendChild(u); } }
+function drawSpark(id, hist, accent){ const c = document.getElementById(id); if (!c || !hist.length) return;
+  const dpr = devicePixelRatio||1, w = c.clientWidth||70, h = c.clientHeight||12;
+  c.width = w*dpr; c.height = h*dpr; const x = c.getContext('2d'); x.setTransform(dpr,0,0,dpr,0,0);
+  const max = Math.max(...hist, 1), n = hist.length, X = i => i/(Math.max(n-1,1))*w, Y = v => h - (v/max)*h*0.92 - 1;
+  x.clearRect(0,0,w,h);
+  x.beginPath(); hist.forEach((v,i)=>{ i?x.lineTo(X(i),Y(v)):x.moveTo(X(i),Y(v)); }); x.lineTo(w,h); x.lineTo(0,h); x.closePath();
+  const g = x.createLinearGradient(0,0,0,h); g.addColorStop(0,accent+'55'); g.addColorStop(1,accent+'00'); x.fillStyle = g; x.fill();
+  x.beginPath(); hist.forEach((v,i)=>{ i?x.lineTo(X(i),Y(v)):x.moveTo(X(i),Y(v)); }); x.strokeStyle = accent; x.lineWidth = 1.25; x.stroke();
+}
+function onStats(m){
+  const mb = Math.round(m.mem / 1048576); setVal('s-mem', mb, 'MB');
+  memHist.push(mb); if (memHist.length > 26) memHist.shift(); drawSpark('sp-mem', memHist, '#34e5a0');
+  setVal('s-proc', m.procs);
+  if (lastSys !== null && m.ms > lastMs) { const rate = (m.syscalls - lastSys) / ((m.ms - lastMs)/1000);
+    setVal('s-sys', fmtSys(Math.max(0,rate))); sysHist.push(Math.max(0,rate)); if (sysHist.length > 26) sysHist.shift(); drawSpark('sp-sys', sysHist, '#56c7ff'); }
+  lastSys = m.syscalls; lastMs = m.ms;
+}
+setInterval(() => { if (!bootAt) return; const t = Math.floor((performance.now()-bootAt)/1000);
+  const h = Math.floor(t/3600), mm = String(Math.floor(t/60)%60).padStart(2,'0'), ss = String(t%60).padStart(2,'0');
+  document.getElementById('s-up').textContent = h ? h+':'+mm+':'+ss : mm+':'+ss; }, 1000);
+
+function boot() {
+  running = true; bootAt = performance.now();
+  worker = new Worker('browser/wali-worker.js?v=' + WB.WORKER_V);
+  worker.postMessage({ t: 'opfs-sab', sab: opfsSab });
+  if (wispSab) worker.postMessage({ t: 'wisp-sab', sab: wispSab });
+  // The SAME guest->host channel the walios() tool uses (walios-backend.js). It pulls
+  // <base64 json> frames out of the pty stream, answers them on stdin, and suppresses the
+  // pty's echo of that answer, which would otherwise print a line of base64 on screen.
+  // ONE engine: every process runs on its own worker and the kernel (never blocked) does
+  // its own lazy fetching -- there are no engine flags, stdin/mount bridges or
+  // need-module/need-tar asks any more. Works in every cross-origin-isolated browser.
+  // The shared package index (repo + pkgcache + catalog, WB.pkgIndex): backs the frame
+  // channel's 'pkg' op so `apk add` works in this shell too, and seeds `apk` + its TSV
+  // into the guest below. The manifest merge further down stays as it was.
+  const pkgIdx = WB.pkgIndex('browser/', MANIFEST);
+  const chan = WB.hostChannel({
+    worker,
+    onScreen: (t) => term.write(buildWatch ? consumeBuildSentinels(t) : t),
+    pkgs: pkgIdx,          // `apk add` from the shell, same index the Packages panel shows
+  });
+  worker.onmessage = (ev) => {
+    const m = ev.data;
+    if (m.t === 'tar-mounted') { chan.mounted(m); return; }
+    if (m.t === 'hostcall') { chan.hostcall(m); return; }     // a /dev/hostcall request (apk add, soffice, ...)
+    if (m.t === 'out') { if (m.fd === 2 && /^\[host\]/.test(m.s)) { console.debug(m.s.trim()); return; }
+      if (m.fd === 1) { chan.feed(m.s); return; }
+      term.write(buildWatch ? consumeBuildSentinels(m.s) : m.s); }
+    else if (m.t === 'stats') { onStats(m); }
+    else if (m.t === 'exit') { running = false; term.write('\r\n\x1b[90m[shell exited (' + m.code + ') — reloading…]\x1b[0m\r\n'); setTimeout(() => location.reload(), 900); }
+  };
+  // Seed the VFS with what only the terminal needs: the build-pkg script and the xz
+  // decoder SOURCE (build-pkg compiles it in-tab on first .tar.xz -- same-origin fetch).
+  // Everything every host needs -- TLS trust + gitconfig, apk + its index, python's
+  // import-miss shim, the package manifest and lazy bundles, the env -- comes from
+  // WB.runMessage, the same call the walios() tool and the warm REPL make, so the
+  // terminal cannot drift from them again (which is how this file spent months broken).
+  const blobs = {};   // cc/wfetch/wextract/build-pkg come from the shared boot (WB.runMessage -> /walios/bin/)
+  const seed = (url, path) => fetch(url).then(r => r.ok ? r.arrayBuffer() : null).then(buf => { if (buf) blobs[path] = new Uint8Array(buf); }).catch(() => {});
+  // The Packages panel marks binaries other users compiled in-tab (server pkgcache) as
+  // already available; they are on PATH at boot through the shared index.
+  window.__cachedPkgs = new Set();
+  const markCached = pkgIdx.then((idx) => { for (const [n, e] of Object.entries(idx.pk)) if (e.src === 'pkgcache') window.__cachedPkgs.add(n); }).catch(() => {});
+  Promise.all([seed('browser/xzminidec.c', '/usr/lib/xzminidec.c'), markCached])
+    .then(() => WB.runMessage({ kind: 'terminal', base: 'browser/', busybox: BB, pkgs: pkgIdx, manifest: MANIFEST,
+      blobs, argv: ['busybox', 'ash', '-i'], pty: true, cols: term.cols, rows: term.rows }))
+    .then((msg) => {
+      // The CA bundle is security-critical and fetched best-effort: if /walios/cacert.pem
+      // is ever missing again, HTTPS breaks silently (git, curl, openssl, python's ssl all
+      // point at this path). Surface it loudly instead.
+      if (!msg.blobs['/etc/ssl/certs/ca-certificates.crt'])
+        console.warn('[walios] cacert.pem missing (/walios/cacert.pem 404?) -- HTTPS certificate verification will fail for all apps');
+      worker.postMessage(msg);
+    })
+    .catch((e) => term.write('\r\n\x1b[91m[walios] boot failed: ' + ((e && e.message) || e) + '\x1b[0m\r\n'));
+}
+function sendIn(d) { if (!worker || !running) return; worker.postMessage({ t: 'stdin', data: d }); }
+let kbCtrl = (d) => d;      // the touch keybar's sticky Ctrl rewrites the next keystroke
+term.onData(d => sendIn(kbCtrl(d)));
+// The webfont arrives AFTER the first fit(). xterm had measured the fallback glyph
+// (7.69px, vs IBM Plex Mono's 8.40px at 14px), so it claimed 48 columns where only 44
+// fit -- the right edge of every line was clipped, and the shell, handed that column
+// count, wrapped in the invisible region. fit() alone will not fix it: the cell size is
+// cached until something re-measures. Re-measure once the fonts have settled.
+if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => {
+  try { term._core._charSizeService.measure(); }        // private: hence the fallback
+  catch { term.options.fontFamily += ', monospace'; }   // public nudge, same effect
+  try { fit.fit(); if (worker && running) worker.postMessage({ t: 'winsize', cols: term.cols, rows: term.rows }); } catch {}
+});
+
+// ---- touch keyboard accessory bar (borrowed from /vm/web/term.js) ----
+// Each key goes straight through sendIn, and taps preventDefault on pointerdown so
+// xterm's own textarea keeps focus -- otherwise tapping a key closes the keyboard.
+(function keybar() {
+  if (!matchMedia('(pointer: coarse)').matches) return;
+  const ESC = '';
+  let armed = false, ctrlBtn = null;
+  const setCtrl = (on) => { armed = on; if (ctrlBtn) ctrlBtn.classList.toggle('on', on); };
+  // Ctrl+key for the NEXT keystroke only: @A-Z[\]^_ fold to 0x00-0x1f, space is NUL,
+  // ? is DEL. Anything else passes through untouched rather than being swallowed.
+  kbCtrl = (d) => {
+    if (!armed || d.length !== 1) return d;
+    setCtrl(false);
+    const c = d.toUpperCase().charCodeAt(0);
+    if (c >= 64 && c <= 95) return String.fromCharCode(c & 31);
+    if (d === ' ') return ' ';
+    if (d === '?') return '';
+    return d;
+  };
+  const keys = [
+    { label: '⌄', aria: 'Hide keyboard', act: () => { setCtrl(false); term.blur(); } },
+    { label: 'esc', send: ESC },
+    { label: 'tab', send: '	' },
+    { label: 'ctrl', ctrl: true },
+    { label: '↑', aria: 'Up', send: ESC + '[A' },
+    { label: '↓', aria: 'Down', send: ESC + '[B' },
+    { label: '←', aria: 'Left', send: ESC + '[D' },
+    { label: '→', aria: 'Right', send: ESC + '[C' },
+  ];
+  const bar = document.createElement('div');
+  bar.id = 'keybar';
+  for (const k of keys) {
+    const b = document.createElement('div');
+    b.className = 'kb'; b.textContent = k.label; b.setAttribute('role', 'button');
+    if (k.aria) b.setAttribute('aria-label', k.aria);
+    if (k.ctrl) ctrlBtn = b;
+    b.addEventListener('pointerdown', (e) => {
+      e.preventDefault();                                  // keep the keyboard open
+      if (k.act) k.act();
+      else if (k.ctrl) setCtrl(!armed);
+      else if (k.send) { setCtrl(false); sendIn(k.send); }
+    });
+    bar.appendChild(b);
+  }
+  document.body.appendChild(bar);
+
+  // Visibility tracks whether the keyboard is actually UP, not focus: xterm's textarea
+  // stays focused after the keyboard is dismissed, so keying off focus leaves the bar
+  // showing forever. The keyboard overlays the layout viewport, so a shrunken visual
+  // viewport is the signal. The 120px threshold clears the URL-bar collapse (~60-90px).
+  const rig = document.getElementById('rig');
+  const update = () => {
+    const vv = window.visualViewport;
+    const gap = vv ? window.innerHeight - vv.height - vv.offsetTop : 0;
+    const open = gap > 120 && document.activeElement === term.textarea;
+    bar.style.display = open ? 'flex' : 'none';
+    bar.style.bottom = open ? Math.max(0, gap) + 'px' : '0px';
+    // Lift the whole rig clear of the keyboard AND the bar. Without this the prompt
+    // sits behind the keyboard: xterm keeps the layout viewport's height, so its last
+    // rows -- the ones you are typing on -- are the ones covered.
+    rig.style.bottom = open ? (gap + bar.offsetHeight) + 'px' : '';
+    try { fit.fit(); if (worker && running) worker.postMessage({ t: 'winsize', cols: term.cols, rows: term.rows }); } catch {}
+  };
+  term.textarea.addEventListener('focus', update);
+  term.textarea.addEventListener('blur', () => { setCtrl(false); update(); });
+  const vv = window.visualViewport;
+  if (vv) { vv.addEventListener('resize', update); vv.addEventListener('scroll', update); }
+})();
+
+window.addEventListener('resize', () => { try { fit.fit(); if (worker && running) worker.postMessage({ t: 'winsize', cols: term.cols, rows: term.rows }); drawSpark('sp-mem', memHist, '#34e5a0'); drawSpark('sp-sys', sysHist, '#56c7ff'); } catch {} });
+
+boot();   // start the kernel + shell (everything it needs above is defined; the panel below is UI only)
+
+// ---- Packages panel: browse the aports catalog, add one as a live shell command ----
+const pkgpanel = document.getElementById('pkgpanel'), pkglist = document.getElementById('pkglist'),
+      pkgsearch = document.getElementById('pkgsearch');
+const added = new Set(), builtin = new Set(Object.keys(MANIFEST));
+let CAT = null;
+function renderPkgs(q) {
+  if (!CAT) return;
+  q = (q || '').toLowerCase();
+  const match = CAT.filter(p => !q || p.name.toLowerCase().includes(q) || (p.desc || '').toLowerCase().includes(q));
+  const wasm = match.filter(p => p.tier === 'wasm'), vm = match.filter(p => p.tier !== 'wasm');
+  const rows = [...wasm, ...vm.slice(0, 80)].slice(0, 200);
+  pkglist.innerHTML = '';
+  for (const p of rows) {
+    const runnable = p.tier === 'wasm', bi = builtin.has(p.name),
+          on = added.has(p.name) || (window.__cachedPkgs && window.__cachedPkgs.has(p.name));  // server-cached = already available
+    const row = document.createElement('div');
+    row.className = 'pkg' + (runnable ? '' : ' vm') + (on || bi ? ' added' : '');
+    row.innerHTML = `<span class="n"></span><span class="d"></span>`;
+    row.querySelector('.n').textContent = p.name;
+    row.querySelector('.d').textContent = (p.desc || '') + (runnable ? '' : ' — not built to wasm yet');
+    if (runnable) { const b = document.createElement('button');
+      b.textContent = bi ? 'built-in' : on ? '✓ added' : 'add';
+      if (!bi && !on) b.onclick = () => addPkg(p, row, b);
+      row.appendChild(b);
+    } else if (!bi) {   // not ported to wasm — offer an in-tab build (fetch APKBUILD+source, cc+make)
+      const b = document.createElement('button'); b.className = 'build';
+      b.textContent = on ? '✓ built' : 'build';
+      if (!on) b.onclick = () => buildPkg(p, row, b);
+      row.appendChild(b);
+    }
+    pkglist.appendChild(row);
+  }
+}
+// The build button drives build-pkg (from the shared boot) in the shell and watches its output for the
+// __BP_OK__/__BP_FAIL__ sentinels (stripped from the terminal) to update the row.
+let buildWatch = null;   // { name, row, btn } while a build is in flight
+function buildPkg(p, row, b) {
+  if (buildWatch) { term.write(`\r\n\x1b[93m(a build is already running — wait for it to finish)\x1b[0m\r\n`); return; }
+  buildWatch = { name: p.name, row, btn: b };
+  b.classList.add('busy'); b.textContent = 'building…';
+  closePkgs();
+  term.write(`\r\n\x1b[90m[build] compiling \x1b[1m${p.name}\x1b[22m in-tab — this fetches the APKBUILD + source and runs the wasm clang…\x1b[0m\r\n`);
+  if (worker && running) worker.postMessage({ t: 'stdin', data: `build-pkg ${p.name}\n` });
+}
+// Consume build sentinels from a chunk of shell output; returns the text with them removed.
+function consumeBuildSentinels(s) {
+  if (!buildWatch) return s;
+  const okRe = /__BP_OK__ (\S+)/, failRe = /__BP_FAIL__ (\S+)/;
+  const mo = s.match(okRe), mf = s.match(failRe);
+  const finish = (ok) => {
+    const w = buildWatch; buildWatch = null;
+    if (!w) return;
+    if (ok) { added.add(w.name); w.btn.textContent = '✓ built'; w.btn.classList.remove('busy');
+      term.write(`\r\n\x1b[92m＋ built \x1b[1m${w.name}\x1b[22m — run it: \x1b[1m${w.name}\x1b[0m\r\n`);
+      uploadBuiltPkg(w.name); }
+    else { w.btn.classList.remove('busy'); w.btn.textContent = 'retry';
+      term.write(`\r\n\x1b[91m✗ build failed for \x1b[1m${w.name}\x1b[22m — see the log above.\x1b[0m\r\n`); }
+  };
+  if (mo) { s = s.replace(okRe, ''); finish(true); }
+  else if (mf) { s = s.replace(failRe, ''); finish(false); }
+  return s;
+}
+// Static host: there is no server package cache, so a package built in-tab lives in
+// this tab only (the OPFS disk keeps your files, not /bin).
+function uploadBuiltPkg(name) {
+  term.write(`
+[90m[cache] ${name} is available in this session (static host: no shared package cache).[0m
+`);
+}
+function addPkg(p, row, b) {
+  if (worker) worker.postMessage({ t: 'add-pkg', name: p.name, url: p.wasm,
+    lazyTars: p.name === 'python' ? { [p.wasm]: [['pylib.tar.gz', '/py']] } : undefined });
+  added.add(p.name); row.classList.add('added'); b.textContent = '✓ added';
+  term.write(`\r\n\x1b[92m＋ added \x1b[1m${p.name}\x1b[22m — run it: \x1b[1m${p.name}\x1b[0m\r\n`);
+}
+function openPkgs() {
+  pkgpanel.classList.add('open'); pkgsearch.focus();
+  if (CAT) return;
+  fetch('browser/aports-catalog.json').then(r => r.json()).then(c => { CAT = c;
+    document.querySelector('#pkghead .sub').textContent = `${c.filter(p => p.tier === 'wasm').length} runnable of ${c.length}`;
+    renderPkgs(''); }).catch(e => { pkglist.innerHTML = '<div style="padding:14px;color:#f9b">catalog unavailable: ' + e + '</div>'; });
+}
+function closePkgs() { pkgpanel.classList.remove('open'); term.focus(); }
+document.getElementById('pkgbtn').onclick = openPkgs;
+document.getElementById('pkgx').onclick = closePkgs;
+pkgpanel.onclick = e => { if (e.target === pkgpanel) closePkgs(); };
+pkgsearch.addEventListener('input', () => renderPkgs(pkgsearch.value));
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && pkgpanel.classList.contains('open')) closePkgs(); });
+</script>
