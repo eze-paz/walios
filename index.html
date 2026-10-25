@@ -62,7 +62,10 @@ walios:/root$ git clone https://github.com/jqlang/jq        # needs a WISP relay
   ('serviceWorker' in navigator ? ok : bad).push('service worker');
   (navigator.storage && navigator.storage.getDirectory ? ok : bad).push('OPFS');
   const canRun = typeof SharedArrayBuffer === 'function' || 'serviceWorker' in navigator;
-  el.textContent = canRun ? 'ready: ' + ok.join(' · ') + (bad.length ? '  (missing: ' + bad.join(', ') + ')' : '') : 'this browser cannot run walios (needs ' + bad.join(', ') + ')';
+  // No SharedArrayBuffer here only means this landing page is not isolated; the terminal
+  // page installs a service worker that adds the headers, so that is not a missing feature.
+  const shown = bad.filter((x) => !(x === 'SharedArrayBuffer' && 'serviceWorker' in navigator));
+  el.textContent = canRun ? 'ready: ' + ok.join(' · ') + (shown.length ? '  (missing: ' + shown.join(', ') + ')' : '') : 'this browser cannot run walios (needs ' + bad.join(', ') + ')';
   if (!canRun) el.classList.add('bad');
 })();
 </script>
