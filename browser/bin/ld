@@ -1,0 +1,24 @@
+#!/bin/sh
+# ld -- the linker under its POSIX name. walios' linker is wasm-ld (clang.wasm dispatching
+# on argv[0]); nothing was called `ld`, so libtool's AC_PROG_LD searched $PATH, found
+# nothing and aborted configure with "no acceptable ld found in $PATH".
+#
+# Not a manifest alias: LLVM's lld picks its flavour from argv[0], and bare `ld` makes it
+# guess (and fail). The name has to map onto wasm-ld explicitly.
+#
+# Absolutises like bin/ar and bin/cc, for the same reason: clang.wasm is a WASI binary
+# whose wasi-libc has no cwd, so relative paths resolve against "/".
+here=$(pwd)
+abs() { case "$1" in /*|'') printf %s "$1" ;; *) printf %s "$here/$1" ;; esac; }
+n=$#; i=0; want=0
+while [ $i -lt $n ]; do
+  a=$1; shift; i=$((i+1))
+  if [ $want = 1 ]; then set -- "$@" "$(abs "$a")"; want=0; continue; fi
+  case "$a" in
+    -o|-L|-l|--sysroot) set -- "$@" "$a"; want=1 ;;
+    -L?*) set -- "$@" "-L$(abs "${a#-L}")" ;;
+    -*)   set -- "$@" "$a" ;;
+    *)    if [ -e "$a" ]; then set -- "$@" "$(abs "$a")"; else set -- "$@" "$a"; fi ;;
+  esac
+done
+exec wasm-ld "$@"

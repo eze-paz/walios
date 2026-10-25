@@ -1,0 +1,12 @@
+#!/bin/sh
+# objdump -- absolutising wrapper around llvm-objdump. See bin/nm for the whole story:
+# clang.wasm is a WASI binary, its wasi-libc has no cwd, and relative paths resolve
+# against "/", so `objdump -h foo.o` failed while the absolute form worked.
+here=$(pwd)
+abs() { case "$1" in /*|'') printf %s "$1" ;; *) printf %s "$here/$1" ;; esac; }
+n=$#; i=0
+while [ $i -lt $n ]; do
+  a=$1; shift; i=$((i+1))
+  case "$a" in -*) set -- "$@" "$a" ;; *) set -- "$@" "$(abs "$a")" ;; esac
+done
+exec llvm-objdump "$@"

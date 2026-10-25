@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>walios — Linux userland as native WebAssembly</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="walios runs a real Linux userland (busybox, CPython, clang, git, ssh) compiled to WebAssembly, with a JavaScript syscall kernel in your browser tab. No emulator, no server.">
+<style>
+  :root { color-scheme: dark; --bg:#07090c; --ink:#c9d4de; --dim:#7b8794; --line:#1b212a; --mint:#34e5a0; --cyan:#56c7ff; }
+  * { box-sizing: border-box; }
+  body { margin:0; background: radial-gradient(1100px 600px at 50% -10%, #10161d 0%, rgba(16,22,29,0) 60%), var(--bg); color: var(--ink); font: 15px/1.6 "IBM Plex Sans", system-ui, sans-serif; }
+  main { max-width: 820px; margin: 0 auto; padding: 56px 20px 80px; }
+  h1 { font-size: 40px; margin: 0 0 4px; letter-spacing: -0.5px; } h1 span { color: var(--mint); }
+  .sub { color: var(--dim); margin: 0 0 22px; font-size: 17px; }
+  .cap { display:inline-block; font: 500 12px/1 ui-monospace, Menlo, Consolas, monospace; color:#9fe0a0; border:1px solid #244; background:#0f1a12; border-radius:999px; padding:6px 12px; margin-bottom:28px; }
+  .cap.bad { color:#f9b; border-color:#533; background:#1a0f12; }
+  a.card { display:block; text-decoration:none; color:inherit; border:1px solid var(--line); border-radius:14px; padding:20px 22px; background:#0f141a; margin-bottom:14px; transition:border-color .15s; }
+  a.card:hover { border-color:#2a5a46; } a.primary { background:#0e1a15; border-color:#1c8f66; }
+  a.card b { color:#eaf0f6; font-size:19px; } a.primary b::after { content:" →"; color:var(--mint); }
+  a.card p { margin:6px 0 0; color:var(--dim); font-size:14px; }
+  .row { display:grid; gap:14px; grid-template-columns: 1fr 1fr; } .row a.card { margin-bottom:0; }
+  @media (max-width:640px) { .row { grid-template-columns:1fr; } h1 { font-size:32px; } }
+  h2 { font-size: 14px; letter-spacing:.14em; text-transform:uppercase; color: var(--dim); margin: 40px 0 12px; }
+  ul { padding-left: 20px; } li { margin: 4px 0; }
+  code, pre { font-family: "IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace; } code { color:#fc9; font-size: 13px; }
+  pre { background:#0c1116; border:1px solid var(--line); border-radius:10px; padding:14px 16px; overflow:auto; font-size:13px; color:#b9c6cf; }
+  .foot { margin-top:36px; color:var(--dim); font-size:13px; } .foot a { color:#8ab; }
+</style>
+<main>
+  <h1>wal<span>ios</span></h1>
+  <p class="sub">A real Linux userland compiled to <b>native WebAssembly</b>, run by a JavaScript syscall kernel in this tab. No CPU emulation, no server: every command is a wasm program answering Linux syscalls.</p>
+  <span class="cap" id="cap">checking this browser…</span>
+
+  <a class="card primary" href="browser/terminal.html"><b>Open the terminal</b><p>busybox <code>ash</code> on a real pty: pipes, job control, <code>vi</code>, <code>find</code>; plus <code>python3</code> with numpy, pandas and matplotlib, an in-tab <code>cc</code> (clang 22 + wasm-ld), <code>make</code>, <code>git</code>, <code>jq</code>, <code>lua</code>, <code>qjs</code>, <code>ssh</code>. Files under <code>/root</code> persist in this browser.</p></a>
+  <div class="row">
+    <a class="card" href="browser/selftest.html"><b>Self-test</b><p>Scripted assertions over the kernel: VFS, OPFS persistence, permissions, signals, pipes.</p></a>
+    <a class="card" href="https://github.com/eze-paz/walios"><b>Source</b><p>Kernel workers, pages, the build farm, musl patches and the native test suite.</p></a>
+  </div>
+
+  <h2>Try</h2>
+<pre>walios:/root$ python3 -c "import numpy as np; print(np.linalg.det(np.eye(3)*2))"
+walios:/root$ printf '#include &lt;stdio.h&gt;\nint main(){puts("hi");}' > a.c && cc a.c -o a && ./a
+walios:/root$ seq 1 1000000 | awk '{s+=$1} END {print s}'
+walios:/root$ git clone https://github.com/jqlang/jq        # needs a WISP relay, see README</pre>
+
+  <h2>How it works</h2>
+  <ul>
+    <li>Programs are ordinary Linux builds targeting <code>wasm32-unknown-linux-muslwali</code> (<a href="https://github.com/arjunr2/WALI">WALI</a>): the binary imports <code>wali.SYS_*</code> and the kernel worker answers them with x86-64 struct layouts.</li>
+    <li>Each process runs in its own Web Worker; blocking syscalls park it in <code>Atomics.wait</code> on a shared control block while the never-blocked kernel serves the others. <code>fork()</code> is an Asyncify unwind, memory copy and rewind.</li>
+    <li>The page needs cross-origin isolation for SharedArrayBuffer; on static hosts like GitHub Pages a small service worker adds the COOP/COEP headers and the page reloads once.</li>
+    <li>CPython loads C extensions as PIC wasm side modules through <code>dlopen</code>; package bundles mount lazily on the first import miss.</li>
+    <li>Networking is TCP over a WebSocket (WISP) relay, with relay-side TLS for <code>wget</code> and in-guest OpenSSL for <code>curl</code>, <code>git</code>, <code>ssh</code> and Python.</li>
+  </ul>
+  <p class="foot">Built by <a href="https://github.com/eze-paz">Ezequiel de Paz</a>. MIT licensed; bundled programs keep their own licenses (see NOTICE). Tested in current Chrome and Edge (desktop and Android); Firefox and Safari are untested.</p>
+</main>
+<script>
+(function () {
+  const el = document.getElementById('cap');
+  const ok = [];
+  const bad = [];
+  (typeof SharedArrayBuffer === 'function' ? ok : bad).push('SharedArrayBuffer');
+  (typeof WebAssembly.Suspending === 'function' ? ok : bad).push('JSPI');
+  ('serviceWorker' in navigator ? ok : bad).push('service worker');
+  (navigator.storage && navigator.storage.getDirectory ? ok : bad).push('OPFS');
+  const canRun = typeof SharedArrayBuffer === 'function' || 'serviceWorker' in navigator;
+  el.textContent = canRun ? 'ready: ' + ok.join(' · ') + (bad.length ? '  (missing: ' + bad.join(', ') + ')' : '') : 'this browser cannot run walios (needs ' + bad.join(', ') + ')';
+  if (!canRun) el.classList.add('bad');
+})();
+</script>
+</html>

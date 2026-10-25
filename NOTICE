@@ -1,0 +1,26 @@
+walios bundles or builds on third-party work. The source in this repository
+(kernel workers, pages, farm and host scripts, tests) is MIT, see LICENSE.
+The prebuilt binaries under browser/ are compiled from these projects and keep
+their own licenses:
+
+- WALI (WebAssembly Linux Interface) and wali-musl: MIT.
+  https://github.com/arjunr2/WALI  (the ABI, syscall numbering and musl port;
+  musl itself is MIT). walios's musl patches are under musl-patches/.
+- BusyBox: GPL-2.0 (busybox.wasm, browser/pkgs/busybox.wasm). Built by
+  farm/build-busybox-wali.sh from unmodified upstream sources.
+- CPython 3.14: PSF-2.0 (python_cxx.wasm, pylib.tar.gz).
+- LLVM / clang / lld 22: Apache-2.0 with LLVM exception (clang.wasm,
+  llvm-resources.tar.gz; core build by the YoWASP project, converted to shared
+  memory with scripts in this repo).
+- OpenSSL 3.0: Apache-2.0 (inside wali-sysroot.tar.gz, ssh.wasm, pkgcache/*).
+- OpenSSH 9.9: BSD (ssh.wasm). git 2.45: GPL-2.0 (pkgcache/git*.wasm).
+  curl: curl license. jq: MIT. oniguruma: BSD. GNU make, sed, grep, tar,
+  findutils, diffutils, m4, patch, cpio, gzip, bc, which: GPL (browser/pkgs/).
+- Lua 5.4: MIT (lua.wasm). QuickJS-ng: MIT (qjs.wasm, qjsc.wasm).
+- numpy, pandas, matplotlib, Pillow, lxml, python-docx, openpyxl, reportlab and
+  the other wheels in walios-*.tar.gz: their respective BSD/MIT/PSF licenses.
+- xterm.js: MIT. Mozilla CA bundle (cacert.pem): MPL-2.0.
+- xzminidec.c: public domain (from the XZ Embedded / xz-utils project).
+
+Source for GPL components is unmodified upstream; the build recipes are in
+farm/ and the tarball versions are recorded there.

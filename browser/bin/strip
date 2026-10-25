@@ -1,0 +1,40 @@
+#!/bin/sh
+# strip -- absolutising wrapper around llvm-strip. See bin/nm for why this exists.
+#
+# Unlike nm/objdump, strip WRITES: -o names an output path, so it has to be absolutised
+# too, or the stripped copy lands at / instead of the cwd (the same trap bin/cc hit with
+# its own -o, where `make install` quietly wrote binaries into the root).
+#
+# It also swallows ONE specific failure. LLVM ends a strip by setting permissions on the
+# output, and WASI has no chmod, so llvm-strip reports
+#     llvm-strip: error: 'out.o': Function not implemented
+# and exits 1 -- AFTER doing the whole job. Measured: the output was written (377 bytes)
+# and a stripped program still ran and returned the right value. That exit 1 breaks
+# `make install -s` and anything that checks strip's status, for a step that succeeded.
+#
+# So: if the only error is that one AND the output exists, report success. Any other
+# message, or a missing output, still fails loudly -- the point is to stop reporting a
+# completed strip as a failure, not to stop reporting failures.
+here=$(pwd)
+abs() { case "$1" in /*|'') printf %s "$1" ;; *) printf %s "$here/$1" ;; esac; }
+n=$#; i=0; want=0; out=; last=
+while [ $i -lt $n ]; do
+  a=$1; shift; i=$((i+1))
+  if [ $want = 1 ]; then out=$(abs "$a"); set -- "$@" "$out"; want=0; continue; fi
+  case "$a" in
+    -o) set -- "$@" "$a"; want=1 ;;
+    -*) set -- "$@" "$a" ;;
+    *)  last=$(abs "$a"); set -- "$@" "$last" ;;
+  esac
+done
+# With no -o, llvm-strip rewrites the input in place, so that is the file to check.
+[ -n "$out" ] || out=$last
+
+err=$(mktemp 2>/dev/null || echo /tmp/.strip.$$)
+llvm-strip "$@" 2>"$err"; rc=$?
+if [ $rc -ne 0 ] && [ -s "$out" ] \
+   && grep -q "Function not implemented" "$err" \
+   && [ "$(grep -vc "Function not implemented" "$err")" = "0" ]; then
+  rm -f "$err"; exit 0
+fi
+cat "$err" >&2; rm -f "$err"; exit $rc

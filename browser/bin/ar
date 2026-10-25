@@ -1,0 +1,32 @@
+#!/bin/sh
+# ar -- absolutising wrapper around llvm-ar (which IS clang.wasm dispatching on argv[0]).
+#
+# Same WASI problem `cc` has: clang.wasm's wasi-libc has no cwd of its own and resolves
+# every RELATIVE path against "/", so `ar cru libfoo.a foo.o` reported
+#     ar: error: foo.o: No such file or directory
+# while the identical command with absolute paths worked. autoconf's AC_PROG_AR runs the
+# relative form, so configure aborted with "could not determine ar interface" -- the wall
+# immediately after the environment fix.
+#
+# The kernel cannot fix this for us: wasi-libc strips the matching preopen prefix before
+# path_open, so an absolute /tmp/x.o arrives as "tmp/x.o" and a relative x.o as "x.o" --
+# indistinguishable. So the wrapper absolutises, exactly as bin/cc does.
+here=$(pwd)
+abs() { case "$1" in /*|'') printf %s "$1" ;; *) printf %s "$here/$1" ;; esac; }
+seenop=0
+n=$#; i=0
+while [ $i -lt $n ]; do
+  a=$1; shift; i=$((i+1))
+  case "$a" in
+    -*) set -- "$@" "$a" ;;
+    *)
+      # ar's FIRST positional is the operation ("cru", "rcs", "t"...), not a path. It is
+      # always bare letters; anything with a dot or slash is a filename.
+      if [ $seenop = 0 ] && expr "$a" : '[A-Za-z][A-Za-z0-9]*$' >/dev/null 2>&1; then
+        seenop=1; set -- "$@" "$a"
+      else
+        seenop=1; set -- "$@" "$(abs "$a")"
+      fi ;;
+  esac
+done
+exec llvm-ar "$@"

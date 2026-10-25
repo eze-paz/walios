@@ -1,0 +1,568 @@
+#!/bin/sh
+# build-pkg <name> — best-effort in-tab build of an Alpine aport to a runnable wasm binary.
+# Fetches the APKBUILD (GitHub aports mirror), the source tarball (Alpine distfiles cache),
+# extracts it, builds with the in-tab clang (CC=cc) + make, installs to /bin/<name>.
+# Prints machine-readable sentinels the packages panel watches: __BP_OK__/__BP_FAIL__.
+pkg="$1"
+fail() { echo "!! $1"
+  # A build that fails right after a dependency failed is almost always failing
+  # BECAUSE of it, and the two messages are otherwise hundreds of lines apart.
+  [ -n "$bp_dep_failed" ] && echo "   dependencies that did not build:$bp_dep_failed -- likely the cause"
+  echo "__BP_FAIL__ $pkg"; exit 1; }
+# There used to be an in-tab xz decoder here, built on demand from a seeded xzminidec.c.
+# It could never have worked: /usr/lib/xzminidec.c IS NOT SEEDED in this image (measured --
+# "ls: /usr/lib/xzminidec.c: No such file or directory"), so ensure_xz returned 1 every time
+# and every .tar.xz package died before extraction. expat, whose only source is a .tar.xz,
+# failed there.
+#
+# It was also unnecessary. busybox tar sniffs the magic and decompresses xz itself:
+# expat-2.8.4.tar.xz extracts with a plain `tar -xf`, measured. So extraction is wextract's
+# job for every format and this shells out to nothing.
+[ -n "$pkg" ] || { echo "usage: build-pkg <package>"; exit 2; }
+# A finished build is RECORDED, which is what turns the overlay into a package database:
+# the next package that depends on this one finds it satisfied instead of building it
+# again, and a resolver with no memory would otherwise rebuild openssl once per consumer.
+bp_record() { mkdir -p "$BP_DB/installed"; echo "${pkgver:-installed}" > "$BP_DB/installed/$pkg"; }
+
+
+# ---------------------------------------------------------------------------
+# THE PACKAGE DATABASE. apk has one; this had none, and that absence is why a
+# dependency had to be a hand-written special case.
+#
+# $BP_PREFIX is the overlay `cc` already searches (-I/opt/wali/include
+# -L/opt/wali/lib) and `pkg-config` already searches (/opt/wali/lib/pkgconfig).
+# Installing into it with the package's OWN `make install` is the whole trick:
+# nested headers, .pc files and symlinks land where configure looks for them.
+#
+# installed/<name>  records a finished build (and its version). It is three
+# things at once: the cache that stops openssl being rebuilt for every package
+# that links it, the "is this dependency satisfied" test, and -- with
+# building/<name> -- the cycle guard, without which a dependency loop recurses
+# until the kernel dies.
+BP_PREFIX=${BP_PREFIX:-/opt/wali}
+BP_DB="$BP_PREFIX/var/bp"
+BP_DEPTH=${BP_DEPTH:-0}
+BP_MAXDEPTH=${BP_MAXDEPTH:-4}
+IND=""; i=0; while [ $i -lt "$BP_DEPTH" ]; do IND="$IND  "; i=$((i+1)); done
+mkdir -p "$BP_DB/installed" "$BP_DB/building" "$BP_PREFIX/lib/pkgconfig" "$BP_PREFIX/include" "$BP_PREFIX/bin"
+# configure scripts find dependencies through pkg-config far more often than by guessing
+# -lfoo, so the overlay's pkgconfig dir has to be on the search path for the WHOLE tree,
+# recursive builds included.
+PKG_CONFIG_PATH="$BP_PREFIX/lib/pkgconfig:${PKG_CONFIG_PATH}"
+export PKG_CONFIG_PATH
+
+echo "$IND== build-pkg $pkg =="
+if [ -f "$BP_DB/installed/$pkg" ] && [ -z "$BP_FORCE" ]; then
+  echo "$IND   already installed ($(cat "$BP_DB/installed/$pkg")) -- nothing to do (BP_FORCE=1 to rebuild)"
+  echo "__BP_OK__ $pkg"; exit 0
+fi
+if [ -f "$BP_DB/building/$pkg" ]; then
+  # Alpine's graph has real cycles once -dev packages are followed. Treat a package
+  # already on the stack as satisfied rather than recursing into it again.
+  echo "$IND   (already being built further up -- dependency cycle, not recursing)"
+  echo "__BP_OK__ $pkg"; exit 0
+fi
+: > "$BP_DB/building/$pkg"
+# The guard has to come off however this exits, or a failed build poisons every later run
+# in the same session with a phantom cycle.
+trap 'rm -f "$BP_DB/building/$pkg"' EXIT INT TERM
+
+work="/tmp/bp/$pkg"; rm -rf "$work"; mkdir -p "$work/src"; cd "$work" || fail "cannot cd $work"
+
+echo "-- fetching APKBUILD"
+repo=""
+for r in main community testing; do
+  if wfetch "https://raw.githubusercontent.com/alpinelinux/aports/master/$r/$pkg/APKBUILD" -O APKBUILD 2>/dev/null && grep -q "^pkgname=" APKBUILD 2>/dev/null; then repo="$r"; break; fi
+done
+[ -n "$repo" ] || fail "no APKBUILD for $pkg (searched main/community/testing)"
+echo "   found in $repo"
+
+# APKBUILD is shell: source it for pkgver + expanded source= list. Stub abuild helpers
+# so sourcing never executes a real build step or aborts.
+pkgname="$pkg"; pkgver=""; source=""
+for h in build package check prepare default_prepare msg msg2 subpackages; do eval "$h() { :; }"; done
+. ./APKBUILD 2>/dev/null || true
+echo "   $pkgname $pkgver"
+
+echo "-- fetching + extracting source"
+got=""
+for s in $source; do
+  url="${s##*::}"                              # strip "filename::" prefix if present
+  name="${s%%::*}"; [ "$name" = "$s" ] && name="${url##*/}"
+  # NOT "skip anything that is not http". The distfiles mirror is fetched BY NAME, so a
+  # source whose upstream URL uses another scheme is still perfectly gettable -- and figlet's
+  # APKBUILD points at ftp://ftp.figlet.org, which made this `continue` skip the package
+  # outright and report "no usable source tarball", as though the package did not exist.
+  # The scheme only decides whether the UPSTREAM fallback below is usable.
+  case "$url" in https://*|http://*) upstream_ok=1 ;; *) upstream_ok="" ;; esac
+  # .tar.bz2 was missing from this list, which is the whole reason pcre2 failed: its only
+  # source is a .tar.bz2, it was filtered out here, and the run ended at "no usable source
+  # tarball fetched/extracted" without ever attempting a download. Extraction itself was
+  # never the problem -- pcre2-10.48.tar.bz2 unpacks fine (measured).
+  case "$name" in *.tar.gz|*.tgz|*.tar.xz|*.tar.bz2|*.tbz2|*.tbz|*.tar) : ;; *) continue ;; esac
+  echo "   $name"
+  # Alpine's distfiles cache is reliable + CORS/proxy-friendly; upstream is the fallback.
+  #
+  # IT IS SHARDED BY RELEASE, which is easy to miss because "edge" holds current packages and
+  # looks like the whole mirror. It is not: a package whose version has not changed in years
+  # sits under the release it last shipped in. Measured, same host, same minute:
+  #     distfiles/edge/expat-2.8.4.tar.xz    -> 200
+  #     distfiles/edge/figlet-2.2.5.tar.gz   -> 404
+  #     distfiles/figlet-2.2.5.tar.gz        -> 404   (there is no flat layout)
+  #     distfiles/v3.20/figlet-2.2.5.tar.gz  -> 200
+  # So one prefix is not a mirror lookup, it is a guess -- and figlet, whose upstream is an
+  # ftp:// URL nothing here can fetch, is reachable only through the right shard.
+  got_it=""
+  for pre in edge v3.21 v3.20 v3.19; do
+    if wfetch "https://distfiles.alpinelinux.org/distfiles/$pre/$name" -O "src/$name" 2>/dev/null && [ -s "src/$name" ]; then
+      got_it=1; break
+    fi
+  done
+  if [ -n "$got_it" ]; then :
+  elif [ -n "$upstream_ok" ] && wfetch "$url" -O "src/$name" 2>/dev/null && [ -s "src/$name" ]; then :
+  else
+    echo "   !! could not fetch $name"
+    [ -n "$upstream_ok" ] || echo "      (upstream is $url -- not a scheme curl can fetch, and the distfiles mirror does not have this name)"
+    continue
+  fi
+  # Every compressed form goes through the same path: wextract lets tar sniff the magic.
+  if wextract "src/$name" "src"; then got=1; else echo "   !! could not extract $name"; fi
+done
+[ -n "$got" ] || fail "no usable source tarball fetched/extracted"
+
+echo "-- locating build dir"
+bd=""
+for d in src/*/; do [ -d "$d" ] && bd="$d" && break; done
+[ -n "$bd" ] || fail "no build directory after extraction"
+cd "$bd" || fail "cannot cd $bd"
+echo "   $bd"
+ls Makefile makefile GNUmakefile configure 2>/dev/null | grep -q . \
+  || fail "extracted source has no Makefile/configure ($pkgname likely needs autotools bootstrap or a build system we don't drive)"
+
+# ---------------------------------------------------------------------------
+# DEPENDENCY RESOLUTION, mechanically.
+#
+# This used to be a one-arm `case` that knew how to build zlib and nothing else:
+#
+#     for d in $makedepends $depends; do
+#       case "${d%%-dev}" in zlib) provide_zlib ;; esac
+#     done
+#
+# Every other dependency fell through in SILENCE -- the "-- dependencies" heading
+# printed with nothing under it -- and the package then died in ./configure with
+# "cannot find required curses/ncurses library", which reads like a compiler problem
+# and is not. htop is that case.
+#
+# The graph was never missing. We fetch the APKBUILD and SOURCE it, so $makedepends
+# is already a shell variable holding exactly what apk would resolve; the old code
+# looked at it only to string-match "zlib" and threw the rest away. So: recurse.
+# build-pkg already knows how to turn an aport into an installed library, which makes
+# it its own resolver, and the 1000 missing dependencies stop being 1000 special cases.
+#
+# Measured, and the reason this is worth doing rather than extending the case arm by
+# arm: across Alpine v3.21 main+community (14,725 packages, counting each package's
+# `so:` deps -- the libraries it must link), 53% need NOTHING beyond libc, and greedy
+# set cover says the best 24 libraries together only lift that to 61%. There is no
+# short list to hand-write. The tail is the distribution.
+bp_depname() {                   # APKBUILD dep token -> aport name, or "" to ignore
+  _d=$1
+  case "$_d" in "!"*) return ;; esac              # conflict marker, not a dependency
+  _d=${_d%%>*}; _d=${_d%%<*}; _d=${_d%%=*}; _d=${_d%%~*}   # strip version constraints
+  case "$_d" in
+    pc:*|so:*|cmd:*) return ;;    # provider syntax: the token is not an aport name
+  esac
+  _d=${_d%-dev}                   # ncurses-dev -> ncurses: the aport builds both
+  printf %s "$_d"
+}
+
+# Build TOOLS and things this image already is. Skipping these is not the old
+# silent fall-through: each one is named in the output with its reason, and
+# anything NOT on this list is actually attempted.
+# An env-provided BP_SKIP COMPOSES with these defaults instead of being overwritten by
+# them -- `BP_SKIP=openssl build-pkg foo` is how a caller says "I configured this build
+# not to need that library, do not go and fetch it". The assignment used to clobber the
+# environment, so the request was silently ignored and the resolver chased the dependency
+# anyway (measured: an 18MB openssl tarball, for a package being built --without-openssl).
+BP_SKIP="${BP_SKIP:-} autoconf automake libtool m4 patch make cmake meson ninja pkgconf pkgconfig
+ perl python3 py3-setuptools bash coreutils findutils grep sed gawk file which diffutils
+ musl musl-dev libc-dev linux-headers gcc g++ clang llvm binutils flex bison
+ texinfo groff doxygen asciidoc xmlto docbook-xsl sphinx
+ go rust cargo nodejs npm openrc dumb-init tar gzip xz bzip2-static"
+
+# ---------------------------------------------------------------------------
+# THE DISTRO'S OWN CONFIGURE FLAGS.
+#
+# Measured, and this is what forced the mechanism: `build-pkg ncurses` with a bare
+# `./configure --prefix=...` builds libncursesw.a, tic and infocmp correctly and then
+# walks into ncurses' test/ directory -- its DEMO programs -- and dies there on
+# undefined symbols, taking the whole run down after ~20 minutes of successful work.
+# Alpine's ncurses APKBUILD passes --without-tests. It also passes --enable-pc-files
+# (without which no .pc is installed, so pkg-config cannot see the library afterwards)
+# and --enable-widec (without which consumers asking for -lncursesw find nothing).
+#
+# Those flags are not ours to invent, and hand-writing a CONFFLAGS arm per package is
+# the same losing race as hand-writing a provide_* per library. They are already
+# written down, by the distro, in the build() function of the APKBUILD we have just
+# fetched -- precisely the layer a real Linux HAS and we did not: the recipe. Mine it.
+#
+# What is dropped, and why each is a statement about THIS platform rather than a patch
+# to the package:
+#   --build/--host/--target  we set the triple ourselves (config.guess cannot name wasm32)
+#   --prefix/--exec-prefix   we impose $BP_PREFIX
+#   --with-shared etc.       cc links static here
+#   --with-cxx-*             there is no C++ runtime in the sysroot (measured: no libc++
+#                            and no libstdc++ anywhere in wali-sysroot.tar.gz), so a C++
+#                            binding cannot link whatever the recipe asks for
+#   anything still empty     an APKBUILD variable that expanded to nothing
+# and =/usr paths are REMAPPED, not dropped: --with-pkg-config-libdir=/usr/lib/pkgconfig
+# dropped would install .pc files where nothing looks, which is the exact failure this
+# whole change exists to prevent.
+BP_CFG_AWK='
+/^build\(\)/ { inb=1 }
+inb && index($0,"./configure") { cap=1 }
+cap {
+  l=$0; gsub(/[ 	]+$/,"",l)
+  cont = (substr(l,length(l),1)=="\\")
+  if (cont) l=substr(l,1,length(l)-1)
+  printf "%s ", l
+  if (!cont) exit
+}'
+bp_distro_flags() {
+  [ -f "$1" ] || return 1
+  _raw=$(tr -d '' < "$1" | awk "$BP_CFG_AWK" | sed 's|^[ 	]*\./configure||')
+  [ -n "$_raw" ] || return 1
+  # eval to honour the APKBUILD's own quoting (--with-terminfo-dirs="a:b:c" is ONE flag).
+  # This executes nothing that has not already run: the whole APKBUILD is sourced above.
+  eval "set -- $_raw" 2>/dev/null || return 1
+  _out=""
+  for _t in "$@"; do
+    case "$_t" in
+      "") continue ;;
+      *=) continue ;;
+      --build=*|--host=*|--target=*) continue ;;
+      --prefix=*|--exec-prefix=*) continue ;;
+      --with-shared|--enable-shared|--with-cxx-shared|--with-cxx-binding) continue ;;
+      CFLAGS=*|CXXFLAGS=*|LDFLAGS=*|CPPFLAGS=*) continue ;;
+    esac
+    case "$_t" in *=/usr/*|*=/usr) _t=$(printf %s "$_t" | sed "s|=/usr|=$BP_PREFIX|") ;; esac
+    _out="$_out $_t"
+  done
+  printf %s "$_out"
+}
+BP_DISTRO_FLAGS=$(bp_distro_flags "$work/APKBUILD")
+
+# Per-package CONFIGURE flags, for the same reason MK exists further down: a package whose
+# optional dependency we cannot provide has to be told so, or configure aborts.
+#   openssh: there is no libcrypto here (walios' `openssl` is an s_client shim, not a
+#   library), and OpenSSH >= 9 supports building without it. This is a build CHOICE, the
+#   same kind as git's NO_OPENSSL=1 -- not a patch to the package.
+CONFFLAGS=""
+case "$pkgname" in
+  openssh) CONFFLAGS="--without-openssl --without-pam --without-selinux --without-libedit --without-kerberos5 --disable-strip"
+           BP_SKIP="$BP_SKIP krb5 libfido2 utmps utmps-static" ;;
+esac
+
+# AND WHAT WE CONFIGURE OUT, WE DO NOT BUILD. This sits above the dependency stage on
+# purpose: --without-foo means the build will not use foo, so resolving foo as a
+# dependency is pure wall clock, and worse, a failure report for something nobody needed.
+# Measured on openssh: 150s building linux-pam for a --without-pam build, plus a chase
+# after an 18MB openssl tarball that cannot be configured here at all.
+BP_SKIP_TOK=""
+for f in $CONFFLAGS; do
+  case "$f" in
+    --without-*|--disable-*) n=${f#--without-}; n=${n#--disable-}
+      BP_SKIP_TOK="$BP_SKIP_TOK $n" ;;
+  esac
+done
+# The flag names a FEATURE, the aport names a PACKAGE, and they are related but not equal:
+# --without-pam wants "linux-pam" skipped, --without-selinux wants "libselinux". So match
+# the token against the shapes distributions actually use rather than demanding equality.
+# Deliberately conservative -- over-skipping a dependency the build DOES need would trade
+# a slow build for a broken one, so only these five shapes count.
+bp_conf_skipped() {
+  _d=$1
+  # self and own subpackages: openssh depends on openssh-server / openssh-sftp-server
+  case "$_d" in "$pkgname"|"$pkgname"-*) return 0 ;; esac
+  for _t in $BP_SKIP_TOK; do
+    [ -n "$_t" ] || continue
+    case "$_d" in
+      "$_t"|"$_t"-dev|"lib$_t"|"lib$_t"-dev|*-"$_t"|*-"$_t"-dev|"lib$_t"-*) return 0 ;;
+    esac
+  done
+  return 1
+}
+
+echo "$IND-- dependencies"
+bp_dep_failed=""
+# BP_DEPS_ONLY=1: resolve and print, build nothing. The resolver is the part that has to
+# be right before a build is worth starting, and it is testable in seconds instead of
+# minutes.
+if [ -n "$BP_DEPS_ONLY" ]; then
+  for d in $makedepends $depends; do
+    dn=$(bp_depname "$d") || true
+    [ -n "$dn" ] || { echo "$IND   ignore $d"; continue; }
+    case " $BP_SKIP " in *" $dn "*) echo "$IND   skip $dn"; continue ;; esac
+    if bp_conf_skipped "$dn"; then echo "$IND   skip $dn (configured out)"; continue; fi
+    [ -f "$BP_DB/installed/$dn" ] && { echo "$IND   have $dn"; continue; }
+    echo "$IND   need $dn"
+  done
+  echo "__BP_DEPS_DONE__ $pkg"; exit 0
+fi
+if [ "$BP_DEPTH" -ge "$BP_MAXDEPTH" ]; then
+  echo "$IND   (depth $BP_DEPTH: not recursing further)"
+else
+  for d in $makedepends $depends; do
+    dn=$(bp_depname "$d") || true
+    [ -n "$dn" ] || continue
+    case " $BP_SKIP " in *" $dn "*) echo "$IND   skip $dn (build tool / provided by the base image)"; continue ;; esac
+    if bp_conf_skipped "$dn"; then echo "$IND   skip $dn (configured out: this build does not use it)"; continue; fi
+    if [ -f "$BP_DB/installed/$dn" ]; then echo "$IND   have $dn ($(cat "$BP_DB/installed/$dn"))"; continue; fi
+    if [ -f "$BP_DB/building/$dn" ]; then echo "$IND   have $dn (in progress up the stack)"; continue; fi
+    echo "$IND   need $dn -- building it"
+    if BP_DEPTH=$((BP_DEPTH+1)) build-pkg "$dn" 2>&1 | sed "s/^/$IND/"; then
+      # the pipeline's status is sed's; the marker file is the real answer.
+      if [ -f "$BP_DB/installed/$dn" ]; then :; else bp_dep_failed="$bp_dep_failed $dn"; fi
+    else
+      bp_dep_failed="$bp_dep_failed $dn"
+    fi
+  done
+fi
+# NOT fatal. A makedepend is frequently optional to the build (an autotools package
+# will happily configure without a library it can do without), so a failed dependency
+# must not pre-empt a build that would have worked. It is recorded instead, and named
+# again at the bottom if this package does fail -- which is where it is actually useful.
+[ -n "$bp_dep_failed" ] && echo "$IND   !! dependencies that did NOT build:$bp_dep_failed"
+
+# Per-package make config: some packages need knobs to skip optional libs we don't have.
+MK=""
+case "$pkgname" in
+  git) MK="NO_OPENSSL=1 NO_CURL=1 NO_EXPAT=1 NO_GETTEXT=1 NO_PERL=1 NO_PYTHON=1 NO_TCLTK=1 NO_ICONV=1 NO_GITWEB=1 NO_REGEX=YesPlease FSMONITOR_DAEMON_BACKEND= FSMONITOR_OS_SETTINGS= NO_UNIX_SOCKETS=1 NO_SYS_POLL_H=" ;;
+esac
+
+# git 2.55 ships a MANDATORY Rust crate (target/release/libgitcore.a, built by cargo).
+# There is no cargo in-tab. Two modes:
+#   build-pkg git         -> NO_RUST=1: pure-C git (default; the install button uses this).
+#   build-pkg git rust    -> -DWITH_RUST: build libgitcore.a with the in-tab wasm rustc
+#                            (rustc.wasm + /sysroot), swapping git's cargo rule for one rustc call.
+# Build only the requested program, not `all`: git's `all` also builds the optional
+# `scalar` and `git-daemon` binaries, whose big translation units (scalar.c, daemon.c)
+# trap the in-tab clang. `make git` builds just the git binary + its deps.
+# WHICH PROGRAMS TO BUILD AND INSTALL.
+#
+# This used to install exactly one file: ./$pkgname, else the FIRST wasm-magic file found
+# anywhere in the tree. That is wrong for every package whose programs are not named after
+# it -- openssh builds ssh, scp, sftp and sshd and no file called "openssh", so the
+# fallback would have installed whichever object it stumbled on first AS /bin/openssh.
+# So: `build-pkg NAME prog...` names the make targets and the binaries to install, a few
+# known multi-program packages carry sensible defaults, and the no-name case installs
+# every top-level program the build produced under its OWN name (see "installing" below).
+PROGS=""
+case "$pkgname" in
+  openssh) if [ -n "$2" ]; then PROGS="$*"; PROGS="${PROGS#* }"; else PROGS="ssh scp sftp"; fi ;;
+  git)     ;;                                  # git's $2 is `rust`, a build MODE -- left alone below
+  *)       [ -n "$2" ] && PROGS="$*" && PROGS="${PROGS#* }" ;;   # everything after the package name
+esac
+TARGET=""
+[ -n "$PROGS" ] && TARGET="$PROGS"
+if [ "$pkgname" = git ]; then
+  TARGET="git"
+  if [ "$2" = rust ]; then
+    echo "-- WITH_RUST: git will build libgitcore.a via the in-tab rustc"
+    if [ ! -e /bin/rustc ]; then fail "rustc not available (rustc.wasm not installed)"; fi
+    if [ ! -d /sysroot/lib/rustlib/wasm32-wali-linux-musl ]; then fail "rust sysroot missing at /sysroot"; fi
+    mkdir -p target/release
+    # Replace git's 'cargo build' rule with the single cargo-free rustc invocation (M1 recipe).
+    sed -i 's#cargo build $(CARGO_ARGS)#rustc --edition 2018 --crate-type staticlib --target wasm32-wali-linux-musl --sysroot /sysroot -Ccodegen-units=1 -Cpanic=abort -o target/release/libgitcore.a src/lib.rs#' Makefile
+  else
+    MK="$MK NO_RUST=1"
+  fi
+fi
+
+echo "-- building (CC=cc${MK:+ $MK})"
+export CC=cc CXX=cc HOSTCC=cc
+if [ -x ./configure ] && [ -z "$MK" ]; then      # git & friends drive their own Makefile — skip configure
+  echo "   ./configure (best-effort)"
+  # --build is REQUIRED, not a nicety. uname reports Linux/wasm32 correctly, but a bundled
+  # config.guess has never heard of wasm32 and aborts the whole run with "cannot guess build
+  # type". config.sub DOES accept wasm32-unknown-linux-musl, so naming the triple outright
+  # skips the guess entirely -- the same thing every cross/unusual platform does.
+  # NOT --host: that puts autoconf in cross-compile mode and it stops running the test
+  # programs it builds, which here it can run perfectly well. This is a native build on a
+  # platform config.guess cannot name.
+  BUILD_TRIPLE=wasm32-unknown-linux-musl
+  # --prefix is what makes `make install` land in the overlay cc and pkg-config already
+  # search. Without it a library that builds perfectly is still invisible to the next
+  # package, which is the second half of the missing-dependency problem: not "the dep
+  # did not build" but "the dep built and nothing can find it".
+  #
+  # The extra flags are PROBED, not assumed: a plain (non-autoconf) configure aborts on
+  # an option it has never heard of, so ask --help first. Static because cc links static
+  # here; no docs because nothing in this image reads them and they cost minutes.
+  if [ -n "$BP_DISTRO_FLAGS" ]; then
+    # The recipe wins. A hand-written CONFFLAGS arm still appends AFTER it, so a platform
+    # override (openssh --without-openssl) can still override the distro.
+    echo "$IND   using the distro's own flags from APKBUILD build()"
+    CONFFLAGS="$BP_DISTRO_FLAGS $CONFFLAGS"
+  else
+    # No recipe to mine (a build() that does not call ./configure, or no build() at all).
+    # Probe --help rather than assume: a plain, non-autoconf configure aborts on an option
+    # it has never heard of.
+    probe=$(./configure --help 2>/dev/null)
+    for f in --disable-shared --enable-static --without-docs --disable-nls; do
+      case "$probe" in *"${f#--disable-}"*|*"${f#--without-}"*|*"${f#--enable-}"*) CONFFLAGS="$CONFFLAGS $f" ;; esac
+    done
+  fi
+  echo "$IND   ./configure --build=$BUILD_TRIPLE --prefix=$BP_PREFIX $CONFFLAGS"
+  ./configure --build="$BUILD_TRIPLE" --prefix="$BP_PREFIX" $CONFFLAGS > "$work/configure.log" 2>&1     || { echo "   (configure failed -- last lines:)"; tail -12 "$work/configure.log" | sed "s/^/     /"; echo "   (trying make anyway)"; }
+fi
+make CC=cc $MK $TARGET || make $MK $TARGET || fail "make failed"
+
+# ---------------------------------------------------------------------------
+# LET THE PACKAGE INSTALL ITSELF.
+#
+# What stood here went straight to scraping the build tree: `find -name '*.a'`, plus
+# headers from `find -maxdepth 2 -name '*.h'` flat-copied into one directory. That is a
+# guess at what `make install` does, and it is wrong in the two ways that matter:
+#
+#   * it FLATTENS. A package whose public header is include/libxml/parser.h lands as
+#     /opt/wali/include/parser.h, so `#include <libxml/parser.h>` -- what every consumer
+#     actually writes -- still does not resolve. The dependency "built fine" and is
+#     still unusable.
+#   * it never installs .pc files. bin/pkg-config reads $BP_PREFIX/lib/pkgconfig and is
+#     the route configure takes for most libraries, so a dependency with no .pc is
+#     invisible to PKG_CHECK_MODULES no matter what is in lib/.
+#
+# The package's own install rule gets both right, along with the symlinks (libncursesw
+# -> libncurses and friends) that consumers link against by name.
+bp_installed_by_make=""
+if make -n install >/dev/null 2>&1; then
+  echo "$IND-- make install --> $BP_PREFIX"
+  if make install > "$work/install.log" 2>&1 || make install DESTDIR= > "$work/install.log" 2>&1; then
+    bp_installed_by_make=1
+    echo "$IND   libs=$(ls "$BP_PREFIX/lib" 2>/dev/null | grep -c '\.a$\|\.so') pc=$(ls "$BP_PREFIX/lib/pkgconfig" 2>/dev/null | wc -l) headers=$(find "$BP_PREFIX/include" -name '*.h' 2>/dev/null | wc -l)"
+  else
+    echo "$IND   (make install failed -- last lines:)"; tail -8 "$work/install.log" | sed "s/^/$IND     /"
+  fi
+fi
+
+echo "-- installing"
+# A program installed by `make install` is in $BP_PREFIX/bin, which is not on PATH; the
+# packages panel and the user both expect /bin/<name>. Copy, do not move: the prefix copy
+# is what a later package's configure will find.
+if [ -n "$bp_installed_by_make" ]; then
+  for f in "$BP_PREFIX"/bin/*; do
+    [ -f "$f" ] || continue
+    b=${f##*/}
+    [ -e "/bin/$b" ] && continue
+    cp "$f" "/bin/$b" 2>/dev/null && chmod 755 "/bin/$b" && echo "   installed /bin/$b"
+  done
+fi
+# Explicit programs (or a known multi-program package): install each by its own name.
+if [ -n "$PROGS" ]; then
+  n=0; missing=""
+  for prg in $PROGS; do
+    f=""
+    [ -e "./$prg" ] && f="./$prg"
+    [ -z "$f" ] && f=$(find . -name "$prg" -type f 2>/dev/null | head -n 1)
+    if [ -n "$f" ] && od -An -tx1 -N4 "$f" 2>/dev/null | grep -qi "00 61 73 6d"; then
+      cp "$f" "/bin/$prg" && chmod 755 "/bin/$prg" && n=$((n+1)) && echo "   installed /bin/$prg"
+    else
+      missing="$missing $prg"
+    fi
+  done
+  [ -n "$missing" ] && echo "   !! not produced by the build:$missing"
+  if [ $n -gt 0 ]; then
+    echo "== installed $n program(s) -- run them by name =="
+    bp_record
+    echo "__BP_OK__ $pkg"
+    exit 0
+  fi
+  fail "none of the requested programs were built ($PROGS)"
+fi
+bin=""
+[ -e "./$pkgname" ] && bin="./$pkgname"          # -e not -f: cc outputs may stat as an odd type
+[ -z "$bin" ] && bin=$(find . -name "$pkgname" 2>/dev/null | head -n 1)
+# Nothing named after the package: install every PROGRAM the build left at the top level,
+# each under its own name. Better than the old "first wasm-magic file anywhere, installed as
+# /bin/$pkgname", which could name an unrelated object after the package. Top level only --
+# a .o buried in a subdir is not a program, and conftest leftovers are configure's, not ours.
+if [ -z "$bin" ]; then
+  found=""
+  for f in ./*; do
+    [ -f "$f" ] || continue
+    case "$f" in *.o|*.a|*.c|*.h|*.sh|*conftest*|*.log|*.status|*.m4|*.in) continue ;; esac
+    if od -An -tx1 -N4 "$f" 2>/dev/null | grep -qi "00 61 73 6d"; then found="$found $f"; fi
+  done
+  n=0
+  for f in $found; do
+    b=${f##*/}
+    cp "$f" "/bin/$b" && chmod 755 "/bin/$b" && n=$((n+1)) && echo "   installed /bin/$b"
+  done
+  if [ $n -gt 0 ]; then
+    echo "== installed $n program(s) -- run them by name =="
+    bp_record
+    echo "__BP_OK__ $pkg"
+    exit 0
+  fi
+fi
+if [ -z "$bin" ]; then                          # fall back to any wasm-magic file (backslash-0-a-s-m)
+  # NOT dd. `dd` does not exist in this busybox (measured: `command -v dd` -> MISSING), so the
+  # old `dd if="$f" bs=4 count=1 | od ...` wrote NOTHING for every candidate and this fallback
+  # silently matched nothing, always. `od -N4` reads the first four bytes by itself.
+  for f in $(find . -type f 2>/dev/null); do
+    if od -An -tx1 -N4 "$f" 2>/dev/null | grep -qi "00 61 73 6d"; then bin="$f"; break; fi
+  done
+fi
+
+if [ -n "$bin" ]; then
+  cp "$bin" "/bin/$pkgname" || fail "install to /bin/$pkgname failed"
+  echo "== installed /bin/$pkgname -- run it: $pkgname =="
+  bp_record
+  echo "__BP_OK__ $pkg"
+  exit 0
+fi
+
+# NO EXECUTABLE IS NOT A FAILURE. Many aports are libraries and produce no program at all,
+# and this used to stop at "no built binary found" AFTER a completely successful build --
+# zlib compiles, archives, and was then thrown away with a failure sentinel. A library goes
+# into the /opt/wali overlay, which is exactly where `cc` already looks
+# (-I/opt/wali/include -L/opt/wali/lib), so the next package links it with a bare -lfoo.
+# If the package installed ITSELF, that is the answer -- do not second-guess it with a
+# scrape that flattens headers and drops .pc files. This is the normal path now; the
+# scrape below survives only for packages with no install rule.
+if [ -n "$bp_installed_by_make" ]; then
+  nl=$(ls "$BP_PREFIX/lib" 2>/dev/null | grep -c '\.a$\|\.so')
+  nh=$(find "$BP_PREFIX/include" -name '*.h' 2>/dev/null | wc -l)
+  npc=$(ls "$BP_PREFIX/lib/pkgconfig" 2>/dev/null | wc -l)
+  if [ "$nl" -gt 0 ] || [ "$nh" -gt 0 ]; then
+    echo "== $pkgname installed itself into $BP_PREFIX ($nl lib file(s), $nh header(s), $npc .pc file(s)) =="
+    bp_record
+    echo "__BP_OK__ $pkg"
+    exit 0
+  fi
+fi
+
+echo "-- no executable named $pkgname; looking for a library"
+# LAST RESORT, and it is a guess -- see the make-install block above for why it is wrong
+# for any package whose headers live in a subdirectory.
+libs=$(find . -name '*.a' -o -name '*.so' -o -name '*.so.*' 2>/dev/null | grep -v conftest | head -20)
+if [ -n "$libs" ]; then
+  mkdir -p /opt/wali/lib /opt/wali/include
+  n=0
+  for l in $libs; do cp "$l" /opt/wali/lib/ 2>/dev/null && n=$((n+1)); done
+  # Headers: top-level and include/, which is where a library's PUBLIC interface lives in
+  # practice. config.h is skipped deliberately -- it describes this build, not the
+  # interface, and every autotools package ships one under the same name.
+  h=0
+  for inc in $(find . -maxdepth 2 -name '*.h' 2>/dev/null | grep -v conftest | grep -v 'config\.h$' | head -40); do
+    cp "$inc" /opt/wali/include/ 2>/dev/null && h=$((h+1))
+  done
+  [ $n -gt 0 ] || fail "found library files but could not install any of them"
+  echo "== installed $n library file(s) + $h header(s) into /opt/wali =="
+  echo "   link against them with -l$(echo "$pkgname" | sed 's/^lib//')"
+  bp_record
+  echo "__BP_OK__ $pkg"
+  exit 0
+fi
+
+fail "build produced neither an executable named $pkgname nor any library"

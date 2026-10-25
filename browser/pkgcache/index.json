@@ -1,0 +1,11 @@
+{
+ "packages": [
+  "git",
+  "tlswrap",
+  "curl",
+  "git-remote-http",
+  "git-remote-https",
+  "openssl",
+  "jq"
+ ]
+}

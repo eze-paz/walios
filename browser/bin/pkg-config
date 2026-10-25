@@ -1,0 +1,110 @@
+#!/bin/sh
+# pkg-config -- enough of it for configure scripts, reading real .pc files.
+#
+# WHY: it was simply absent, and that is worse than it sounds. A configure script asking
+# for an OPTIONAL library usually copes fine with "that package is not installed" -- it
+# takes its fallback path -- but autoconf's PKG_CHECK_MODULES ABORTS when the pkg-config
+# BINARY is missing, with "could not find pkg-config", before it can consider any fallback.
+# So one missing tool turned a soft "build without libfoo" into a hard stop, for every
+# package that uses the macro.
+#
+# This answers honestly: if a .pc file exists it is parsed and used; if not, exit 1, which
+# is exactly what "package not installed" looks like and is the answer configure knows how
+# to handle. It does NOT invent flags for packages that are not there.
+#
+# Supported, because it is what configure actually calls:
+#   --exists  --cflags  --libs  --libs-only-L  --libs-only-l  --cflags-only-I
+#   --modversion  --variable=NAME  --atleast-version=V  --print-errors  --silence-errors
+#   --version   (of pkg-config itself)
+# Unsupported flags are IGNORED rather than fatal, since configure passes a long tail of
+# them and dying on an unknown one would be the same failure this exists to remove.
+PC_DIRS="${PKG_CONFIG_PATH}:/opt/wali/lib/pkgconfig:/usr/lib/pkgconfig:/usr/share/pkgconfig:/usr/local/lib/pkgconfig"
+
+find_pc() {
+  _n=$1
+  IFS=:
+  for d in $PC_DIRS; do
+    [ -n "$d" ] || continue
+    if [ -f "$d/$_n.pc" ]; then unset IFS; printf %s "$d/$_n.pc"; return 0; fi
+  done
+  unset IFS
+  return 1
+}
+
+# .pc files are `name: value` fields plus `var=value` definitions, and both may reference
+# ${var}. One substitution pass over the vars we collected covers real-world files.
+field() {                       # field <file> <Field>
+  sed -n "s/^[ 	]*$2:[ 	]*//p" "$1" | head -1
+}
+expand() {                      # expand <file> <text>
+  _t=$2
+  # up to 3 passes: vars that reference other vars (exec_prefix=${prefix}) are normal
+  for _pass in 1 2 3; do
+    case "$_t" in *'${'*) ;; *) break ;; esac
+    _vars=$(sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)=\(.*\)$/\1 \2/p' "$1")
+    _old=$_t
+    while read -r _k _v; do
+      [ -n "$_k" ] || continue
+      _t=$(printf %s "$_t" | sed "s|\${$_k}|$_v|g")
+    done <<EOF
+$_vars
+EOF
+    [ "$_t" = "$_old" ] && break
+  done
+  printf %s "$_t"
+}
+
+want_cflags=0; want_libs=0; want_ver=0; want_exists=0; onlyL=0; onlyl=0; onlyI=0
+variable=; atleast=; pkgs=
+
+for a in "$@"; do
+  case "$a" in
+    --exists) want_exists=1 ;;
+    --cflags) want_cflags=1 ;;
+    --cflags-only-I) want_cflags=1; onlyI=1 ;;
+    --libs) want_libs=1 ;;
+    --libs-only-L) want_libs=1; onlyL=1 ;;
+    --libs-only-l) want_libs=1; onlyl=1 ;;
+    --modversion) want_ver=1 ;;
+    --variable=*) variable=${a#--variable=} ;;
+    --atleast-version=*) atleast=${a#--atleast-version=} ;;
+    --version) echo "0.29.2"; exit 0 ;;          # a version configure is happy with
+    --print-errors|--silence-errors|--static|--short-errors|--errors-to-stdout) ;;
+    -*) ;;                                        # unknown flag: ignore, never fatal
+    *) pkgs="$pkgs $a" ;;
+  esac
+done
+
+[ -n "$pkgs" ] || { [ $want_exists = 1 ] && exit 1; exit 0; }
+
+out_c=; out_l=; rc=0
+for p in $pkgs; do
+  pc=$(find_pc "$p") || { rc=1; continue; }
+  case "$want_ver$variable$atleast" in
+    *) ;;
+  esac
+  [ $want_ver = 1 ] && { expand "$pc" "$(field "$pc" Version)"; echo; }
+  if [ -n "$variable" ]; then
+    v=$(sed -n "s/^$variable=//p" "$pc" | head -1)
+    expand "$pc" "$v"; echo
+  fi
+  if [ -n "$atleast" ]; then
+    have=$(expand "$pc" "$(field "$pc" Version)")
+    # string compare is not version compare; only equal-or-obviously-newer passes, and a
+    # miss is reported as "too old" rather than silently accepted.
+    [ "$have" = "$atleast" ] || [ "$(printf '%s\n%s\n' "$atleast" "$have" | sort -V 2>/dev/null | tail -1)" = "$have" ] || rc=1
+  fi
+  [ $want_cflags = 1 ] && out_c="$out_c $(expand "$pc" "$(field "$pc" Cflags)")"
+  [ $want_libs = 1 ] && out_l="$out_l $(expand "$pc" "$(field "$pc" Libs)")"
+done
+
+filter() {                      # filter <only-prefix> <text>
+  [ -z "$1" ] && { printf '%s' "$2"; return; }
+  for w in $2; do case "$w" in $1*) printf '%s ' "$w" ;; esac; done
+}
+[ $want_cflags = 1 ] && { [ $onlyI = 1 ] && filter -I "$out_c" || printf '%s' "$out_c"; echo; }
+[ $want_libs = 1 ] && {
+  if [ $onlyL = 1 ]; then filter -L "$out_l"; elif [ $onlyl = 1 ]; then filter -l "$out_l"; else printf '%s' "$out_l"; fi
+  echo
+}
+exit $rc

@@ -1,0 +1,28 @@
+#!/bin/sh
+# wfetch URL -O FILE -- fetch over HTTPS. Used by build-pkg.
+#
+# curl, not wget. This WAS `exec wget -q "$@"`, on the reasoning that "the guest has real
+# TLS through the relay now" -- true of the RELAY, false of this client. busybox was built
+# without CONFIG_FEATURE_WGET_OPENSSL, so its wget did not know the https scheme at all and
+# died in parse_url with "not an http or ftp url" before opening a socket. Every APKBUILD
+# fetch therefore failed instantly, and build-pkg reported it as "no APKBUILD for <pkg>" --
+# so `build-pkg jq` (and bc, and curl, and everything else) looked like a missing package
+# for as long as that line stood. curl carries its own OpenSSL and has always worked.
+#
+# busybox wget can do https again as of busybox.wasm?v=net8, but curl stays the fetcher
+# here: one dependency, no helper process, and it is what git already uses.
+#
+# Arg shape is wget's (URL -O FILE); translate it rather than make callers change.
+url=""; out=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -O) out="$2"; shift 2 ;;
+    -O*) out="${1#-O}"; shift ;;
+    -q|--quiet) shift ;;
+    -*) shift ;;
+    *) [ -n "$url" ] || url="$1"; shift ;;
+  esac
+done
+[ -n "$url" ] || { echo "usage: wfetch URL -O FILE" >&2; exit 2; }
+if [ -n "$out" ]; then exec curl -fsSL --max-time 120 "$url" -o "$out"
+else exec curl -fsSL --max-time 120 "$url"; fi

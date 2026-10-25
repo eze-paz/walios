@@ -30,9 +30,8 @@ function run(argvLine, opts = {}) {
       if (m.t === 'out') out += m.s;
       else if (m.t === 'exit') { clearTimeout(timer); w.terminate(); resolve({ out, code: m.code }); }
     };
-    w.postMessage({ t: 'stdin-sab', sab: stdinSab });
     w.postMessage({ t: 'opfs-sab', sab: opfsSab });
-    w.postMessage({ t: 'run', wasm: 'busybox.wasm', manifest: MANIFEST, jspi: true, // JSPI like the real terminal (the ash+net busybox needs it)
+    w.postMessage({ t: 'run', wasm: 'busybox.wasm', manifest: MANIFEST,
       argv: ['busybox', 'hush', '-c', argvLine], opfs: '/files', ...opts });
   });
 }

@@ -21,11 +21,23 @@ let nextStream = 1, nextUdp = 1, nextPing = 1, nextResolve = 1;
 // via the 'sab' message's url (e.g. the local wisp-relay.js on :8790).
 function defaultRelay() { return `${self.location.protocol === 'https:' ? 'wss' : 'ws'}://${self.location.host}/wisp`; }
 
+let _reDelay = 500, _reTimer = null;
+function _scheduleReconnect() {   // relay dropped (e.g. server restart): reconnect with backoff
+  wsReady = false;
+  if (_reTimer) return;           // one attempt in flight at a time
+  _reTimer = setTimeout(() => { _reTimer = null; connectWS(); }, _reDelay);
+  _reDelay = Math.min(_reDelay * 2, 10000);
+}
 function connectWS() {
-  ws = new WebSocket(RELAY); ws.binaryType = 'arraybuffer';
-  ws.onopen = () => { wsReady = true; };
-  ws.onerror = () => { wsErr = true; };
-  ws.onclose = () => { wsErr = true; for (const s of streams.values()) s.closed = true; };
+  try { ws = new WebSocket(RELAY); } catch (_) { _scheduleReconnect(); return; }
+  ws.binaryType = 'arraybuffer';
+  ws.onopen = () => { wsReady = true; wsErr = false; _reDelay = 500; };
+  ws.onerror = () => {};                       // onclose fires next → reconnect there
+  // The relay went away (restart, proxy timeout): every stream is at EOF. Keep the entries,
+  // marked closed, until the kernel closes each fd -- they used to be cleared here, and the
+  // kernel's next RECV on a vanished id threw inside handle(), which ended the serve loop:
+  // no reply ever again, the kernel parked in Atomics.wait for good.
+  ws.onclose = () => { wsReady = false; for (const s of streams.values()) s.closed = true; _scheduleReconnect(); };
   ws.onmessage = (ev) => {
     const b = new Uint8Array(ev.data); if (b.length < 5) return;
     const type = b[0], id = new DataView(b.buffer, b.byteOffset).getUint32(1, true), payload = b.subarray(5);
@@ -63,7 +75,8 @@ function synthIp(name) {
   nameToIp.set(name, ip); ipToName.set(ip, name); return ip;
 }
 async function resolveViaRelay(name) {   // -> real dotted-quad, or null if the relay can't
-  if (!wsReady || wsErr) return null;
+  for (let i = 0; i < 100 && !wsReady; i++) await sleep(5);   // ride out a reconnect (~500ms)
+  if (!wsReady) return null;
   const id = nextResolve++; const rec = { ip: null, done: false }; resolves.set(id, rec);
   wispSend(0xf6, id, new TextEncoder().encode(name));
   for (let i = 0; i < 200 && !rec.done; i++) await sleep(2);   // ~400ms budget
@@ -97,28 +110,44 @@ async function answerDns(query) {  // -> DNS response carrying a synthetic A rec
 
 function finish(res) { Atomics.store(ctl, 6, res | 0); Atomics.store(ctl, 1, Atomics.load(ctl, 0)); Atomics.notify(ctl, 1); }
 
+// Host policy (sandpie secrets): while a run that uses a secret is going, the host sets
+// the hosts that secret may be sent to, {t:'policy', allow:[...]}; every other outbound
+// connection and ping is refused. allow:null lifts it. "*.x.com" = any subdomain of x.com.
+// DNS still answers (so the refusal is a clean ECONNREFUSED, not a lookup failure).
+let POLICY = null;
+self.addEventListener('message', (ev) => { const d = ev.data; if (d && d.t === 'policy') POLICY = Array.isArray(d.allow) && d.allow.length ? d.allow.map((h) => String(h).toLowerCase()) : null; });
+function allowedHost(host) {
+  if (!POLICY) return true;
+  const h = String(host || '').toLowerCase().replace(/\.$/, '');
+  const ok = POLICY.some((p) => (p.startsWith('*.') ? h.endsWith(p.slice(1)) : h === p));
+  if (!ok) { try { self.postMessage({ t: 'refused', host: h }); } catch (_) {} }   // the host says why in the tool result
+  return ok;
+}
+
 async function handle(op) {
   const a0 = ctl[3], a1 = ctl[4], a2 = ctl[5];
   if (op === OP.CONNECT) {
-    while (!wsReady && !wsErr) await sleep(2);
-    if (wsErr) return finish(ECONNREFUSED);
-    const spec = new TextDecoder().decode(data.slice(0, a0));   // "ip|port"
-    const [ip, portStr] = spec.split('|');
+    for (let i = 0; i < 4000 && !wsReady; i++) await sleep(2);   // wait for (re)connect, ~8s cap
+    if (!wsReady) return finish(ECONNREFUSED);
+    const spec = new TextDecoder().decode(data.slice(0, a0));   // "ip|port" or "ip|port|T" (T=TLS)
+    const [ip, portStr, flag] = spec.split('|');
     const host = ipToName.get(ip) || ip;  // hand the hostname to the relay (it resolves)
+    if (!allowedHost(host)) return finish(ECONNREFUSED);
     const id = nextStream++; streams.set(id, { rxq: [], closed: false });
     const hb = new TextEncoder().encode(host);
-    const payload = new Uint8Array(3 + hb.length); payload[0] = 1; new DataView(payload.buffer).setUint16(1, +portStr, true); payload.set(hb, 3);
+    const payload = new Uint8Array(3 + hb.length); payload[0] = flag === 'T' ? 3 : 1; new DataView(payload.buffer).setUint16(1, +portStr, true); payload.set(hb, 3);
     wispSend(0x01, id, payload);
     return finish(id);
   }
   if (op === OP.PING) { // ICMP kickoff: data = "ip[|port]" spec. Swap the synthetic IP
     // back to the hostname (like CONNECT) so the relay resolves + pings it. Returns a
     // ping id immediately; the OS worker polls PINGPOLL, so nothing blocks the worker.
-    for (let i = 0; i < 250 && !wsReady && !wsErr; i++) await sleep(2);
+    for (let i = 0; i < 250 && !wsReady; i++) await sleep(2);
     const spec = new TextDecoder().decode(data.slice(0, a0)).split('|')[0];
     const host = ipToName.get(spec) || spec;
     const id = nextPing++; const rec = { status: null }; pings.set(id, rec);
-    if (wsReady && !wsErr) {
+    if (!allowedHost(host)) rec.status = 1;   // host policy: unreachable
+    else if (wsReady) {
       const hb = new TextEncoder().encode(host);
       const p = new Uint8Array(3 + hb.length); p[0] = 0xff; new DataView(p.buffer).setUint16(1, 4000, true); p.set(hb, 3);
       wispSend(F.PING, id, p);
@@ -130,8 +159,8 @@ async function handle(op) {
     if (rec.status === null) return finish(EAGAIN);         // still in flight
     const st = rec.status; pings.delete(a0); return finish(st === 0 ? 0 : 1); } // 0 = replied
   if (op === OP.LISTEN) { // a0 = wanted port -> res = listener id, ctl[7] = actual relay port
-    while (!wsReady && !wsErr) await sleep(2);
-    if (wsErr) return finish(ECONNREFUSED);
+    for (let i = 0; i < 4000 && !wsReady; i++) await sleep(2);   // wait for (re)connect, ~8s cap
+    if (!wsReady) return finish(ECONNREFUSED);
     const id = nextStream++;
     const req = { status: -1, port: 0 }; listenReqs.set(id, req);
     const pl = new Uint8Array(2); pl[0] = a0 & 0xff; pl[1] = (a0 >> 8) & 0xff;
@@ -167,25 +196,51 @@ async function handle(op) {
   const s = streams.get(a0);
   if (op === OP.SEND) { if (!s || s.closed) return finish(EPIPE); wispSend(0x02, a0, data.slice(0, a1)); return finish(a1); }
   if (op === OP.RECV) {
+    if (!s) return finish(EBADF);
     while (!s.rxq.length && !s.closed) await sleep(1);
     if (!s.rxq.length) return finish(0);  // closed = EOF
-    let out = s.rxq.shift(); const k = Math.min(out.length, a1);
+    let out = s.rxq.shift(); const k = Math.min(out.length, a1, data.length);   // never past the SAB window
     data.set(out.subarray(0, k), 0); if (k < out.length) s.rxq.unshift(out.subarray(k));
     return finish(k);
   }
   if (op === OP.POLL) { await sleep(0); const lp = listeners.get(a0); // pump WS events (worker blocks in Atomics.wait between ops)
     if (lp !== undefined) { const q = acceptQs.get(lp); return finish(q && q.length ? 1 : 0); }
-    if (s) return finish(s.rxq.length || s.closed ? 1 : 0); const u = udpSocks.get(a0); return finish(u && u.rxq.length ? 1 : 0); }
+    if (s) return finish(s.rxq.length || s.closed ? 1 : 0); const u = udpSocks.get(a0); if (u) return finish(u.rxq.length ? 1 : 0);
+    return finish(1); }   // unknown id: report readable so the read fails with EBADF instead of polling for ever
   if (op === OP.CLOSE) { if (s) { wispSend(0x04, a0, new Uint8Array([0])); streams.delete(a0); } udpSocks.delete(a0); return finish(0); }
   finish(EINVAL);
 }
 
+// Message bridge (kernel without SharedArrayBuffer, see opfs-worker.js servePort):
+// {t:'call', id, op, a0, a1, a2, bytes} -> {t:'reply', id, res, aux, data}, one at a time.
+function servePort(port) {
+  const CTL = new Int32Array(8);
+  let chain = Promise.resolve();
+  port.onmessage = (ev) => {
+    const m = ev.data; if (!m || m.t !== 'call') return;
+    chain = chain.then(async () => {
+      const inb = m.bytes ? new Uint8Array(m.bytes) : null;
+      ctl = CTL; ctl.fill(0);
+      data = new Uint8Array(Math.max(1 << 20, inb ? inb.length : 0, (m.op === OP.RECV || m.op === OP.RECVFROM) ? (m.a1 | 0) : 0));
+      if (inb) data.set(inb, 0);
+      ctl[2] = m.op; ctl[3] = m.a0 | 0; ctl[4] = m.a1 | 0; ctl[5] = m.a2 | 0;
+      try { await handle(m.op); } catch (e) { try { finish(-5); } catch (_) {} }   // -5 = EIO
+      let n = 0;
+      if ((m.op === OP.RECV || m.op === OP.RECVFROM) && ctl[6] > 0) n = Math.min(ctl[6], data.length);
+      else if (m.op === OP.ACCEPT && ctl[7] > 0) n = Math.min(ctl[7], data.length);
+      const out = data.slice(0, n);
+      port.postMessage({ t: 'reply', id: m.id, res: ctl[6], aux: ctl[7], data: out.buffer }, [out.buffer]);
+    });
+  };
+}
+
 self.onmessage = async (ev) => {
   if (ev.data.t !== 'sab') return;
-  ctl = new Int32Array(ev.data.sab, 0, 8); data = new Uint8Array(ev.data.sab, 32);
   RELAY = ev.data.url || defaultRelay();
   connectWS();
   self.postMessage({ ready: true });
+  if (ev.data.port) { servePort(ev.data.port); return; }
+  ctl = new Int32Array(ev.data.sab, 0, 8); data = new Uint8Array(ev.data.sab, 32);
   let last = 0;
   while (true) {
     // waitAsync (not the blocking Atomics.wait) so this worker's event loop stays
@@ -197,6 +252,7 @@ self.onmessage = async (ev) => {
     if (r.async) await r.value;
     const seq = Atomics.load(ctl, 0); if (seq === last) continue; last = seq;
     if (ctl[2] === 0) break;
-    await handle(ctl[2]);
+    // A throw inside handle() must still answer, or the kernel waits for this reply for ever.
+    try { await handle(ctl[2]); } catch (e) { try { finish(-5); } catch (_) {} }   // -5 = EIO
   }
 };

@@ -1,0 +1,11 @@
+#!/bin/sh
+# ranlib -- absolutising wrapper around llvm-ranlib. See bin/ar for why this exists:
+# clang.wasm is WASI, its wasi-libc has no cwd, and relative paths resolve against "/".
+here=$(pwd)
+abs() { case "$1" in /*|'') printf %s "$1" ;; *) printf %s "$here/$1" ;; esac; }
+n=$#; i=0
+while [ $i -lt $n ]; do
+  a=$1; shift; i=$((i+1))
+  case "$a" in -*) set -- "$@" "$a" ;; *) set -- "$@" "$(abs "$a")" ;; esac
+done
+exec llvm-ranlib "$@"

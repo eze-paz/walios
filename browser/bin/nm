@@ -1,0 +1,26 @@
+#!/bin/sh
+# nm -- absolutising wrapper around llvm-nm (clang.wasm dispatching on argv[0]).
+#
+# Same WASI cwd problem as bin/ar, bin/ranlib and bin/ld: clang.wasm's wasi-libc has no cwd
+# of its own and resolves every RELATIVE path against "/", so from /tmp/x:
+#     nm /tmp/x/foo.o   ->  prints the symbol table
+#     nm foo.o          ->  nm: error: foo.o: No such file or directory
+# ar/ranlib/ld were wrapped for this; nm, strip and objdump were missed, because nothing we
+# built had exercised them yet.
+#
+# WHAT IT BROKE: libtool. configure probes the symbol table with a RELATIVE conftest.o to
+# build lt_cv_sys_global_symbol_pipe. The probe failed, so the pipe came out EMPTY, and
+# libtool then eval'd a command with a hole in the middle of a pipeline:
+#     eval "$NM conftest.o |  | $SED ..."
+# eval expands FIRST and parses the RESULT, so an empty stage is a parse error, not a no-op:
+#     ./libtool: eval: line 1719: syntax error: unexpected "|"
+# Every libtool link died there. jq compiled all 43 of its objects and then could not link
+# libjq.la -- which read like a jq problem and was entirely ours.
+here=$(pwd)
+abs() { case "$1" in /*|'') printf %s "$1" ;; *) printf %s "$here/$1" ;; esac; }
+n=$#; i=0
+while [ $i -lt $n ]; do
+  a=$1; shift; i=$((i+1))
+  case "$a" in -*) set -- "$@" "$a" ;; *) set -- "$@" "$(abs "$a")" ;; esac
+done
+exec llvm-nm "$@"

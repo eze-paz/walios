@@ -1,0 +1,35 @@
+#!/bin/sh
+# wextract TARBALL DIR -- unpack a source tarball into DIR. Used by build-pkg.
+#
+# COMPRESSION IS TAR'S JOB, not ours. busybox tar sniffs the file's magic and picks the
+# decompressor itself; measured in-guest against the real upstream tarballs, not toy ones:
+#     expat-2.8.4.tar.xz   (519,688 bytes)  -> tar -xf -> expat-2.8.4/    rc 0
+#     pcre2-10.48.tar.bz2  (2,213,024)      -> tar -xf -> pcre2-10.48/    rc 0
+# so .bz2 and .xz have always worked here and needed no special case. What did NOT work was
+# build-pkg refusing to hand them over in the first place -- see the source-name filter there.
+#
+# Note `xz` the binary does NOT exist in this busybox (only `unxz` does), which is why
+# nothing here shells out to it: tar's internal decompressor is the only xz path that is
+# actually present.
+[ $# -ge 2 ] || { echo "usage: wextract <tarball> <dir>" >&2; exit 2; }
+command -v tar >/dev/null 2>&1 || apk add tar gzip >/dev/null 2>&1
+command -v gzip >/dev/null 2>&1 || apk add gzip >/dev/null 2>&1
+[ -s "$1" ] || { echo "wextract: $1 is missing or empty" >&2; exit 1; }
+mkdir -p "$2" || exit 1
+
+case "$1" in
+  *.gz|*.tgz) tar -xzf "$1" -C "$2" ;;
+  *)          tar -xf  "$1" -C "$2" ;;    # magic-sniffed: .tar, .tar.bz2, .tar.xz
+esac
+rc=$?
+
+# LOUD FAIL. A tar that exits 0 having written nothing used to read as success all the way
+# up, and build-pkg then blamed the next step ("no build directory after extraction"). Say
+# what the file actually was instead -- the first bytes name the format, and an HTML error
+# page saved as a tarball (a 404 body) is the usual culprit.
+if [ $rc != 0 ] || [ -z "$(ls -A "$2" 2>/dev/null)" ]; then
+  echo "wextract: nothing extracted from $1 (tar rc=$rc)" >&2
+  echo "wextract: first bytes: $(od -An -tx1 -N8 "$1" 2>/dev/null | tr -s ' ')" >&2
+  exit 1
+fi
+exit 0

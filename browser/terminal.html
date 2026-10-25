@@ -58,6 +58,37 @@
     background:radial-gradient(150% 130% at 50% 0%,#0c1014 0%,#070a0d 100%)}
   #term{position:absolute;inset:0;padding:10px 12px}
 
+  /* ---------- phones ----------
+     The header is a flex row of four 74px stat chips plus the packages button; on a
+     390px screen that is wider than the viewport, and because flex items do not shrink
+     below their content the WHOLE layout overflowed sideways -- the terminal ran off
+     the right edge. On a phone the terminal is the product: drop the monitor bezel to
+     full-bleed and keep only the brand and the packages button. */
+  @media (max-width: 640px) {
+    #rig{padding:0}
+    #monitor{border-radius:0;padding:0;box-shadow:none}
+    #monitor::after{display:none}
+    #bezel{border-radius:0;border:0}
+    #chrome{gap:10px;padding:8px 11px}
+    #stats,.ver,.live{display:none}
+    #pkgbtn{margin-left:auto;padding:8px 12px}
+    #term{padding:8px 9px}
+  }
+
+  /* ---------- touch keyboard accessory bar ----------
+     Borrowed from /vm/web. A soft keyboard has no Esc, Tab, Ctrl or arrows, which
+     makes a shell unusable on a phone. This floats just above the keyboard (JS sets
+     its bottom offset from the visual viewport) and only exists on coarse-pointer
+     devices, so the desktop layout is untouched. */
+  #keybar{position:fixed;left:0;right:0;bottom:0;z-index:40;display:none;gap:5px;padding:7px 8px;
+    background:linear-gradient(180deg,#131920,#0b0e12);border-top:1px solid var(--line)}
+  #keybar .kb{flex:1 1 0;min-width:0;height:42px;display:flex;align-items:center;justify-content:center;
+    border-radius:9px;border:1px solid #26303a;background:linear-gradient(180deg,#1b222b,#141a21);
+    color:var(--ink);font:500 14px/1 var(--mono);cursor:pointer;
+    user-select:none;-webkit-user-select:none;touch-action:manipulation}
+  #keybar .kb:active{background:#26303a}
+  #keybar .kb.on{background:linear-gradient(180deg,#1c8f66,#136c4c);border-color:var(--mint);color:#04140e}
+
   /* ---------- packages panel ---------- */
   #pkgpanel{position:fixed;inset:0;z-index:30;display:none;background:rgba(6,8,10,.72);backdrop-filter:blur(2px)}
   #pkgpanel.open{display:flex}
@@ -76,7 +107,10 @@
   .pkg button{cursor:pointer;background:#14261c;color:var(--mint);border:1px solid #2a5;border-radius:6px;padding:4px 13px;font:600 12px var(--sans)}
   .pkg button:hover{background:#1a3324}
   .pkg.added button{background:transparent;color:#6a7480;border-color:#2a3540;cursor:default}
-  .pkg.vm{opacity:.45} .pkg.vm button{display:none}
+  .pkg.vm .n,.pkg.vm .d{opacity:.5}   /* dim the label, not the build button */
+  .pkg .build{background:#241a0e;color:#e6a94b;border-color:#7a5a1e}
+  .pkg .build:hover{background:#33260f}
+  .pkg .build.busy{color:#8a7a52;border-color:#3a3020;cursor:default}
 
   /* ---------- themed scrollbars (terminal viewport + panels) ---------- */
   .xterm-viewport, #pkglist { scrollbar-width: thin; scrollbar-color: #2b3742 transparent; }
@@ -98,7 +132,7 @@
       <span class="glyph" aria-hidden="true"><svg width="22" height="22" viewBox="0 0 24 24" fill="none"><path d="M12 2 3 7v10l9 5 9-5V7l-9-5Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><path d="M12 7 7 9.5v5L12 17l5-2.5v-5L12 7Z" fill="currentColor" opacity=".28"/></svg></span>
       <b>wal<span>ios</span></b>
     </div>
-    <span class="ver">native wasm</span>
+    <span class="ver" id="ver">native wasm</span>
     <span class="live"><span class="led"></span>online</span>
     <div id="stats">
       <div class="chip"><span class="k">Mem</span><span class="v mint" id="s-mem">—</span><canvas class="spark" id="sp-mem"></canvas></div>
@@ -117,9 +151,34 @@
   <div id="pkglist"></div>
 </div></div>
 
+<!-- Shared with sandpie's run_python: same CPython, same package bundles, same env.
+     Source of truth is the sandpie repo (modules/walios-backend.js). -->
+<script src="walios-backend.js?v=19"></script>
 <script src="xterm.js"></script>
 <script src="xterm-addon-fit.js"></script>
+<!-- Cross-origin isolation shim. The worker-per-process engine needs SharedArrayBuffer,
+     which browsers only expose on a cross-origin-isolated page. A static host (GitHub
+     Pages) sends no COOP/COEP headers, so register a service worker that adds them and
+     reload once. ?noisolation skips this. -->
 <script>
+if (!crossOriginIsolated && 'serviceWorker' in navigator && !/[?&]noisolation\b/.test(location.search)) {
+  navigator.serviceWorker.register('coi-sw.js').then((r) => {
+    if (sessionStorage.getItem('coi-reloaded')) return;           // one reload only
+    sessionStorage.setItem('coi-reloaded', '1');
+    if (r.active && !navigator.serviceWorker.controller) location.reload();
+    else navigator.serviceWorker.addEventListener('controllerchange', () => location.reload(), { once: true });
+  }).catch(() => {});
+}
+</script>
+<script>
+if (typeof SharedArrayBuffer !== 'function') {
+  const el = document.getElementById('term');
+  el.style.cssText = 'padding:24px;font:14px/1.6 "IBM Plex Mono",monospace;color:#b9c6cf';
+  el.textContent = ('serviceWorker' in navigator && !/[?&]noisolation\b/.test(location.search))
+    ? 'walios: enabling cross-origin isolation (one-time reload)…'
+    : 'walios: this page needs cross-origin isolation (SharedArrayBuffer). Serve it with COOP/COEP headers (python3 coi.py) or let coi-sw.js add them.';
+  throw new Error('walios: no SharedArrayBuffer (not cross-origin isolated)');
+}
 const term = new Terminal({ cursorBlink: true, fontSize: 14, fontFamily: '"IBM Plex Mono", Menlo, Consolas, monospace',
   theme: { background: '#080b0e', foreground: '#b9c6cf', cursor: '#34e5a0',
            green: '#34e5a0', brightGreen: '#8bf7ab', cyan: '#56c7ff', brightBlack: '#4a5560' }, scrollback: 5000 });
@@ -127,26 +186,52 @@ const fit = new FitAddon.FitAddon(); term.loadAddon(fit);
 term.open(document.getElementById('term')); fit.fit(); term.focus();
 
 let worker = null, running = false;
-const BB = 'busybox.wasm?v=net3';  // version-bust: ash+networking, --export-table (shell ^C)
-const MANIFEST = { busybox: BB, sh: BB, hush: BB, ash: BB, python: 'python.wasm', 'python3': 'python.wasm', lua: 'lua.wasm',
-                   ssh: 'ssh.wasm?v=ssl2', slogin: 'ssh.wasm?v=ssl2',  // libcrypto (RSA/ECDSA), built --without-hardening (no -ftrapv → fast crypto)
-                   make: 'make.wasm', 'gmake': 'make.wasm',  // GNU Make 4.4.1 (WALI) — lazy-loaded for in-tab package builds
-                   cc: 'cc:bridge', clang: 'cc:bridge', gcc: 'cc:bridge', wfetch: 'cc:bridge', wextract: 'cc:bridge' };  // host-bridged (worker intercepts exec by name; value unused)
+const WB = self.WALIOS_BACKEND;   // shared with sandpie's run_python (must come first: everything below reads it)
+const BB = WB.BUSYBOX;            // one busybox for every host; the version (and what changed in it) lives in walios-backend.js
+// Programs: the shared set (WB.manifest: busybox, python, lua, qjs/qjsc, ssh, make, rustc, clang).
+// Nothing host-specific is left.
+const MANIFEST = WB.manifest(BB);
+
 
 // FULL origin OPFS root, so the shell can see/edit this app's files (Pyodide
 // /files, conversations, ...). No subdir sandbox — `rm` here really deletes them.
 const opfsSab = new SharedArrayBuffer(32 + (1 << 20));
-const opfsWorker = new Worker('opfs-worker.js');
-opfsWorker.postMessage({ t: 'sab', sab: opfsSab });
+const opfsWorker = new Worker('opfs-worker.js?v=' + WB.WORKER_V);
+// Everything the shell writes into OPFS has to enter the app's sync ledger, or the
+// next dropbox.js cleanup deletes it as an orphan -- that is what wiped a `git clone`
+// down to its bare directory tree. The worker reports paths (it has no localStorage);
+// marking happens here, through the module dropbox.js itself uses.
+// Tombstones: paths the shell deleted. The worker suppresses them from cloud-index
+// listings so a deleted file does not reappear as a Dropbox placeholder, and this
+// keeps the set across reloads (a Worker has no storage). Cleared once the file is
+// really gone from the cloud index, or when something recreates the path.
+const TOMB_KEY = 'walios-deleted';
+const readTombs = () => { try { return JSON.parse(localStorage.getItem(TOMB_KEY) || '[]'); } catch (_) { return []; } };
+const writeTombs = (a) => { try { localStorage.setItem(TOMB_KEY, JSON.stringify(a.slice(-5000))); } catch (_) {} };
+function addTombs(rels) { const t = new Set(readTombs()); for (const r of rels) t.add(String(r).replace(/^\/+/, '')); writeTombs([...t]); }
+function dropTombs(rels) { const t = new Set(readTombs()); let n = 0; for (const r of rels) if (t.delete(String(r).replace(/^\/+/, ''))) n++; if (n) writeTombs([...t]); }
+opfsWorker.postMessage({ t: 'tombstones', rels: readTombs() });
+
+opfsWorker.addEventListener('message', (ev) => {
+  const m = ev.data || {};
+  // No cloud sync on this build: OPFS (/root) is this browser's own persistent disk.
+  if (m.t === 'opfs-changed' && m.rels) dropTombs(m.rels);
+  else if (m.t === 'opfs-removed' && m.rels) addTombs(m.rels);
+});
+opfsWorker.postMessage({ t: 'sab', sab: opfsSab, dbxToken: null, dbxBeta: false });
 
 // WISP socket bridge: a persistent sibling worker owns the WebSocket to the relay,
 // giving the shell real TCP/UDP/ICMP (wget, nc, telnet, ssh, ping).
-const wispSab = new SharedArrayBuffer(32 + 65536);
-const wispWorker = new Worker('wisp-worker.js');
-const RELAY_URL = (location.port === '8791')
-  ? `ws://${location.hostname}:8790`
-  : `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/wisp`;
-wispWorker.postMessage({ t: 'sab', sab: wispSab, url: RELAY_URL });
+// A static host (GitHub Pages) has no relay, so networking is opt-in: pass
+// ?wisp=wss://your-relay/wisp once (remembered in localStorage) or run relay/
+// wisp-standalone.mjs locally. Without one, sockets fail with ECONNREFUSED.
+const RELAY_URL = (() => {
+  const q = new URLSearchParams(location.search).get('wisp');
+  try { if (q !== null) { if (q) localStorage.setItem('walios-wisp', q); else localStorage.removeItem('walios-wisp'); } } catch (_) {}
+  try { return q || localStorage.getItem('walios-wisp') || ''; } catch (_) { return q || ''; }
+})();
+const wispSab = RELAY_URL ? new SharedArrayBuffer(32 + 65536) : null;
+if (wispSab) { const wispWorker = new Worker('wisp-worker.js'); wispWorker.postMessage({ t: 'sab', sab: wispSab, url: RELAY_URL }); }
 
 // ---- live header gauges. UPTIME ticks page-side; MEM/SPEED/PROCS come from the
 // worker's periodic {t:'stats'} (total wasm memory, syscall counter, live procs). ----
@@ -178,148 +263,145 @@ setInterval(() => { if (!bootAt) return; const t = Math.floor((performance.now()
 
 function boot() {
   running = true; bootAt = performance.now();
-  worker = new Worker('wali-worker.js');
+  worker = new Worker('wali-worker.js?v=' + WB.WORKER_V);
   worker.postMessage({ t: 'opfs-sab', sab: opfsSab });
-  worker.postMessage({ t: 'wisp-sab', sab: wispSab });
+  if (wispSab) worker.postMessage({ t: 'wisp-sab', sab: wispSab });
+  // The SAME guest->host channel the walios() tool uses (walios-backend.js). It pulls
+  // <base64 json> frames out of the pty stream, answers them on stdin, and suppresses the
+  // pty's echo of that answer, which would otherwise print a line of base64 on screen.
+  // ONE engine: every process runs on its own worker and the kernel (never blocked) does
+  // its own lazy fetching -- there are no engine flags, stdin/mount bridges or
+  // need-module/need-tar asks any more. Works in every cross-origin-isolated browser.
+  // The shared package index (repo + pkgcache + catalog, WB.pkgIndex): backs the frame
+  // channel's 'pkg' op so `apk add` works in this shell too, and seeds `apk` + its TSV
+  // into the guest below. The manifest merge further down stays as it was.
+  const pkgIdx = WB.pkgIndex('./', MANIFEST);
+  const chan = WB.hostChannel({
+    worker,
+    onScreen: (t) => term.write(buildWatch ? consumeBuildSentinels(t) : t),
+    pkgs: pkgIdx,          // `apk add` from the shell, same index the Packages panel shows
+  });
   worker.onmessage = (ev) => {
     const m = ev.data;
-    if (m.t === 'out') { if (m.fd === 2 && /^\[host\]/.test(m.s)) { console.debug(m.s.trim()); return; } term.write(m.s); }
+    if (m.t === 'tar-mounted') { chan.mounted(m); return; }
+    if (m.t === 'hostcall') { chan.hostcall(m); return; }     // a /dev/hostcall request (apk add, soffice, ...)
+    if (m.t === 'out') { if (m.fd === 2 && /^\[host\]/.test(m.s)) { console.debug(m.s.trim()); return; }
+      if (m.fd === 1) { chan.feed(m.s); return; }
+      term.write(buildWatch ? consumeBuildSentinels(m.s) : m.s); }
     else if (m.t === 'stats') { onStats(m); }
-    else if (m.t === 'cc') { runCcOnPage(m); }
-    else if (m.t === 'wfetch') { runWfetchOnPage(m); }
-    else if (m.t === 'wextract') { runWextractOnPage(m); }
     else if (m.t === 'exit') { running = false; term.write('\r\n\x1b[90m[shell exited (' + m.code + ') — reloading…]\x1b[0m\r\n'); setTimeout(() => location.reload(), 900); }
   };
-  worker.postMessage({ t: 'run', wasm: BB, manifest: MANIFEST,
-    tars: [['rootfs.tar.gz', '/']], opfs: '/root',   // /root is a persistent OPFS home
-    // Lazy companions: the Python stdlib (~4 MB) is fetched+mounted only on first `python`.
-    lazyTars: { 'python.wasm': [['pylib.tar.gz', '/py']] },
-    env: { HOME: '/root', TERM: 'xterm', PATH: '/bin:/usr/bin', PS1: 'walios:$PWD$ ', HOSTNAME: 'walios',
-           PYTHONHOME: '/py', PYTHONPATH: '/py/Lib', PYTHONDONTWRITEBYTECODE: '1', LC_ALL: 'C.UTF-8' },
-    cwd: '/root', argv: ['busybox', 'ash', '-i'], jspi: true, pty: true,
-    cols: term.cols, rows: term.rows });
+  // Seed the VFS with what only the terminal needs: the build-pkg script and the xz
+  // decoder SOURCE (build-pkg compiles it in-tab on first .tar.xz -- same-origin fetch).
+  // Everything every host needs -- TLS trust + gitconfig, apk + its index, python's
+  // import-miss shim, the package manifest and lazy bundles, the env -- comes from
+  // WB.runMessage, the same call the walios() tool and the warm REPL make, so the
+  // terminal cannot drift from them again (which is how this file spent months broken).
+  const blobs = {};   // cc/wfetch/wextract/build-pkg come from the shared boot (WB.runMessage -> /walios/bin/)
+  const seed = (url, path) => fetch(url).then(r => r.ok ? r.arrayBuffer() : null).then(buf => { if (buf) blobs[path] = new Uint8Array(buf); }).catch(() => {});
+  // The Packages panel marks binaries other users compiled in-tab (server pkgcache) as
+  // already available; they are on PATH at boot through the shared index.
+  window.__cachedPkgs = new Set();
+  const markCached = pkgIdx.then((idx) => { for (const [n, e] of Object.entries(idx.pk)) if (e.src === 'pkgcache') window.__cachedPkgs.add(n); }).catch(() => {});
+  Promise.all([seed('xzminidec.c', '/usr/lib/xzminidec.c'), markCached])
+    .then(() => WB.runMessage({ kind: 'terminal', base: './', busybox: BB, pkgs: pkgIdx, manifest: MANIFEST,
+      blobs, argv: ['busybox', 'ash', '-i'], pty: true, cols: term.cols, rows: term.rows }))
+    .then((msg) => {
+      // The CA bundle is security-critical and fetched best-effort: if /walios/cacert.pem
+      // is ever missing again, HTTPS breaks silently (git, curl, openssl, python's ssl all
+      // point at this path). Surface it loudly instead.
+      if (!msg.blobs['/etc/ssl/certs/ca-certificates.crt'])
+        console.warn('[walios] cacert.pem missing (/walios/cacert.pem 404?) -- HTTPS certificate verification will fail for all apps');
+      worker.postMessage(msg);
+    })
+    .catch((e) => term.write('\r\n\x1b[91m[walios] boot failed: ' + ((e && e.message) || e) + '\x1b[0m\r\n'));
 }
-term.onData(d => { if (worker && running) worker.postMessage({ t: 'stdin', data: d }); });
+function sendIn(d) { if (!worker || !running) return; worker.postMessage({ t: 'stdin', data: d }); }
+let kbCtrl = (d) => d;      // the touch keybar's sticky Ctrl rewrites the next keystroke
+term.onData(d => sendIn(kbCtrl(d)));
+// The webfont arrives AFTER the first fit(). xterm had measured the fallback glyph
+// (7.69px, vs IBM Plex Mono's 8.40px at 14px), so it claimed 48 columns where only 44
+// fit -- the right edge of every line was clipped, and the shell, handed that column
+// count, wrapped in the invisible region. fit() alone will not fix it: the cell size is
+// cached until something re-measures. Re-measure once the fonts have settled.
+if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => {
+  try { term._core._charSizeService.measure(); }        // private: hence the fallback
+  catch { term.options.fontFamily += ', monospace'; }   // public nudge, same effect
+  try { fit.fit(); if (worker && running) worker.postMessage({ t: 'winsize', cols: term.cols, rows: term.rows }); } catch {}
+});
+
+// ---- touch keyboard accessory bar (borrowed from /vm/web/term.js) ----
+// Each key goes straight through sendIn, and taps preventDefault on pointerdown so
+// xterm's own textarea keeps focus -- otherwise tapping a key closes the keyboard.
+(function keybar() {
+  if (!matchMedia('(pointer: coarse)').matches) return;
+  const ESC = '';
+  let armed = false, ctrlBtn = null;
+  const setCtrl = (on) => { armed = on; if (ctrlBtn) ctrlBtn.classList.toggle('on', on); };
+  // Ctrl+key for the NEXT keystroke only: @A-Z[\]^_ fold to 0x00-0x1f, space is NUL,
+  // ? is DEL. Anything else passes through untouched rather than being swallowed.
+  kbCtrl = (d) => {
+    if (!armed || d.length !== 1) return d;
+    setCtrl(false);
+    const c = d.toUpperCase().charCodeAt(0);
+    if (c >= 64 && c <= 95) return String.fromCharCode(c & 31);
+    if (d === ' ') return ' ';
+    if (d === '?') return '';
+    return d;
+  };
+  const keys = [
+    { label: '⌄', aria: 'Hide keyboard', act: () => { setCtrl(false); term.blur(); } },
+    { label: 'esc', send: ESC },
+    { label: 'tab', send: '	' },
+    { label: 'ctrl', ctrl: true },
+    { label: '↑', aria: 'Up', send: ESC + '[A' },
+    { label: '↓', aria: 'Down', send: ESC + '[B' },
+    { label: '←', aria: 'Left', send: ESC + '[D' },
+    { label: '→', aria: 'Right', send: ESC + '[C' },
+  ];
+  const bar = document.createElement('div');
+  bar.id = 'keybar';
+  for (const k of keys) {
+    const b = document.createElement('div');
+    b.className = 'kb'; b.textContent = k.label; b.setAttribute('role', 'button');
+    if (k.aria) b.setAttribute('aria-label', k.aria);
+    if (k.ctrl) ctrlBtn = b;
+    b.addEventListener('pointerdown', (e) => {
+      e.preventDefault();                                  // keep the keyboard open
+      if (k.act) k.act();
+      else if (k.ctrl) setCtrl(!armed);
+      else if (k.send) { setCtrl(false); sendIn(k.send); }
+    });
+    bar.appendChild(b);
+  }
+  document.body.appendChild(bar);
+
+  // Visibility tracks whether the keyboard is actually UP, not focus: xterm's textarea
+  // stays focused after the keyboard is dismissed, so keying off focus leaves the bar
+  // showing forever. The keyboard overlays the layout viewport, so a shrunken visual
+  // viewport is the signal. The 120px threshold clears the URL-bar collapse (~60-90px).
+  const rig = document.getElementById('rig');
+  const update = () => {
+    const vv = window.visualViewport;
+    const gap = vv ? window.innerHeight - vv.height - vv.offsetTop : 0;
+    const open = gap > 120 && document.activeElement === term.textarea;
+    bar.style.display = open ? 'flex' : 'none';
+    bar.style.bottom = open ? Math.max(0, gap) + 'px' : '0px';
+    // Lift the whole rig clear of the keyboard AND the bar. Without this the prompt
+    // sits behind the keyboard: xterm keeps the layout viewport's height, so its last
+    // rows -- the ones you are typing on -- are the ones covered.
+    rig.style.bottom = open ? (gap + bar.offsetHeight) + 'px' : '';
+    try { fit.fit(); if (worker && running) worker.postMessage({ t: 'winsize', cols: term.cols, rows: term.rows }); } catch {}
+  };
+  term.textarea.addEventListener('focus', update);
+  term.textarea.addEventListener('blur', () => { setCtrl(false); update(); });
+  const vv = window.visualViewport;
+  if (vv) { vv.addEventListener('resize', update); vv.addEventListener('scroll', update); }
+})();
+
 window.addEventListener('resize', () => { try { fit.fit(); if (worker && running) worker.postMessage({ t: 'winsize', cols: term.cols, rows: term.rows }); drawSpark('sp-mem', memHist, '#34e5a0'); drawSpark('sp-sys', sysHist, '#56c7ff'); } catch {} });
 
-// ---- in-tab C compiler: the OS worker bridges exec("cc"/"clang") here. @yowasp clang
-// (LLVM, its own wasi runtime) compiles to the WALI target; the worker runs the emitted
-// binary as an OS process. The ~100MB toolchain loads lazily on first use and is cached. ----
-let __runClang = null, __waliSysroot = null;
-async function fetchTarTree(url) {
-  const ds = new DecompressionStream('gzip');
-  const buf = new Uint8Array(await new Response((await fetch(url)).body.pipeThrough(ds)).arrayBuffer());
-  const root = {}; const td = new TextDecoder(); let off = 0;
-  const put = (path, data) => { const parts = path.replace(/^\.\//, '').split('/').filter(Boolean);
-    let cur = root; for (let i = 0; i < parts.length - 1; i++) cur = (cur[parts[i]] ||= {});
-    cur[parts[parts.length - 1]] = data; };
-  while (off + 512 <= buf.length) {
-    const h = buf.subarray(off, off + 512); if (h.every(b => b === 0)) break;
-    let name = td.decode(h.subarray(0, 100)).replace(/\0.*$/, '');
-    const pfx = td.decode(h.subarray(345, 500)).replace(/\0.*$/, ''); if (pfx) name = pfx + '/' + name;
-    const size = parseInt(td.decode(h.subarray(124, 136)).trim(), 8) || 0;
-    const type = String.fromCharCode(h[156] || 48); off += 512;
-    if ((type === '0' || type === '\0') && name) put(name, buf.slice(off, off + size));
-    off += Math.ceil(size / 512) * 512;
-  }
-  return root;
-}
-async function ensureClang() {
-  if (!__runClang) { term.write('\r\n\x1b[90m[cc] loading clang (LLVM, ~100MB on first use — cached after)…\x1b[0m\r\n');
-    ({ runClang: __runClang } = await import('./yowasp/gen/bundle.js')); }
-  if (!__waliSysroot) __waliSysroot = await fetchTarTree('./wali-sysroot.tar.gz');
-}
-let __ccQueue = Promise.resolve();   // serialize clang runs — the singleton LLVM app is not safe to run concurrently
-function runCcOnPage(m) { __ccQueue = __ccQueue.then(() => runCcOnPage_(m), () => runCcOnPage_(m)); return __ccQueue; }
-async function runCcOnPage_(m) {
-  let stderr = '';
-  try {
-    await ensureClang();
-    const a = m.argv.slice(); a[0] = 'clang';
-    const hasTarget = a.some(x => x.startsWith('--target'));
-    const wali = hasTarget ? [] : ['--target=wasm32-unknown-linux-muslwali', '--sysroot=/sysroot',
-      '-nostdlibinc', '-isystem', '/sysroot/include',   // use ONLY the wali musl headers, not yowasp's bundled wasi ones
-      '-D_GNU_SOURCE',                                  // enable POSIX/GNU types up front (many recipes set it too late, after -std=c11 locked strict-ANSI)
-      '-O2', '-mllvm', '-wasm-enable-sjlj', '-fwasm-exceptions', '-matomics', '-mbulk-memory',
-      '-mexception-handling', '-L/sysroot/lib', '-nodefaultlibs',
-      '-Wl,--shared-memory,--export-memory,--max-memory=2147483648,-z,stack-size=8388608'];
-    const linking = a.includes('-o') && !a.includes('-c');
-    const libs = (!hasTarget && linking) ? ['-lc', '/sysroot/lib/libclang_rt.builtins.a'] : [];
-    const args = [a[0], ...wali, ...a.slice(1), ...libs];
-    // Mount a fresh sysroot each call. It goes LAST so it always wins over any stale
-    // `sysroot` entry the cwd tree may carry (see the delete below for why one can exist).
-    const sysroot = await fetchTarTree('./wali-sysroot.tar.gz');
-    const out = await __runClang(args, { ...m.inputs, sysroot },
-      { stderr: (bb) => { if (bb) stderr += new TextDecoder().decode(bb); }, decodeASCII: true });
-    // runClang echoes every input back in its output tree — including the whole mounted
-    // sysroot. Drop it so the worker doesn't persist a bogus /<cwd>/sysroot dir that would
-    // then clobber the real sysroot on the next compile (off_t/uid_t "unknown type name").
-    if (out && out.sysroot) delete out.sysroot;
-    const files = {};   // flatten the returned tree to path->bytes (yowasp may return nested)
-    (function walk(o, pre) { for (const [k, v] of Object.entries(o)) { if (v && v.constructor === Object) walk(v, pre + k + '/'); else files[pre + k] = v; } })(out, '');
-    worker.postMessage({ t: 'cc-result', id: m.id, files, stderr, code: 0 });
-  } catch (e) { worker.postMessage({ t: 'cc-result', id: m.id, stderr, err: (e && e.message) || String(e), code: 1 }); }
-}
-// server-side fetch proxy for the in-tab package builder (browser can't do HTTPS over WISP).
-// Prod runs an NGINX proxy keyed by host-in-path (/proxy/<host>/<path>?<query>, SSO-gated +
-// SSRF-guarded, HTTPS upstream only); the local mirror uses /proxy/?url=<enc>. Try the prod
-// shape first, fall back to the mirror shape so the same page works in both.
-async function runWfetchOnPage(m) {
-  try {
-    let r, u;
-    try { u = new URL(m.url); } catch { u = null; }
-    if (u && u.protocol === 'https:') {
-      r = await fetch('/proxy/' + u.host + u.pathname + u.search, { redirect: 'follow' });
-      if (!r.ok) r = null;   // fall through to the mirror shape (e.g. 404 on the mirror)
-    }
-    if (!r) r = await fetch('/proxy/?url=' + encodeURIComponent(m.url), { redirect: 'follow' });
-    const bytes = new Uint8Array(await r.arrayBuffer());
-    worker.postMessage({ t: 'cc-result', id: m.id, bytes, status: r.status }, [bytes.buffer]);
-  } catch (e) { worker.postMessage({ t: 'cc-result', id: m.id, err: (e && e.message) || String(e) }); }
-}
-// gunzip + parse a tar into a flat {path: bytes|null(dir)} map, on the page (busybox has no tar)
-// gunzip that tolerates concatenated multi-member gzip (e.g. Alpine APKINDEX = .SIGN + index).
-// DecompressionStream errors on trailing bytes after the first member, so on failure we split
-// at the gzip magic (1f 8b 08) and decompress each member, then concatenate.
-async function gunzipAll(buf) {
-  const one = async (b) => new Uint8Array(await new Response(new Blob([b]).stream().pipeThrough(new DecompressionStream('gzip'))).arrayBuffer());
-  try { return await one(buf); }
-  catch (_) {
-    const starts = [];
-    for (let i = 0; i + 2 < buf.length; i++) if (buf[i] === 0x1f && buf[i + 1] === 0x8b && buf[i + 2] === 0x08) starts.push(i);
-    if (!starts.length || starts[0] !== 0) throw new Error('invalid gzip stream');
-    starts.push(buf.length);
-    const parts = [];
-    for (let k = 0; k < starts.length - 1; k++) {
-      try { parts.push(await one(buf.subarray(starts[k], starts[k + 1]))); }
-      catch (e) { /* magic byte was inside deflate data, not a real boundary — skip */ }
-    }
-    if (!parts.length) throw new Error('gzip decode failed');
-    let n = 0; for (const p of parts) n += p.length;
-    const out = new Uint8Array(n); let o = 0; for (const p of parts) { out.set(p, o); o += p.length; }
-    return out;
-  }
-}
-async function runWextractOnPage(m) {
-  try {
-    let buf = new Uint8Array(m.bytes);
-    if (buf[0] === 0x1f && buf[1] === 0x8b) buf = await gunzipAll(buf);   // gzip (single or multi-member)
-    const files = {}; const td = new TextDecoder(); let off = 0;
-    while (off + 512 <= buf.length) {
-      const h = buf.subarray(off, off + 512); if (h.every(b => b === 0)) break;
-      let name = td.decode(h.subarray(0, 100)).replace(/\0.*$/, '');
-      const pfx = td.decode(h.subarray(345, 500)).replace(/\0.*$/, ''); if (pfx) name = pfx + '/' + name;
-      const size = parseInt(td.decode(h.subarray(124, 136)).trim(), 8) || 0;
-      const type = String.fromCharCode(h[156] || 48); off += 512;
-      if (name) { if (type === '5') files[name] = null; else if (type === '0' || type === '\0') files[name] = buf.slice(off, off + size); }
-      off += Math.ceil(size / 512) * 512;
-    }
-    const transfer = Object.values(files).filter(b => b).map(b => b.buffer);
-    worker.postMessage({ t: 'cc-result', id: m.id, files }, transfer);
-  } catch (e) { worker.postMessage({ t: 'cc-result', id: m.id, err: (e && e.message) || String(e) }); }
-}
-term.write('\x1b[90mwalios — starting a shell (busybox on a pty, native wasm)…\x1b[0m\r\n');
-boot();
+boot();   // start the kernel + shell (everything it needs above is defined; the panel below is UI only)
 
 // ---- Packages panel: browse the aports catalog, add one as a live shell command ----
 const pkgpanel = document.getElementById('pkgpanel'), pkglist = document.getElementById('pkglist'),
@@ -334,7 +416,8 @@ function renderPkgs(q) {
   const rows = [...wasm, ...vm.slice(0, 80)].slice(0, 200);
   pkglist.innerHTML = '';
   for (const p of rows) {
-    const runnable = p.tier === 'wasm', bi = builtin.has(p.name), on = added.has(p.name);
+    const runnable = p.tier === 'wasm', bi = builtin.has(p.name),
+          on = added.has(p.name) || (window.__cachedPkgs && window.__cachedPkgs.has(p.name));  // server-cached = already available
     const row = document.createElement('div');
     row.className = 'pkg' + (runnable ? '' : ' vm') + (on || bi ? ' added' : '');
     row.innerHTML = `<span class="n"></span><span class="d"></span>`;
@@ -343,9 +426,51 @@ function renderPkgs(q) {
     if (runnable) { const b = document.createElement('button');
       b.textContent = bi ? 'built-in' : on ? '✓ added' : 'add';
       if (!bi && !on) b.onclick = () => addPkg(p, row, b);
-      row.appendChild(b); }
+      row.appendChild(b);
+    } else if (!bi) {   // not ported to wasm — offer an in-tab build (fetch APKBUILD+source, cc+make)
+      const b = document.createElement('button'); b.className = 'build';
+      b.textContent = on ? '✓ built' : 'build';
+      if (!on) b.onclick = () => buildPkg(p, row, b);
+      row.appendChild(b);
+    }
     pkglist.appendChild(row);
   }
+}
+// The build button drives build-pkg (from the shared boot) in the shell and watches its output for the
+// __BP_OK__/__BP_FAIL__ sentinels (stripped from the terminal) to update the row.
+let buildWatch = null;   // { name, row, btn } while a build is in flight
+function buildPkg(p, row, b) {
+  if (buildWatch) { term.write(`\r\n\x1b[93m(a build is already running — wait for it to finish)\x1b[0m\r\n`); return; }
+  buildWatch = { name: p.name, row, btn: b };
+  b.classList.add('busy'); b.textContent = 'building…';
+  closePkgs();
+  term.write(`\r\n\x1b[90m[build] compiling \x1b[1m${p.name}\x1b[22m in-tab — this fetches the APKBUILD + source and runs the wasm clang…\x1b[0m\r\n`);
+  if (worker && running) worker.postMessage({ t: 'stdin', data: `build-pkg ${p.name}\n` });
+}
+// Consume build sentinels from a chunk of shell output; returns the text with them removed.
+function consumeBuildSentinels(s) {
+  if (!buildWatch) return s;
+  const okRe = /__BP_OK__ (\S+)/, failRe = /__BP_FAIL__ (\S+)/;
+  const mo = s.match(okRe), mf = s.match(failRe);
+  const finish = (ok) => {
+    const w = buildWatch; buildWatch = null;
+    if (!w) return;
+    if (ok) { added.add(w.name); w.btn.textContent = '✓ built'; w.btn.classList.remove('busy');
+      term.write(`\r\n\x1b[92m＋ built \x1b[1m${w.name}\x1b[22m — run it: \x1b[1m${w.name}\x1b[0m\r\n`);
+      uploadBuiltPkg(w.name); }
+    else { w.btn.classList.remove('busy'); w.btn.textContent = 'retry';
+      term.write(`\r\n\x1b[91m✗ build failed for \x1b[1m${w.name}\x1b[22m — see the log above.\x1b[0m\r\n`); }
+  };
+  if (mo) { s = s.replace(okRe, ''); finish(true); }
+  else if (mf) { s = s.replace(failRe, ''); finish(false); }
+  return s;
+}
+// Static host: there is no server package cache, so a package built in-tab lives in
+// this tab only (the OPFS disk keeps your files, not /bin).
+function uploadBuiltPkg(name) {
+  term.write(`
+[90m[cache] ${name} is available in this session (static host: no shared package cache).[0m
+`);
 }
 function addPkg(p, row, b) {
   if (worker) worker.postMessage({ t: 'add-pkg', name: p.name, url: p.wasm,

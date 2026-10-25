@@ -1,5 +1,4 @@
-*.wasm
-*.tar.gz
+# Build trees and farm scratch (never the shipped runtime under browser/)
 *.o
 *.a
 build/
@@ -9,3 +8,7 @@ repo/
 overlay/
 log/
 node_modules/
+tests/build/
+# Too large for GitHub (100MB file cap); fetched out of band
+browser/rustc-threads.wasm
+browser/wali-rust-sysroot.tar.gz
