@@ -21,7 +21,7 @@ results as a release. Each run plans and builds once and publishes once.
 - **`plan.js`:** works out the package set and its build order.
   - **Dependencies:** each package's dependency closure comes from its APKBUILD
     (`depends` + `makedepends`, minus build tools).
-  - **Waves:** packages are grouped into up to 4 dependency waves.
+  - **Waves:** packages are grouped into up to 6 dependency waves.
   - **Chunks:** each wave is split into chunks of `CHUNK` packages per matrix job. A
     wave stays at or under 256 jobs, and at most 20 run at once.
 - **`build-one.sh`:** builds one aport the same way the old `farm/build-one.sh` did.
@@ -37,8 +37,23 @@ results as a release. Each run plans and builds once and publishes once.
 
 A library built in wave N reaches waves after N as an artifact. Its `usr/` overlay is
 unpacked into each later job's `-I`/`-L` path. Cycles are broken, and chains deeper than
-4 are folded into the last wave, so a few late packages may miss a dependency and fail.
+6 are folded into the last wave, so a few late packages may miss a dependency and fail.
 Rerun those with `pkgs`.
+
+## What the build environment provides
+
+- **The abuild environment recipes expect:** `CARCH=wasm32`, `CHOST`, `CTARGET`, and the
+  helper functions (`msg`, `update_config_sub`, `amove`, `default_prepare` and the rest).
+  `package()` runs under fakeroot.
+- **Static libraries only:** a `-shared` link becomes a static archive under the `.so`
+  name, with a `.a` sibling.
+- **Cross builds for meson and cmake:** `abuild-meson` and `CMAKE_TOOLCHAIN_FILE` point
+  them at the WALI toolchain.
+- **C++:** libc++, libc++abi and libunwind, plus the `__cpp_exception` tag.
+- **Linux UAPI headers:** these come from release `toolchain-2026-10-31`.
+- **Packages that aren't built to wasm:** `noarch` packages are still packaged, because
+  their headers and `.pc` files reach dependents through the overlay, but they're listed
+  as skipped. Rust and Go recipes are skipped.
 
 ## Consuming it
 

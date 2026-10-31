@@ -4,3 +4,6 @@
 . "$FARM_CI_DIR/../config.site"
 enable_shared=no
 enable_static=yes
+# Always a cross build, even when a recipe runs ./configure without --host: otherwise
+# AC_PROG_CC tries to RUN a test program ("cannot run C compiled programs").
+cross_compiling=yes

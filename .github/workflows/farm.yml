@@ -1,6 +1,6 @@
 # walios build farm: Alpine aports -> wasm32-wali, built in parallel on GitHub runners,
 # published as a release that the walios package CDN serves (walios/cdn in sandpie).
-# Waves follow the dependency graph; libraries built in a wave reach the next ones as
+# Up to 6 waves follow the dependency graph; libraries built in a wave reach the next ones as
 # overlay artifacts. See farm/ci/.
 name: farm
 on:
@@ -33,6 +33,8 @@ jobs:
       w1: ${{ steps.p.outputs.w1 }}
       w2: ${{ steps.p.outputs.w2 }}
       w3: ${{ steps.p.outputs.w3 }}
+      w4: ${{ steps.p.outputs.w4 }}
+      w5: ${{ steps.p.outputs.w5 }}
       count: ${{ steps.p.outputs.count }}
       publish: ${{ steps.in.outputs.publish }}
     steps:
@@ -55,7 +57,7 @@ jobs:
             console.log(out);'
       - id: p
         env:
-          WAVES: '4'
+          WAVES: '6'
           APORTS_DIR: ${{ github.workspace }}/../aports
           APORTS_LIST: ${{ github.workspace }}/../aports-list.txt
         run: node farm/ci/plan.js
@@ -90,9 +92,19 @@ jobs:
     if: always() && needs.plan.outputs.w3 != '[]'
     uses: ./.github/workflows/farm-wave.yml
     with: { wave: 3, chunks: '${{ needs.plan.outputs.w3 }}' }
+  wave4:
+    needs: [plan, wave3]
+    if: always() && needs.plan.outputs.w4 != '[]'
+    uses: ./.github/workflows/farm-wave.yml
+    with: { wave: 4, chunks: '${{ needs.plan.outputs.w4 }}' }
+  wave5:
+    needs: [plan, wave4]
+    if: always() && needs.plan.outputs.w5 != '[]'
+    uses: ./.github/workflows/farm-wave.yml
+    with: { wave: 5, chunks: '${{ needs.plan.outputs.w5 }}' }
 
   publish:
-    needs: [plan, wave0, wave1, wave2, wave3]
+    needs: [plan, wave0, wave1, wave2, wave3, wave4, wave5]
     if: always() && needs.plan.result == 'success'
     runs-on: ubuntu-latest
     steps:

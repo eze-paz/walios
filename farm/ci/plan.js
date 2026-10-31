@@ -4,7 +4,7 @@
 //   SAMPLE=50      a deterministic sample of farm/ci/catalog.txt (SEED=1), or
 //   ALL=1          the whole catalog
 //   MAX=400        cap on seeds + dependency closure
-//   WAVES=4        dependency waves (deeper chains collapse into the last one)
+//   WAVES=6        dependency waves (deeper chains collapse into the last one)
 //   CHUNK=8        packages per matrix job (one wave stays <= 256 jobs: GitHub's cap)
 // Deps = APKBUILD depends + makedepends, minus build tools (DENY), as farm/farm3.js did.
 // Prints {waves:[[chunk,...],...], count}; with GITHUB_OUTPUT set, writes w0..wN + count.
@@ -23,7 +23,7 @@ const skip = (d) => !d || d.includes(':') || d.startsWith('!') || d.startsWith('
   /-doc$|-lang$|-openrc$|-static$|-bash-completion$/.test(d);
 
 const catalog = fs.readFileSync(path.join(__dirname, 'catalog.txt'), 'utf8').split('\n').map(s => s.trim()).filter(Boolean);
-const MAX = +(process.env.MAX || 400), NW = +(process.env.WAVES || 4), CHUNK = +(process.env.CHUNK || 8);
+const MAX = +(process.env.MAX || 400), NW = +(process.env.WAVES || 6), CHUNK = +(process.env.CHUNK || 8);
 let seeds;
 if (process.env.PKGS) seeds = process.env.PKGS.split(/[\s,]+/).filter(Boolean);
 else if (process.env.ALL) seeds = catalog.slice();

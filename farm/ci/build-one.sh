@@ -13,7 +13,7 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 : "${WALI_TC:?source the toolchain env.sh first}"
 APORTS="https://git.alpinelinux.org/aports/plain"
 HOST="node $HERE/../../host/host.js"
-mkdir -p "$OUT" "$OVERLAY/usr/include" "$OVERLAY/usr/lib"
+mkdir -p "$OUT" "$OVERLAY/usr/include" "$OVERLAY/usr/lib" "$OVERLAY/lib"
 log="$OUT/$pkg.log"; : > "$log"
 bdir=$(mktemp -d); trap 'rm -rf "$bdir"' EXIT
 pkgver="?"; BUILD_SECS=0
@@ -38,8 +38,10 @@ fi
 apk() { (cd "$bdir" && bash -c "CARCH=wasm32; source ./APKBUILD >/dev/null 2>&1; echo \"\$$1\""); }
 pkgver=$(apk pkgver)
 # Not wasm targets: architecture-independent packages (pure perl/python/lua, data, fonts)
-# run on a walios interpreter as they are; Rust and Go need their own toolchains.
-[ "$(apk arch)" = noarch ] && emit skip noarch
+# run on a walios interpreter as they are -- but they are still built and packaged, because
+# header/data ones (xorgproto, xcb-proto, util-macros) are what C dependents need in the
+# overlay. Rust and Go need their own toolchains.
+NOARCH=""; [ "$(apk arch)" = noarch ] && NOARCH=1
 case " $(apk makedepends) " in *" cargo "*|*" rust "*|*" cargo-auditable "*) emit skip needs-rust;; *" go "*) emit skip needs-go;; esac
 
 src_entry=$(apk source | tr ' \t' '\n\n' | grep -E 'https?://' | head -1)
@@ -73,7 +75,7 @@ for f in $(find "$SRC" -name sigsegv.in.h 2>/dev/null); do
 pkgdir="$bdir/pkg"; mkdir -p "$pkgdir"
 cat > "$bdir/.farm-build.sh" <<'EOS'
 set +u
-export WALI_EXTRA_CFLAGS="-I$OVERLAY/usr/include" WALI_EXTRA_LDFLAGS="-L$OVERLAY/usr/lib"
+export WALI_EXTRA_CFLAGS="-I$OVERLAY/usr/include" WALI_EXTRA_LDFLAGS="-L$OVERLAY/usr/lib -L$OVERLAY/lib"
 export CFLAGS="" CXXFLAGS="" LDFLAGS="" CPPFLAGS="" CONFIG_SITE="$HERE/config.site" FARM_CI_DIR="$HERE"
 export PKG_CONFIG_PATH="$OVERLAY/usr/lib/pkgconfig:$OVERLAY/usr/share/pkgconfig" PKG_CONFIG_SYSROOT_DIR="$OVERLAY"
 export CARCH=wasm32 CLIBC=musl CBUILD=x86_64-pc-linux-gnu CHOST=wasm32-unknown-linux-musl CTARGET=wasm32-unknown-linux-musl
@@ -99,7 +101,10 @@ _t0=$(date +%s)
 OVERLAY="$OVERLAY" HERE="$HERE" BDIR="$bdir" SRC="$SRC" PKGDIR="$pkgdir" fakeroot -- bash "$bdir/.farm-build.sh" >>"$log" 2>&1
 BUILD_SECS=$(( $(date +%s) - _t0 ))
 
-if [ -d "$pkgdir/usr" ]; then tar czf "$OUT/$pkg.overlay.tar.gz" -C "$pkgdir" usr; fi
+# Some recipes install libraries under /lib (zlib, ncurses' terminfo libs), not /usr/lib.
+ovdirs=$(cd "$pkgdir" && ls -d usr lib 2>/dev/null)
+[ -n "$ovdirs" ] && tar czf "$OUT/$pkg.overlay.tar.gz" -C "$pkgdir" $ovdirs
+[ -n "$NOARCH" ] && emit skip noarch
 
 # The package's program: what it INSTALLS -- usr/bin/<pkg> first, then its other bin dirs.
 # A wasm left in the source tree (an example, a test helper) is not the package.
