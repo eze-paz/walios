@@ -4,6 +4,11 @@
 # overlay artifacts. See farm/ci/.
 name: farm
 on:
+  # A commit that changes farm/ci/request.json runs the farm with the inputs in it (same
+  # keys as below), so a run can be asked for without Actions API rights.
+  push:
+    branches: [main]
+    paths: ['farm/ci/request.json']
   workflow_dispatch:
     inputs:
       pkgs:   { description: 'Packages (space separated); empty = sample/all', required: false, default: '' }
@@ -29,17 +34,27 @@ jobs:
       w2: ${{ steps.p.outputs.w2 }}
       w3: ${{ steps.p.outputs.w3 }}
       count: ${{ steps.p.outputs.count }}
+      publish: ${{ steps.in.outputs.publish }}
     steps:
       - uses: actions/checkout@v4
       - name: Alpine aports (GitHub mirror)
         run: git clone -q --depth 1 https://github.com/alpinelinux/aports.git ../aports && git -C ../aports log -1 --format='aports %h %cs'
+      - name: Inputs (dispatch form, or farm/ci/request.json on push)
+        id: in
+        env:
+          EV: ${{ github.event_name }}
+          IN: ${{ toJSON(inputs) }}
+        run: |
+          node -e '
+            const ev = process.env.EV, i = ev === "push" ? require("./farm/ci/request.json") : JSON.parse(process.env.IN || "{}");
+            const v = (k, d) => (i[k] === undefined || i[k] === "" ? d : String(i[k]));
+            const out = { PKGS: v("pkgs", ""), SAMPLE: v("sample", "50"), ALL: (i.all === true || i.all === "true") ? "1" : "",
+                          MAX: v("max", "400"), CHUNK: v("chunk", "4"), PUBLISH: (i.publish === false || i.publish === "false") ? "" : "1" };
+            require("fs").appendFileSync(process.env.GITHUB_ENV, Object.entries(out).map(([k, x]) => k + "=" + x).join("\n") + "\n");
+            require("fs").appendFileSync(process.env.GITHUB_OUTPUT, "publish=" + out.PUBLISH + "\n");
+            console.log(out);'
       - id: p
         env:
-          PKGS: ${{ inputs.pkgs }}
-          SAMPLE: ${{ inputs.sample }}
-          ALL: ${{ inputs.all && '1' || '' }}
-          MAX: ${{ inputs.max }}
-          CHUNK: ${{ inputs.chunk }}
           WAVES: '4'
           APORTS_DIR: ${{ github.workspace }}/../aports
           APORTS_LIST: ${{ github.workspace }}/../aports-list.txt
@@ -94,7 +109,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with: { name: farm-index, path: 'index.json' }
       - name: Release
-        if: inputs.publish
+        if: needs.plan.outputs.publish == '1'
         env: { GH_TOKEN: '${{ github.token }}' }
         run: |
           gh release create "$TAG" --title "walios farm $TAG" --notes-file summary.md --prerelease

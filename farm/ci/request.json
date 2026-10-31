@@ -1,0 +1,7 @@
+{
+  "sample": 50,
+  "max": 150,
+  "chunk": 4,
+  "publish": true,
+  "note": "pilot: 50 random catalog packages + dependency closure, capped at 150"
+}
