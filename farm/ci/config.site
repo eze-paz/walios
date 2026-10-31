@@ -1,0 +1,6 @@
+# Farm autoconf site file: the cross-compile cache answers of farm/config.site, plus static
+# libraries only (walios executables link statically; the wrapper turns -shared into an
+# archive anyway, so a "shared" libfoo would just be built twice).
+. "$FARM_CI_DIR/../config.site"
+enable_shared=no
+enable_static=yes

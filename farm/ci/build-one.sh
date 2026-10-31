@@ -3,8 +3,8 @@
 # edition of farm/build-one.sh: no shared state, everything goes to <out>.
 #   build-one.sh <pkg> <overlay> <out>
 # <overlay>  usr/{include,lib} of already-built deps (read-only input)
-# <out>/<pkg>.json            result row (also the last stdout line)
-# <out>/<pkg>.wasm            the main executable, if any (smoke-tested on host/host.js)
+# <out>/<pkg>.json            result row (also the last stdout line); status pass|fail|skip
+# <out>/<pkg>.wasm            the package's program, if it installs one (smoke-tested)
 # <out>/<pkg>.overlay.tar.gz  what package() installed under usr/ (libs + headers for dependents)
 # <out>/<pkg>.log             full build log
 set -u
@@ -35,21 +35,29 @@ else
     repo_sub=community
     curl -sSfL --retry 3 --max-time 30 "$APORTS/community/$pkg/APKBUILD" -o "$bdir/APKBUILD" 2>>"$log" || emit fail no-recipe; }
 fi
-apk() { (cd "$bdir" && bash -c "source ./APKBUILD >/dev/null 2>&1; echo \"\$$1\""); }
+apk() { (cd "$bdir" && bash -c "CARCH=wasm32; source ./APKBUILD >/dev/null 2>&1; echo \"\$$1\""); }
 pkgver=$(apk pkgver)
+# Not wasm targets: architecture-independent packages (pure perl/python/lua, data, fonts)
+# run on a walios interpreter as they are; Rust and Go need their own toolchains.
+[ "$(apk arch)" = noarch ] && emit skip noarch
+case " $(apk makedepends) " in *" cargo "*|*" rust "*|*" cargo-auditable "*) emit skip needs-rust;; *" go "*) emit skip needs-go;; esac
+
 src_entry=$(apk source | tr ' \t' '\n\n' | grep -E 'https?://' | head -1)
 src_name="${src_entry%%::*}"; src_url="${src_entry##*::}"
 [ "$src_name" = "$src_url" ] && src_name="$(basename "$src_url")"
 [ -z "$src_url" ] && emit fail no-source
 curl -sSfL --retry 3 --max-time 300 "$src_url" -o "$bdir/$src_name" 2>>"$log" || emit fail dl-failed
 tar xf "$bdir/$src_name" -C "$bdir" 2>>"$log" || emit fail extract-failed
-SRC=$(find "$bdir" -mindepth 1 -maxdepth 1 -type d | head -1)
+SRC=$(find "$bdir" -mindepth 1 -maxdepth 1 -type d ! -name pkg | head -1)
 [ -z "$SRC" ] && emit fail no-srcdir
 for f in $(apk source | tr ' \t' '\n\n' | grep -vE 'https?://|^$'); do
   [ -f "$bdir/$f" ] || curl -sSfL --retry 3 --max-time 30 "$APORTS/$repo_sub/$pkg/$f" -o "$bdir/$f" 2>>"$log"
   [ -f "$bdir/$f" ] && cp "$bdir/$f" "$SRC/" 2>/dev/null
 done
 
+# Old config.sub/config.guess reject wasm32; abuild's update_config_sub does this per recipe.
+for f in $(find "$SRC" -name config.sub 2>/dev/null); do cp /usr/share/misc/config.sub "$f"; done
+for f in $(find "$SRC" -name config.guess 2>/dev/null); do cp /usr/share/misc/config.guess "$f"; done
 # gnulib on wasm: no signals, no /proc VMA introspection. Its __linux__ checks fire for our
 # -linux-muslwali triple, so give c-stack/sigsegv their no-op paths (what stackvma-none.c is).
 for sv in $(find "$SRC" -name stackvma.c 2>/dev/null); do
@@ -59,45 +67,56 @@ for vi in $(find "$SRC" -path "*/lib/vma-iter.c" 2>/dev/null); do
 for f in $(find "$SRC" -name sigsegv.in.h 2>/dev/null); do
   sed -i 's|#endif /\* _SIGSEGV_H \*/|#if defined __wasm__\n# undef HAVE_SIGSEGV_RECOVERY\n# define HAVE_SIGSEGV_RECOVERY 0\n# undef HAVE_STACK_OVERFLOW_RECOVERY\n# define HAVE_STACK_OVERFLOW_RECOVERY 0\n#endif\n#endif /* _SIGSEGV_H */|' "$f"; done
 
-# The aport's own prepare()/build()/package(), unmodified, with our toolchain in the env.
-_t0=$(date +%s)
+# The aport's own prepare()/build()/package(), unmodified, with our toolchain and the abuild
+# environment it expects (CARCH, CHOST, the helper functions), under fakeroot so package()
+# may chown/install -o root. Not under `set -u`: recipes read optional variables freely.
 pkgdir="$bdir/pkg"; mkdir -p "$pkgdir"
-(
-  export WALI_EXTRA_CFLAGS="-I$OVERLAY/usr/include" WALI_EXTRA_LDFLAGS="-L$OVERLAY/usr/lib"
-  export CFLAGS="" CXXFLAGS="" LDFLAGS="" CPPFLAGS="" CONFIG_SITE="$HERE/../config.site"
-  export PKG_CONFIG_PATH="$OVERLAY/usr/lib/pkgconfig" PKG_CONFIG_SYSROOT_DIR="$OVERLAY"
-  export cross_compiling=yes CHOST=wasm32-unknown-linux-musl CBUILD=x86_64-pc-linux-gnu CTARGET=wasm32-unknown-linux-musl
-  export srcdir="$bdir" builddir="$SRC" pkgdir subpkgdir="$bdir/subpkg" startdir="$bdir"
-  cd "$bdir"
-  default_prepare() { cd "$builddir"; for p in $source; do case "${p%%::*}" in
-      *.patch) [ -f "$srcdir/${p%%::*}" ] && { echo "applying $p"; patch -p1 <"$srcdir/${p%%::*}" || return 1; };; esac; done; }
-  source ./APKBUILD
-  : "${builddir:=$SRC}"
-  ( if type prepare >/dev/null 2>&1; then prepare; else default_prepare; fi )
-  cd "$builddir" 2>/dev/null || cd "$SRC"
-  ( if type build >/dev/null 2>&1; then build; else make; fi )
-  cd "$builddir" 2>/dev/null || cd "$SRC"
-  ( if type package >/dev/null 2>&1; then package; fi )
-) >>"$log" 2>&1
+cat > "$bdir/.farm-build.sh" <<'EOS'
+set +u
+export WALI_EXTRA_CFLAGS="-I$OVERLAY/usr/include" WALI_EXTRA_LDFLAGS="-L$OVERLAY/usr/lib"
+export CFLAGS="" CXXFLAGS="" LDFLAGS="" CPPFLAGS="" CONFIG_SITE="$HERE/config.site" FARM_CI_DIR="$HERE"
+export PKG_CONFIG_PATH="$OVERLAY/usr/lib/pkgconfig:$OVERLAY/usr/share/pkgconfig" PKG_CONFIG_SYSROOT_DIR="$OVERLAY"
+export CARCH=wasm32 CLIBC=musl CBUILD=x86_64-pc-linux-gnu CHOST=wasm32-unknown-linux-musl CTARGET=wasm32-unknown-linux-musl
+export CTARGET_ARCH=wasm32 CBUILD_ARCH=x86_64 cross_compiling=yes JOBS=$(nproc) MAKEFLAGS="-j$(nproc)"
+export srcdir="$BDIR" builddir="$SRC" pkgdir="$PKGDIR" subpkgdir="$BDIR/subpkg" startdir="$BDIR"
+msg() { echo ">>> $*"; }; msg2() { echo "  > $*"; }; warning() { echo "WARNING: $*"; }; warning2() { warning "$@"; }
+error() { echo "ERROR: $*"; }; die() { error "$@"; exit 1; }
+update_config_sub() { find "${1:-.}" -name config.sub -exec cp /usr/share/misc/config.sub {} \; ; }
+update_config_guess() { find "${1:-.}" -name config.guess -exec cp /usr/share/misc/config.guess {} \; ; }
+amove() { :; }; default_check() { :; }; default_doc() { :; }; default_dev() { :; }; default_libs() { :; }
+default_prepare() { cd "$builddir"; for p in $source; do case "${p%%::*}" in
+    *.patch) [ -f "$srcdir/${p%%::*}" ] && { msg "applying $p"; patch -p1 <"$srcdir/${p%%::*}" || return 1; };; esac; done; }
+cd "$BDIR"
+source ./APKBUILD
+: "${builddir:=$SRC}"
+( if type prepare >/dev/null 2>&1; then prepare; else default_prepare; fi )
+cd "$builddir" 2>/dev/null || cd "$SRC"
+( if type build >/dev/null 2>&1; then build; else make; fi )
+cd "$builddir" 2>/dev/null || cd "$SRC"
+( if type package >/dev/null 2>&1; then package; fi )
+EOS
+_t0=$(date +%s)
+OVERLAY="$OVERLAY" HERE="$HERE" BDIR="$bdir" SRC="$SRC" PKGDIR="$pkgdir" fakeroot -- bash "$bdir/.farm-build.sh" >>"$log" 2>&1
 BUILD_SECS=$(( $(date +%s) - _t0 ))
 
 if [ -d "$pkgdir/usr" ]; then tar czf "$OUT/$pkg.overlay.tar.gz" -C "$pkgdir" usr; fi
 
-# The main executable: prefer usr/bin/<pkg>, then anything in the package's bin dirs, then
-# any wasm with a _start export in the tree.
+# The package's program: what it INSTALLS -- usr/bin/<pkg> first, then its other bin dirs.
+# A wasm left in the source tree (an example, a test helper) is not the package.
 is_exe() { [ "$(head -c4 "$1" 2>/dev/null | od -An -tx1 | tr -d ' \n')" = "0061736d" ] &&
   node -e "const m=new WebAssembly.Module(require('fs').readFileSync(process.argv[1]));process.exit(WebAssembly.Module.exports(m).some(e=>e.name==='_start')?0:1)" "$1" 2>/dev/null; }
 exe=""
-for f in "$pkgdir/usr/bin/$pkg" "$pkgdir/bin/$pkg" $(find "$pkgdir" -path '*bin/*' -type f 2>/dev/null) $(find "$SRC" -type f -size +8k 2>/dev/null); do
+for f in "$pkgdir/usr/bin/$pkg" "$pkgdir/bin/$pkg" "$pkgdir/usr/sbin/$pkg" "$pkgdir/sbin/$pkg" \
+         $(find "$pkgdir/usr/bin" "$pkgdir/bin" "$pkgdir/usr/sbin" "$pkgdir/sbin" -type f 2>/dev/null | sort); do
   [ -f "$f" ] && is_exe "$f" && { exe="$f"; break; }
 done
 if [ -n "$exe" ]; then
   cp "$exe" "$OUT/$pkg.wasm"
   st=$(cd /tmp && timeout 60 $HOST "$OUT/$pkg.wasm" --version </dev/null 2>&1)
-  smoke=$(printf '%s\n' "$st" | grep -vE 'wali-host\]|ENOSYS|stub' | head -1)
+  smoke="$(basename "$exe"): $(printf '%s\n' "$st" | grep -vE 'wali-host\]|ENOSYS|stub' | head -1)"
   if printf '%s' "$st" | grep -qE 'trap in pid|LinkError|CompileError|RuntimeError'; then rm -f "$OUT/$pkg.wasm"; emit fail smoke-trap exe "$smoke"
   elif printf '%s' "$st" | grep -qE 'exit=[0-9]+ procs'; then emit pass ok exe "$smoke"
   else rm -f "$OUT/$pkg.wasm"; emit fail smoke-crash exe "$smoke"; fi
 fi
-if [ -f "$OUT/$pkg.overlay.tar.gz" ] && tar tzf "$OUT/$pkg.overlay.tar.gz" | grep -qE '\.a$'; then emit pass lib-built lib; fi
-emit fail "no-wasm-output:$(grep -m1 -iE 'error' "$log" | tr -d '\000-\037"\\' | cut -c1-60)"
+if [ -f "$OUT/$pkg.overlay.tar.gz" ] && tar tzf "$OUT/$pkg.overlay.tar.gz" | grep -qE '\.(a|so)$'; then emit pass lib-built lib; fi
+emit fail "no-wasm-output:$(grep -m1 -E 'error|Error|ERROR' "$log" | tr -d '\000-\037"\\' | cut -c1-60)"

@@ -23,7 +23,7 @@ permissions:
 
 env:
   TC: ${{ github.workspace }}/../wali-tc
-  TC_KEY: wali-tc-llvm22.1.3-pkgs-2026-10-31-v1
+  TC_KEY: wali-tc-llvm22.1.3-pkgs-2026-10-31-x1-v2
 
 jobs:
   plan:

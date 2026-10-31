@@ -3,5 +3,5 @@
   "max": 150,
   "chunk": 4,
   "publish": true,
-  "note": "pilot: 50 random catalog packages + dependency closure, capped at 150"
+  "note": "pilot rerun 2: same sample (SEED 1) after toolchain fixes: libc++, kernel headers, static -shared, meson/cmake, abuild env, noarch skip"
 }
