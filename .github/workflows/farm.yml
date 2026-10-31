@@ -1,0 +1,103 @@
+# walios build farm: Alpine aports -> wasm32-wali, built in parallel on GitHub runners,
+# published as a release that the walios package CDN serves (walios/cdn in sandpie).
+# Waves follow the dependency graph; libraries built in a wave reach the next ones as
+# overlay artifacts. See farm/ci/.
+name: farm
+on:
+  workflow_dispatch:
+    inputs:
+      pkgs:   { description: 'Packages (space separated); empty = sample/all', required: false, default: '' }
+      sample: { description: 'Random sample size from farm/ci/catalog.txt (when pkgs is empty)', required: false, default: '50' }
+      all:    { description: 'Build the whole catalog (ignores sample)', type: boolean, default: false }
+      max:    { description: 'Cap on packages incl. dependency closure', required: false, default: '400' }
+      chunk:  { description: 'Packages per job', required: false, default: '4' }
+      publish: { description: 'Publish a release', type: boolean, default: true }
+
+permissions:
+  contents: write
+
+env:
+  TC: ${{ github.workspace }}/../wali-tc
+  TC_KEY: wali-tc-llvm22.1.3-pkgs-2026-10-31-v1
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      w0: ${{ steps.p.outputs.w0 }}
+      w1: ${{ steps.p.outputs.w1 }}
+      w2: ${{ steps.p.outputs.w2 }}
+      w3: ${{ steps.p.outputs.w3 }}
+      count: ${{ steps.p.outputs.count }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Alpine aports (GitHub mirror)
+        run: git clone -q --depth 1 https://github.com/alpinelinux/aports.git ../aports && git -C ../aports log -1 --format='aports %h %cs'
+      - id: p
+        env:
+          PKGS: ${{ inputs.pkgs }}
+          SAMPLE: ${{ inputs.sample }}
+          ALL: ${{ inputs.all && '1' || '' }}
+          MAX: ${{ inputs.max }}
+          CHUNK: ${{ inputs.chunk }}
+          WAVES: '4'
+          APORTS_DIR: ${{ github.workspace }}/../aports
+          APORTS_LIST: ${{ github.workspace }}/../aports-list.txt
+        run: node farm/ci/plan.js
+      - name: Recipes the build jobs need
+        run: tar czf aports.tar.gz -C ../aports $(cat ../aports-list.txt)
+      - uses: actions/upload-artifact@v4
+        with: { name: aports, path: aports.tar.gz, retention-days: 7 }
+      - name: Toolchain (cached for every build job)
+        uses: actions/cache@v4
+        id: tc
+        with: { path: '${{ env.TC }}', key: '${{ env.TC_KEY }}' }
+      - if: steps.tc.outputs.cache-hit != 'true'
+        run: bash farm/ci/toolchain.sh "$TC"
+
+  wave0:
+    needs: plan
+    if: needs.plan.outputs.w0 != '[]'
+    uses: ./.github/workflows/farm-wave.yml
+    with: { wave: 0, chunks: '${{ needs.plan.outputs.w0 }}' }
+  wave1:
+    needs: [plan, wave0]
+    if: always() && needs.plan.outputs.w1 != '[]'
+    uses: ./.github/workflows/farm-wave.yml
+    with: { wave: 1, chunks: '${{ needs.plan.outputs.w1 }}' }
+  wave2:
+    needs: [plan, wave1]
+    if: always() && needs.plan.outputs.w2 != '[]'
+    uses: ./.github/workflows/farm-wave.yml
+    with: { wave: 2, chunks: '${{ needs.plan.outputs.w2 }}' }
+  wave3:
+    needs: [plan, wave2]
+    if: always() && needs.plan.outputs.w3 != '[]'
+    uses: ./.github/workflows/farm-wave.yml
+    with: { wave: 3, chunks: '${{ needs.plan.outputs.w3 }}' }
+
+  publish:
+    needs: [plan, wave0, wave1, wave2, wave3]
+    if: always() && needs.plan.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { pattern: 'res-*', path: res, merge-multiple: true }
+      - name: Index + summary
+        run: |
+          TAG="farm-$(date -u +%Y-%m-%d)-${{ github.run_number }}"
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
+          node farm/ci/make-index.js res "$TAG" > index.json 2> summary.md
+          cat summary.md >> "$GITHUB_STEP_SUMMARY"
+          tar czf logs.tar.gz -C res $(cd res && ls *.log)
+      - uses: actions/upload-artifact@v4
+        with: { name: farm-index, path: 'index.json' }
+      - name: Release
+        if: inputs.publish
+        env: { GH_TOKEN: '${{ github.token }}' }
+        run: |
+          gh release create "$TAG" --title "walios farm $TAG" --notes-file summary.md --prerelease
+          ls res/*.wasm >/dev/null 2>&1 && gh release upload "$TAG" res/*.wasm
+          ls res/*.overlay.tar.gz >/dev/null 2>&1 && gh release upload "$TAG" res/*.overlay.tar.gz
+          gh release upload "$TAG" index.json logs.tar.gz

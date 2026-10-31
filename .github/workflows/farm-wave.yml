@@ -1,0 +1,60 @@
+# One dependency wave of the farm (called by farm.yml): a matrix of jobs, each building a
+# chunk of packages against the overlays of every earlier wave.
+name: farm-wave
+on:
+  workflow_call:
+    inputs:
+      wave:   { type: number, required: true }
+      chunks: { type: string, required: true }
+
+env:
+  TC: ${{ github.workspace }}/../wali-tc
+  TC_KEY: wali-tc-llvm22.1.3-pkgs-2026-10-31-v1
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix:
+        chunk: ${{ fromJSON(inputs.chunks) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache/restore@v4
+        id: tc
+        with: { path: '${{ env.TC }}', key: '${{ env.TC_KEY }}' }
+      - if: steps.tc.outputs.cache-hit != 'true'
+        run: bash farm/ci/toolchain.sh "$TC"
+      - name: Build tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq autoconf automake libtool autopoint pkgconf bison flex gettext texinfo gperf help2man meson ninja-build cmake >/dev/null
+      - uses: actions/download-artifact@v4
+        with: { name: aports, path: . }
+      - name: Overlays from earlier waves
+        if: inputs.wave > 0
+        uses: actions/download-artifact@v4
+        with: { pattern: 'ov-*', path: ov, merge-multiple: true }
+      - name: Build
+        run: |
+          mkdir -p overlay out aports
+          tar xzf aports.tar.gz -C aports
+          export APORTS_DIR=$PWD/aports
+          for t in ov/*.overlay.tar.gz; do [ -f "$t" ] && tar xzf "$t" -C overlay; done
+          source "$TC/env.sh"
+          for p in ${{ matrix.chunk }}; do
+            echo "::group::$p"
+            timeout 3000 bash farm/ci/build-one.sh "$p" overlay out > /dev/null
+            [ -f "out/$p.json" ] || echo "{\"pkg\":\"$p\",\"ver\":\"?\",\"status\":\"fail\",\"reason\":\"timeout\",\"secs\":3000}" > "out/$p.json"
+            cat "out/$p.json"
+            echo "::endgroup::"
+          done
+      - name: Artifact name
+        id: n
+        run: echo "id=w${{ inputs.wave }}-$(echo '${{ matrix.chunk }}' | md5sum | cut -c1-10)" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with: { name: 'res-${{ steps.n.outputs.id }}', path: 'out/*', if-no-files-found: ignore, retention-days: 7 }
+      - uses: actions/upload-artifact@v4
+        with: { name: 'ov-${{ steps.n.outputs.id }}', path: 'out/*.overlay.tar.gz', if-no-files-found: ignore, retention-days: 7 }

@@ -4,6 +4,29 @@
 //         guest longjmps back via wasm-EH SJLJ); execve/_exit park the child.
 //   wait4: parked children run synchronously as fresh instances.
 'use strict';
+// Memory a guest IMPORTS (env.memory): every walios guest is linked --import-memory now (the
+// browser kernel owns it). Read the import's limits from the binary and create a matching
+// memory; WebAssembly.Module.imports() does not report them.
+function importedMemory(buf) {
+  let o = 8; const u = () => { let r = 0, s = 0, b; do { b = buf[o++]; r |= (b & 0x7f) << s; s += 7; } while (b & 0x80); return r >>> 0; };
+  const name = () => { const n = u(); const t = buf.slice(o, o + n).toString(); o += n; return t; };
+  while (o < buf.length) {
+    const id = buf[o++], len = u(), end = o + len;
+    if (id !== 2) { o = end; continue; }
+    for (let n = u(); n > 0; n--) {
+      const mod = name(), field = name(), kind = buf[o++];
+      if (kind === 0) u();
+      else if (kind === 1) { o++; const f = u(); u(); if (f & 1) u(); }
+      else if (kind === 3) { o += 2; }
+      else if (kind === 4) { o++; u(); }
+      else if (kind === 2) { const f = u(), min = u(), max = (f & 1) ? u() : undefined;
+        return { mod, field, mem: new WebAssembly.Memory({ initial: min, maximum: max === undefined ? 65536 : max, shared: !!(f & 2) }) }; }
+    }
+    return null;
+  }
+  return null;
+}
+
 const fs = require('fs');
 const path = require('path');
 
@@ -103,8 +126,10 @@ function resolveModulePath(p, selfPath) {
   if (fs.existsSync(bb)) return bb;
   return null;
 }
+const modBytes = new Map();
 function getModule(p) {
-  if (!modCache.has(p)) modCache.set(p, new WebAssembly.Module(fs.readFileSync(p)));
+  // Bytes kept too: importedMemory() parses them, and the guest may have chdir'd since.
+  if (!modCache.has(p)) { const b = fs.readFileSync(p); modBytes.set(p, b); modCache.set(p, new WebAssembly.Module(b)); }
   return modCache.get(p);
 }
 
@@ -1646,8 +1671,11 @@ class Process {
   run() {
     procCount++;
     const mod = getModule(this.modPath);
-    this.inst = new WebAssembly.Instance(mod, this.makeImports(mod));
-    this.memory = this.inst.exports.memory; this.membuf = null; this.refresh();
+    const imports = this.makeImports(mod);
+    const im = importedMemory(modBytes.get(this.modPath));
+    if (im) { imports[im.mod] = Object.assign({}, imports[im.mod], { [im.field]: im.mem }); }
+    this.inst = new WebAssembly.Instance(mod, imports);
+    this.memory = this.inst.exports.memory || (im && im.mem); this.membuf = null; this.refresh();
     try { this.inst.exports._start(); return 0; }
     catch (e) {
       if (e instanceof ExitError) return e.code & 0xff;
