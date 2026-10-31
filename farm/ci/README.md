@@ -3,7 +3,9 @@
 Cross-compiles Alpine aports to `wasm32-wali` on free GitHub runners, and publishes the
 results as a release. Each run plans and builds once and publishes once.
 
-- **Run it:** Actions → **farm** → Run workflow.
+- **Run it:** Actions → **farm** → Run workflow. Or commit a change to
+  `farm/ci/request.json` on `main`; it takes the same keys as the inputs below. That way a
+  token without Actions rights can still start a run.
 - **Inputs:**
   - `pkgs`: a list of packages to build.
   - `sample`: a random N from `catalog.txt`, used when `pkgs` is empty.
