@@ -14,10 +14,12 @@ const rows = fs.readdirSync(dir).filter(f => f.endsWith('.json')).map(f => JSON.
 const SPILL = +(process.env.SPILL || 950); let nexe = 0; const spill = [];
 const index = { tag, built: new Date().toISOString(), toolchain: 'LLVM 22.1.3 + wali-sysroot (pkgs-2026-10-31)', packages: {}, failed: {} };
 for (const r of rows.sort((a, b) => a.pkg.localeCompare(b.pkg))) {
-  if (r.status === 'pass' && r.kind === 'exe') {
-    const name = `${r.pkg}.wasm`, buf = fs.readFileSync(path.join(dir, name));
+  if (r.status === 'pass' && (r.kind === 'exe' || r.kind === 'mod')) {
+    // exe = <pkg>.wasm; mod = <pkg>.mod.tar.gz (pure-Perl/Lua module files + its deps list)
+    const name = r.kind === 'exe' ? `${r.pkg}.wasm` : `${r.pkg}.mod.tar.gz`, buf = fs.readFileSync(path.join(dir, name));
     let file = name; if (++nexe > SPILL) { file = `../${tag}-b/${name}`; spill.push(name); }
-    index.packages[r.pkg] = { ver: r.ver, kind: 'exe', file, size: buf.length, sha256: crypto.createHash('sha256').update(buf).digest('hex'), smoke: r.smoke, secs: r.secs };
+    index.packages[r.pkg] = { ver: r.ver, kind: r.kind, file, size: buf.length, sha256: crypto.createHash('sha256').update(buf).digest('hex'), secs: r.secs,
+      ...(r.kind === 'exe' ? { smoke: r.smoke } : { deps: r.deps || [] }) };
   } else if (r.status === 'pass') index.packages[r.pkg] = { ver: r.ver, kind: r.kind, secs: r.secs };
   else if (r.status === 'skip') (index.skipped = index.skipped || {})[r.pkg] = { ver: r.ver, reason: r.reason };
   else index.failed[r.pkg] = { ver: r.ver, reason: r.reason, secs: r.secs };
@@ -27,11 +29,12 @@ try { index.aliases = JSON.parse(fs.readFileSync('aliases.json', 'utf8')); } cat
 process.stdout.write(JSON.stringify(index, null, 1) + '\n');
 fs.writeFileSync(path.join(dir, 'spill.txt'), spill.join('\n') + (spill.length ? '\n' : ''));
 const exe = Object.values(index.packages).filter(p => p.kind === 'exe').length;
-const lib = Object.keys(index.packages).length - exe, nf = Object.keys(index.failed).length;
+const mods = Object.values(index.packages).filter(p => p.kind === 'mod').length;
+const lib = Object.keys(index.packages).length - exe - mods, nf = Object.keys(index.failed).length;
 const reasons = {}; for (const f of Object.values(index.failed)) { const k = String(f.reason).split(':')[0]; reasons[k] = (reasons[k] || 0) + 1; }
 const secs = rows.map(r => r.secs || 0).sort((a, b) => a - b);
 const med = secs.length ? secs[secs.length >> 1] : 0, tot = secs.reduce((a, b) => a + b, 0);
 const ns = Object.keys(index.skipped || {}).length;
-process.stderr.write(`## walios farm ${tag}\n\n${rows.length} packages: **${exe} runnable**, ${lib} libraries, ${nf} failed, ${ns} skipped (noarch / needs rust or go).\n\n` +
+process.stderr.write(`## walios farm ${tag}\n\n${rows.length} packages: **${exe} runnable**, ${mods} Perl/Lua modules, ${lib} libraries, ${nf} failed, ${ns} skipped (noarch / needs rust or go).\n\n` +
   `Build time: median ${med}s, total ${Math.round(tot / 60)} min of job time.\n\nFailures: ` +
   Object.entries(reasons).sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k} ${v}`).join(', ') + '\n');

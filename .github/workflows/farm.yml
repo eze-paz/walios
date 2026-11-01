@@ -151,10 +151,13 @@ jobs:
           # (make-index wrote them to res/spill.txt), and all overlays travel as one tarball.
           gh release create "$TAG" --title "walios farm $TAG" --notes-file summary.md --prerelease
           mkdir -p spill; while read -r f; do [ -n "$f" ] && mv "res/$f" spill/; done < res/spill.txt
-          ls res/*.wasm >/dev/null 2>&1 && gh release upload "$TAG" res/*.wasm
-          if ls spill/*.wasm >/dev/null 2>&1; then
-            gh release create "$TAG-b" --title "walios farm $TAG (b)" --notes "Runnable packages of $TAG past the first release's file limit; see $TAG/index.json." --prerelease
-            gh release upload "$TAG-b" spill/*.wasm
+          # runnable packages (.wasm) and pure-Perl/Lua modules (.mod.tar.gz)
+          pk=$(ls res/*.wasm res/*.mod.tar.gz 2>/dev/null || true)
+          [ -n "$pk" ] && gh release upload "$TAG" $pk
+          sp=$(ls spill/* 2>/dev/null || true)
+          if [ -n "$sp" ]; then
+            gh release create "$TAG-b" --title "walios farm $TAG (b)" --notes "Packages of $TAG past the first release's file limit; see $TAG/index.json." --prerelease
+            gh release upload "$TAG-b" $sp
           fi
           ls res/*.overlay.tar.gz >/dev/null 2>&1 && tar czf overlays.tar.gz -C res $(cd res && ls *.overlay.tar.gz)
           gh release upload "$TAG" index.json logs.tar.gz $( [ -f overlays.tar.gz ] && echo overlays.tar.gz )

@@ -19,11 +19,13 @@ mkdir -p "$OUT" "$OVERLAY/usr/include" "$OVERLAY/usr/lib" "$OVERLAY/lib"
 rm -f "$OVERLAY/usr/include/error.h"
 log="$OUT/$pkg.log"; : > "$log"
 bdir=$(mktemp -d); trap 'rm -rf "$bdir"' EXIT
-pkgver="?"; BUILD_SECS=0
+pkgver="?"; BUILD_SECS=0; DEPS=""
 emit() {  # status reason kind smoke
-  local row
-  row=$(printf '{"pkg":"%s","ver":"%s","status":"%s","reason":"%s","kind":"%s","secs":%s,"smoke":"%s"}' \
-    "$pkg" "$pkgver" "$1" "$2" "${3:-}" "$BUILD_SECS" "$(printf '%s' "${4:-}" | tr -d '\000-\037"\\' | cut -c1-80)")
+  local row deps
+  # Runtime depends, as plain package names (the index lets `apk add` pull a module's deps).
+  deps=$(for d in $DEPS; do d=${d%%[<>=~]*}; case "$d" in ''|*:*|!*) ;; *) printf '"%s",' "$d";; esac; done)
+  row=$(printf '{"pkg":"%s","ver":"%s","status":"%s","reason":"%s","kind":"%s","secs":%s,"smoke":"%s","deps":[%s]}' \
+    "$pkg" "$pkgver" "$1" "$2" "${3:-}" "$BUILD_SECS" "$(printf '%s' "${4:-}" | tr -d '\000-\037"\\' | cut -c1-80)" "${deps%,}")
   echo "$row" > "$OUT/$pkg.json"; echo "$row"; exit 0
 }
 
@@ -40,6 +42,7 @@ else
 fi
 apk() { (cd "$bdir" && bash -c "CARCH=wasm32; source ./APKBUILD >/dev/null 2>&1; echo \"\$$1\""); }
 pkgver=$(apk pkgver)
+DEPS=$(apk depends)
 # Not wasm targets: architecture-independent packages (pure perl/python/lua, data, fonts)
 # run on a walios interpreter as they are -- but they are still built and packaged, because
 # header/data ones (xorgproto, xcb-proto, util-macros) are what C dependents need in the
@@ -142,7 +145,15 @@ find "$pkgdir" -name '*.la' -delete 2>/dev/null
 # Some recipes install libraries under /lib (zlib, ncurses' terminfo libs), not /usr/lib.
 ovdirs=$(cd "$pkgdir" && ls -d usr lib 2>/dev/null)
 [ -n "$ovdirs" ] && tar czf "$OUT/$pkg.overlay.tar.gz" -C "$pkgdir" $ovdirs
-[ -n "$NOARCH" ] && emit skip noarch
+# A pure-Perl or pure-Lua module (noarch, installs into Alpine's module paths) is a package in
+# its own right on walios: those files, as a tarball `apk add` mounts at /.
+if [ -n "$NOARCH" ]; then
+  mdirs=$(cd "$pkgdir" && ls -d usr/share/perl5 usr/lib/perl5 usr/share/lua 2>/dev/null)
+  if [ -n "$mdirs" ] && (cd "$pkgdir" && find $mdirs -type f \( -name '*.pm' -o -name '*.pl' -o -name '*.lua' \)) | grep -q .; then
+    tar czf "$OUT/$pkg.mod.tar.gz" -C "$pkgdir" $mdirs; emit pass module mod
+  fi
+  emit skip noarch
+fi
 
 # The package's program: what it INSTALLS -- usr/bin/<pkg> first, then its other bin dirs.
 # A wasm left in the source tree (an example, a test helper) is not the package.
