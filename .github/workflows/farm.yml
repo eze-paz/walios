@@ -1,6 +1,6 @@
 # walios build farm: Alpine aports -> wasm32-wali, built in parallel on GitHub runners,
 # published as a release that the walios package CDN serves (walios/cdn in sandpie).
-# Up to 6 waves follow the dependency graph; libraries built in a wave reach the next ones as
+# Up to 8 waves follow the dependency graph; libraries built in a wave reach the next ones as
 # overlay artifacts. See farm/ci/.
 name: farm
 on:
@@ -23,7 +23,7 @@ permissions:
 
 env:
   TC: ${{ github.workspace }}/../wali-tc
-  TC_KEY: wali-tc-llvm22.1.3-pkgs-2026-10-31-x1-v2
+  TC_KEY: wali-tc-llvm22.1.3-pkgs-2026-10-31-x1-v3
 
 jobs:
   plan:
@@ -35,6 +35,8 @@ jobs:
       w3: ${{ steps.p.outputs.w3 }}
       w4: ${{ steps.p.outputs.w4 }}
       w5: ${{ steps.p.outputs.w5 }}
+      w6: ${{ steps.p.outputs.w6 }}
+      w7: ${{ steps.p.outputs.w7 }}
       count: ${{ steps.p.outputs.count }}
       publish: ${{ steps.in.outputs.publish }}
     steps:
@@ -57,14 +59,17 @@ jobs:
             console.log(out);'
       - id: p
         env:
-          WAVES: '6'
+          WAVES: '8'
           APORTS_DIR: ${{ github.workspace }}/../aports
           APORTS_LIST: ${{ github.workspace }}/../aports-list.txt
+          ALIASES_OUT: ${{ github.workspace }}/aliases.json
         run: node farm/ci/plan.js
       - name: Recipes the build jobs need
         run: tar czf aports.tar.gz -C ../aports $(cat ../aports-list.txt)
       - uses: actions/upload-artifact@v4
-        with: { name: aports, path: aports.tar.gz, retention-days: 7 }
+        with: { name: aports, path: 'aports.tar.gz', retention-days: 7 }
+      - uses: actions/upload-artifact@v4
+        with: { name: aliases, path: 'aliases.json', retention-days: 7 }
       - name: Toolchain (cached for every build job)
         uses: actions/cache@v4
         id: tc
@@ -102,15 +107,27 @@ jobs:
     if: always() && needs.plan.outputs.w5 != '[]'
     uses: ./.github/workflows/farm-wave.yml
     with: { wave: 5, chunks: '${{ needs.plan.outputs.w5 }}' }
+  wave6:
+    needs: [plan, wave5]
+    if: always() && needs.plan.outputs.w6 != '[]'
+    uses: ./.github/workflows/farm-wave.yml
+    with: { wave: 6, chunks: '${{ needs.plan.outputs.w6 }}' }
+  wave7:
+    needs: [plan, wave6]
+    if: always() && needs.plan.outputs.w7 != '[]'
+    uses: ./.github/workflows/farm-wave.yml
+    with: { wave: 7, chunks: '${{ needs.plan.outputs.w7 }}' }
 
   publish:
-    needs: [plan, wave0, wave1, wave2, wave3, wave4, wave5]
+    needs: [plan, wave0, wave1, wave2, wave3, wave4, wave5, wave6, wave7]
     if: always() && needs.plan.result == 'success'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with: { pattern: 'res-*', path: res, merge-multiple: true }
+      - uses: actions/download-artifact@v4
+        with: { name: aliases, path: . }
       - name: Index + summary
         run: |
           TAG="farm-$(date -u +%Y-%m-%d)-${{ github.run_number }}"

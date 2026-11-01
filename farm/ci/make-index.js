@@ -22,6 +22,8 @@ for (const r of rows.sort((a, b) => a.pkg.localeCompare(b.pkg))) {
   else if (r.status === 'skip') (index.skipped = index.skipped || {})[r.pkg] = { ver: r.ver, reason: r.reason };
   else index.failed[r.pkg] = { ver: r.ver, reason: r.reason, secs: r.secs };
 }
+// Catalog names that are subpackages of another aport (plan.js ALIASES_OUT): name -> aport.
+try { index.aliases = JSON.parse(fs.readFileSync('aliases.json', 'utf8')); } catch {}
 process.stdout.write(JSON.stringify(index, null, 1) + '\n');
 fs.writeFileSync(path.join(dir, 'spill.txt'), spill.join('\n') + (spill.length ? '\n' : ''));
 const exe = Object.values(index.packages).filter(p => p.kind === 'exe').length;

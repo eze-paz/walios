@@ -4,9 +4,9 @@
 //   SAMPLE=50      a deterministic sample of farm/ci/catalog.txt (SEED=1), or
 //   ALL=1          the whole catalog
 //   MAX=400        cap on seeds + dependency closure
-//   WAVES=6        dependency waves (deeper chains collapse into the last one)
+//   WAVES=8        dependency waves (deeper chains collapse into the last one)
 //   CHUNK=8        packages per matrix job (one wave stays <= 256 jobs: GitHub's cap)
-// Deps = APKBUILD depends + makedepends, minus build tools (DENY), as farm/farm3.js did.
+// Deps = APKBUILD depends + makedepends(+_host/_build) + depends_dev, minus build tools (DENY).
 // Prints {waves:[[chunk,...],...], count}; with GITHUB_OUTPUT set, writes w0..wN + count.
 'use strict';
 const fs = require('fs'), path = require('path');
@@ -15,7 +15,7 @@ const APORTS = 'https://git.alpinelinux.org/aports/plain';
 const DENY = new Set(['autoconf', 'automake', 'libtool', 'pkgconf', 'pkgconfig', 'make', 'cmake',
   'meson', 'ninja', 'samurai', 'bison', 'flex', 'gettext', 'gettext-tiny', 'gettext-dev', 'texinfo',
   'perl', 'python3', 'py3-setuptools', 'linux-headers', 'musl-dev', 'gcc', 'g++', 'clang', 'llvm',
-  'bsd-compat-headers', 'utmps', 'byacc', 'gperf', 'help2man', 'doxygen', 'groff', 'scdoc', 'asciidoc',
+  'bsd-compat-headers', 'byacc', 'gperf', 'help2man', 'doxygen', 'groff', 'scdoc', 'asciidoc',
   'coreutils', 'grep', 'sed', 'gzip', 'xz', 'zstd', 'brotli', 'go', 'rust', 'cargo', 'ca-certificates',
   'openrc', 'lang', 'bash', 'sh']);
 const clean = (d) => d.replace(/[<>=~].*$/, '').replace(/-dev$/, '');
@@ -23,7 +23,7 @@ const skip = (d) => !d || d.includes(':') || d.startsWith('!') || d.startsWith('
   /-doc$|-lang$|-openrc$|-static$|-bash-completion$/.test(d);
 
 const catalog = fs.readFileSync(path.join(__dirname, 'catalog.txt'), 'utf8').split('\n').map(s => s.trim()).filter(Boolean);
-const MAX = +(process.env.MAX || 400), NW = +(process.env.WAVES || 6), CHUNK = +(process.env.CHUNK || 8);
+const MAX = +(process.env.MAX || 400), NW = +(process.env.WAVES || 8), CHUNK = +(process.env.CHUNK || 8);
 let seeds;
 if (process.env.PKGS) seeds = process.env.PKGS.split(/[\s,]+/).filter(Boolean);
 else if (process.env.ALL) seeds = catalog.slice();
@@ -47,17 +47,46 @@ function apkbuild(pkg) {
 function depsOf(txt) {
   const f = path.join(require('os').tmpdir(), `apk-${process.pid}`); fs.writeFileSync(f, txt);
   let d = '';
-  try { d = execFileSync('bash', ['-c', `source "${f}" >/dev/null 2>&1; echo "$depends $makedepends"`], { encoding: 'utf8' }); } catch {}
+  try { d = execFileSync('bash', ['-c', `source "${f}" >/dev/null 2>&1; echo "$depends $makedepends $makedepends_host $makedepends_build $depends_dev"`], { encoding: 'utf8' }); } catch {}
   return [...new Set(d.split(/\s+/).map(clean).filter(x => !skip(x)))];
 }
+
+// Subpackages (musl-utils, lua5.4-posix, mariadb-client) have no aport dir of their own: map
+// each to the aport that builds it, from every APKBUILD's subpackages= line (textually --
+// sourcing ~10k recipes would take minutes). Only with a local aports checkout.
+const origin = {};
+if (ADIR) for (const sub of ['main', 'community']) {
+  for (const dir of fs.readdirSync(path.join(ADIR, sub))) {
+    let t; try { t = fs.readFileSync(path.join(ADIR, sub, dir, 'APKBUILD'), 'utf8'); } catch { continue; }
+    const name = (t.match(/^pkgname=["']?([^"'\s]+)/m) || [])[1] || dir;
+    const m = t.match(/^subpackages="([^"]*)"/m);
+    if (!m) continue;
+    for (let s of m[1].split(/\s+/)) {
+      s = s.split(':')[0].replace(/\$\{?pkgname\}?/g, name);
+      if (s && !/[$`{}]/.test(s) && !fs.existsSync(path.join(ADIR, 'main', s)) && !fs.existsSync(path.join(ADIR, 'community', s))) origin[s] = origin[s] || dir;
+    }
+  }
+}
+// Lua module subpackages are generated in a loop (lua5.4-posix from aport lua-posix).
+const hasDir = (p) => ADIR && (fs.existsSync(path.join(ADIR, 'main', p)) || fs.existsSync(path.join(ADIR, 'community', p)));
+const canon = (p) => {
+  if (origin[p]) return origin[p];
+  const m = p.match(/^lua5\.\d-(.+)$/);
+  if (m && !hasDir(p)) for (const o of ['lua-' + m[1], m[1]]) if (hasDir(o)) return (origin[p] = o);
+  return p;
+};
+const aliases = {};
+for (const s of seeds) if (canon(s) !== s) aliases[s] = canon(s);
+seeds = [...new Set(seeds.map(canon))];
 
 const meta = {}, queue = [...seeds], seen = new Set(seeds);
 while (queue.length && Object.keys(meta).length < MAX) {
   const p = queue.shift(), txt = apkbuild(p);
   if (!txt) { meta[p] = { missing: true, deps: [] }; continue; }
-  meta[p] = { deps: depsOf(txt) };
+  meta[p] = { deps: [...new Set(depsOf(txt).map(canon))].filter(d => d !== p) };
   for (const d of meta[p].deps) if (!seen.has(d)) { seen.add(d); queue.push(d); }
 }
+if (process.env.ALIASES_OUT) fs.writeFileSync(process.env.ALIASES_OUT, JSON.stringify(aliases));
 const set = new Set(Object.keys(meta).filter(p => !meta[p].missing));
 const wave = {};
 const level = (p, stack = new Set()) => {
@@ -70,7 +99,9 @@ const level = (p, stack = new Set()) => {
 };
 const waves = Array.from({ length: NW }, () => []);
 for (const p of [...set].sort()) waves[level(p)].push(p);
-const chunked = waves.map(w => { const c = []; for (let i = 0; i < w.length; i += CHUNK) c.push(w.slice(i, i + CHUNK).join(' ')); return c; });
+// GitHub caps a matrix at 256 jobs: a big wave gets bigger chunks rather than being cut.
+const chunked = waves.map(w => { const n = Math.max(CHUNK, Math.ceil(w.length / 250)), c = [];
+  for (let i = 0; i < w.length; i += n) c.push(w.slice(i, i + n).join(' ')); return c; });
 const missing = Object.keys(meta).filter(p => meta[p].missing);
 const out = { count: set.size, seeds: seeds.length, missing, waves: chunked };
 console.log(JSON.stringify({ count: out.count, seeds: out.seeds, missing: missing.length, waves: waves.map(w => w.length) }));

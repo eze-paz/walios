@@ -58,8 +58,8 @@ for f in $(apk source | tr ' \t' '\n\n' | grep -vE 'https?://|^$'); do
 done
 
 # Old config.sub/config.guess reject wasm32; abuild's update_config_sub does this per recipe.
-for f in $(find "$SRC" -name config.sub 2>/dev/null); do cp /usr/share/misc/config.sub "$f"; done
-for f in $(find "$SRC" -name config.guess 2>/dev/null); do cp /usr/share/misc/config.guess "$f"; done
+for f in $(find "$SRC" -name config.sub 2>/dev/null); do chmod u+w "$f"; cp /usr/share/misc/config.sub "$f"; done
+for f in $(find "$SRC" -name config.guess 2>/dev/null); do chmod u+w "$f"; cp /usr/share/misc/config.guess "$f"; done
 # gnulib on wasm: no signals, no /proc VMA introspection. Its __linux__ checks fire for our
 # -linux-muslwali triple, so give c-stack/sigsegv their no-op paths (what stackvma-none.c is).
 for sv in $(find "$SRC" -name stackvma.c 2>/dev/null); do
@@ -77,14 +77,16 @@ cat > "$bdir/.farm-build.sh" <<'EOS'
 set +u
 export WALI_EXTRA_CFLAGS="-I$OVERLAY/usr/include" WALI_EXTRA_LDFLAGS="-L$OVERLAY/usr/lib -L$OVERLAY/lib"
 export CFLAGS="" CXXFLAGS="" LDFLAGS="" CPPFLAGS="" CONFIG_SITE="$HERE/config.site" FARM_CI_DIR="$HERE"
-export PKG_CONFIG_PATH="$OVERLAY/usr/lib/pkgconfig:$OVERLAY/usr/share/pkgconfig" PKG_CONFIG_SYSROOT_DIR="$OVERLAY"
+# LIBDIR, not PATH: the build host's own .pc files (the runner's libyaml, zlib...) must not
+# be found, or a recipe enables a feature whose wasm library does not exist.
+export PKG_CONFIG_LIBDIR="$OVERLAY/usr/lib/pkgconfig:$OVERLAY/usr/share/pkgconfig:$OVERLAY/lib/pkgconfig" PKG_CONFIG_PATH="" PKG_CONFIG_SYSROOT_DIR="$OVERLAY"
 export CARCH=wasm32 CLIBC=musl CBUILD=x86_64-pc-linux-gnu CHOST=wasm32-unknown-linux-musl CTARGET=wasm32-unknown-linux-musl
 export CTARGET_ARCH=wasm32 CBUILD_ARCH=x86_64 cross_compiling=yes JOBS=$(nproc) MAKEFLAGS="-j$(nproc)"
 export srcdir="$BDIR" builddir="$SRC" pkgdir="$PKGDIR" subpkgdir="$BDIR/subpkg" startdir="$BDIR"
 msg() { echo ">>> $*"; }; msg2() { echo "  > $*"; }; warning() { echo "WARNING: $*"; }; warning2() { warning "$@"; }
 error() { echo "ERROR: $*"; }; die() { error "$@"; exit 1; }
-update_config_sub() { find "${1:-.}" -name config.sub -exec cp /usr/share/misc/config.sub {} \; ; }
-update_config_guess() { find "${1:-.}" -name config.guess -exec cp /usr/share/misc/config.guess {} \; ; }
+update_config_sub() { find "${1:-.}" -name config.sub -exec chmod u+w {} \; -exec cp /usr/share/misc/config.sub {} \; ; }
+update_config_guess() { find "${1:-.}" -name config.guess -exec chmod u+w {} \; -exec cp /usr/share/misc/config.guess {} \; ; }
 amove() { :; }; default_check() { :; }; default_doc() { :; }; default_dev() { :; }; default_libs() { :; }
 default_prepare() { cd "$builddir"; for p in $source; do case "${p%%::*}" in
     *.patch) [ -f "$srcdir/${p%%::*}" ] && { msg "applying $p"; patch -p1 <"$srcdir/${p%%::*}" || return 1; };; esac; done; }

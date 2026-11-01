@@ -21,7 +21,7 @@ results as a release. Each run plans and builds once and publishes once.
 - **`plan.js`:** works out the package set and its build order.
   - **Dependencies:** each package's dependency closure comes from its APKBUILD
     (`depends` + `makedepends`, minus build tools).
-  - **Waves:** packages are grouped into up to 6 dependency waves.
+  - **Waves:** packages are grouped into up to 8 dependency waves.
   - **Chunks:** each wave is split into chunks of `CHUNK` packages per matrix job. A
     wave stays at or under 256 jobs, and at most 20 run at once.
 - **`build-one.sh`:** builds one aport the same way the old `farm/build-one.sh` did.
@@ -37,7 +37,7 @@ results as a release. Each run plans and builds once and publishes once.
 
 A library built in wave N reaches waves after N as an artifact. Its `usr/` overlay is
 unpacked into each later job's `-I`/`-L` path. Cycles are broken, and chains deeper than
-6 are folded into the last wave, so a few late packages may miss a dependency and fail.
+8 are folded into the last wave, so a few late packages may miss a dependency and fail.
 Rerun those with `pkgs`.
 
 ## What the build environment provides

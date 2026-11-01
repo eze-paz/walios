@@ -54,6 +54,8 @@ EOF
 # Executables are static, so a -shared link (libtool, meson, cmake shared libs) produces a
 # static archive under the .so name: wasm-ld reads it by its magic, and dependents link it
 # like any -lfoo. $WALI_EXTRA_* let the farm add the overlay of already-built deps.
+# -flto is dropped: setjmp/longjmp lowering (-wasm-enable-sjlj) is a compile-time pass, and
+# LTO objects reach the linker with it undone ("undefined symbol: longjmp").
 for d in cc c++; do
   drv=clang; cxx=""; cxxlibs=""
   [ $d = c++ ] && { drv=clang++; cxx="-isystem $S/include/c++/v1"; cxxlibs="-lc++ -lc++abi -lunwind -lwali-cppexc"; }
@@ -72,7 +74,7 @@ F=(--target=wasm32-unknown-linux-muslwali --sysroot=$S -nostdlibinc $cxx -isyste
    \${WALI_EXTRA_CFLAGS:-})
 A=()
 for a in "\$@"; do case "\$a" in
-  -Wl,--start-group|-Wl,--end-group|-Wl,--as-needed|-Wl,--no-as-needed|-Wl,--gc-sections|-Wl,--warn-common|-Wl,--sort-common|-Wl,-O1|-Wl,--hash-style=*|-Wl,-z,relro|-Wl,-z,now|-Wl,-soname*|-Wl,-soname,*|-Wl,--version-script*|-Wl,-Bsymbolic*|-rdynamic|-static|-s|-fPIC|-fpic|-fPIE|-fpie|-pie) ;;
+  -Wl,--start-group|-Wl,--end-group|-Wl,--as-needed|-Wl,--no-as-needed|-Wl,--gc-sections|-Wl,--warn-common|-Wl,--sort-common|-Wl,-O1|-Wl,--hash-style=*|-Wl,-z,relro|-Wl,-z,now|-Wl,-soname*|-Wl,-soname,*|-Wl,--version-script*|-Wl,-Bsymbolic*|-rdynamic|-static|-s|-fPIC|-fpic|-fPIE|-fpie|-pie|-flto|-flto=*|-ffat-lto-objects|-fuse-linker-plugin) ;;
   *) A+=("\$a");; esac; done
 if [ \$link = 1 ] && [ \$shared = 1 ]; then
   objs=()
