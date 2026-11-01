@@ -3,5 +3,5 @@
   "max": 3000,
   "chunk": 4,
   "publish": true,
-  "note": "full catalog run 5: rounds 1-8 (run 4 failed: toolchain.sh resolved its dir after cd)"
+  "note": "full catalog run 6: rounds 1-11 (overlay archives listed without --start-group, which wasm-ld rejects; non-wasm archives kept out of overlays; link retry without overlay)"
 }

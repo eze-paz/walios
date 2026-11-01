@@ -119,6 +119,13 @@ _t0=$(date +%s)
 OVERLAY="$OVERLAY" HERE="$HERE" BDIR="$bdir" SRC="$SRC" PKGDIR="$pkgdir"   PERL_MM_USE_DEFAULT=1 AUTOMATED_TESTING=1 NONINTERACTIVE_TESTING=1 DEBIAN_FRONTEND=noninteractive   fakeroot -- bash "$bdir/.farm-build.sh" >>"$log" 2>&1 </dev/null
 BUILD_SECS=$(( $(date +%s) - _t0 ))
 
+# Only wasm archives may reach the overlay: every later link pulls all overlay archives into
+# one group, and a native one (a recipe that built a helper library with the host gcc) made
+# wasm-ld fail every link -- configure's "C compiler cannot create executables".
+for a in $(find "$pkgdir" -name '*.a' 2>/dev/null); do
+  m=$($AR t "$a" 2>/dev/null | grep -v '^/' | head -1)
+  { [ -n "$m" ] && [ "$($AR p "$a" "$m" 2>/dev/null | head -c4 | od -An -tx1 | tr -d ' \n')" = "0061736d" ]; } || { echo "farm: dropping non-wasm archive $a" >> "$log"; rm -f "$a"; }
+done
 # Some recipes install libraries under /lib (zlib, ncurses' terminfo libs), not /usr/lib.
 ovdirs=$(cd "$pkgdir" && ls -d usr lib 2>/dev/null)
 [ -n "$ovdirs" ] && tar czf "$OUT/$pkg.overlay.tar.gz" -C "$pkgdir" $ovdirs

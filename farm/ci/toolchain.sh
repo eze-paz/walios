@@ -59,9 +59,9 @@ EOF
 # Executables are static, so a -shared link (libtool, meson, cmake shared libs) produces a
 # static archive under the .so name: wasm-ld reads it by its magic, and dependents link it
 # like any -lfoo. $WALI_EXTRA_* let the farm add the overlay of already-built deps, and with
-# $WALI_OVERLAY set every overlay archive joins the link as one --start-group: static
+# $WALI_OVERLAY set every overlay archive joins the link: static
 # libraries carry no record of their own dependencies (readline needs ncurses' tputs), and
-# a group lets each pull exactly the members it needs.
+# wasm-ld pulls from each archive exactly the members something needs.
 # -flto is dropped: setjmp/longjmp lowering (-wasm-enable-sjlj) is a compile-time pass, and
 # LTO objects reach the linker with it undone ("undefined symbol: longjmp").
 for d in cc c++; do
@@ -116,10 +116,21 @@ if [ \$link = 1 ] && [ \$shared = 1 ]; then
   exit 0
 fi
 if [ \$link = 1 ]; then
-  exec $L/$drv "\${F[@]}" "\${A[@]}" -L$S/lib \${WALI_EXTRA_LDFLAGS:-} -nodefaultlibs \
-    -Wl,--shared-memory,--import-memory,--export-memory,--max-memory=2147483648,-z,stack-size=8388608,--export-table,--growable-table \
-    \${WALI_EXTRA_LIBS:-} \$( [ -n "\${WALI_OVERLAY:-}" ] && { ls "\$WALI_OVERLAY"/usr/lib/*.a "\$WALI_OVERLAY"/lib/*.a 2>/dev/null | grep -q . && echo "-Wl,--start-group \$(ls "\$WALI_OVERLAY"/usr/lib/*.a "\$WALI_OVERLAY"/lib/*.a 2>/dev/null | tr '
-' ' ') -Wl,--end-group"; } )     $cxxlibs -lwali-farm -lc $S/lib/libclang_rt.builtins.a
+  LINK=(-L$S/lib \${WALI_EXTRA_LDFLAGS:-} -nodefaultlibs
+    -Wl,--shared-memory,--import-memory,--export-memory,--max-memory=2147483648,-z,stack-size=8388608,--export-table,--growable-table)
+  TAIL=($cxxlibs -lwali-farm -lc $S/lib/libclang_rt.builtins.a)
+  G=()
+  if [ -n "\${WALI_OVERLAY:-}" ]; then
+    ov=(\$(ls "\$WALI_OVERLAY"/usr/lib/*.a "\$WALI_OVERLAY"/lib/*.a 2>/dev/null))
+    # No --start-group: wasm-ld rejects it, and like lld it resolves archives in any order.
+    [ \${#ov[@]} -gt 0 ] && G=("\${ov[@]}")
+  fi
+  if [ \${#G[@]} -gt 0 ]; then
+    # With the overlay group first; if anything in it breaks the link, the same link without
+    # it (and that attempt's own errors are what the caller sees).
+    $L/$drv "\${F[@]}" "\${A[@]}" "\${LINK[@]}" \${WALI_EXTRA_LIBS:-} "\${G[@]}" "\${TAIL[@]}" 2>/dev/null && exit 0
+  fi
+  exec $L/$drv "\${F[@]}" "\${A[@]}" "\${LINK[@]}" \${WALI_EXTRA_LIBS:-} "\${TAIL[@]}"
 fi
 exec $L/$drv "\${F[@]}" "\${A[@]}"
 EOF
