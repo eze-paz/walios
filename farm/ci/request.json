@@ -3,5 +3,5 @@
   "max": 3000,
   "chunk": 4,
   "publish": true,
-  "note": "full catalog run 7: rounds 1-13 (pip meson, binfmt_misc wasm helpers, no .la in overlays, getprogname, config scripts on PATH, cmake overlay roots, distfiles fallback)"
+  "note": "full catalog run 8: rounds 1-13 minus CMAKE_PREFIX_PATH (cmake picked the overlay wasm ninja)"
 }

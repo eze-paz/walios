@@ -94,7 +94,8 @@ set +u
 export WALI_EXTRA_CFLAGS="-I$OVERLAY/usr/include" WALI_EXTRA_LDFLAGS="-L$OVERLAY/usr/lib -L$OVERLAY/lib" WALI_OVERLAY="$OVERLAY"
 # Deps' *-config scripts (gpgrt-config, pcre2-config, xml2-config...) are shell scripts the
 # recipes look up on PATH -- last, so host tools still win over the overlay's wasm binaries.
-export PATH="$PATH:$OVERLAY/usr/bin" CMAKE_PREFIX_PATH="$OVERLAY/usr"
+# (No CMAKE_PREFIX_PATH: cmake searches PREFIX/bin for programs and took the overlay's wasm ninja.)
+export PATH="$PATH:$OVERLAY/usr/bin"
 export CFLAGS="" CXXFLAGS="" LDFLAGS="" CPPFLAGS="" CONFIG_SITE="$HERE/config.site" FARM_CI_DIR="$HERE"
 # LIBDIR, not PATH: the build host's own .pc files (the runner's libyaml, zlib...) must not
 # be found, or a recipe enables a feature whose wasm library does not exist.
