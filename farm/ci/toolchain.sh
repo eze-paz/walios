@@ -77,7 +77,20 @@ F=(--target=wasm32-unknown-linux-muslwali --sysroot=$S -nostdlibinc $cxx -isyste
    \${WALI_EXTRA_CFLAGS:-})
 A=()
 for a in "\$@"; do case "\$a" in
-  -Wl,--start-group|-Wl,--end-group|-Wl,--as-needed|-Wl,--no-as-needed|-Wl,--gc-sections|-Wl,--warn-common|-Wl,--sort-common|-Wl,-O1|-Wl,--hash-style=*|-Wl,-z,relro|-Wl,-z,now|-Wl,-soname*|-Wl,-soname,*|-Wl,--version-script*|-Wl,-Bsymbolic*|-Wl,--cref|-Wl,--no-undefined|-Wl,-z,*|-Wl,--fatal-warnings|-Wl,--enable-new-dtags|-Wl,-rpath*|-Wl,--build-id*|-rdynamic|-static|-s|-fPIC|-fpic|-fPIE|-fpie|-pie|-flto|-flto=*|-ffat-lto-objects|-fuse-linker-plugin) ;;
+  -rdynamic|-static|-s|-fPIC|-fpic|-fPIE|-fpie|-pie|-flto|-flto=*|-ffat-lto-objects|-fuse-linker-plugin) ;;
+  -Wl,*)
+    # ELF-linker options wasm-ld rejects, filtered token by token: one -Wl, can carry several
+    # (-Wl,-Map=x.map,--cref). -z/-soname/-rpath/... take the next token as their value.
+    IFS=, read -ra t <<< "\${a#-Wl,}"; k=(); skip=0
+    for x in "\${t[@]}"; do
+      if [ \$skip = 1 ]; then skip=0; continue; fi
+      case "\$x" in
+        -z|-soname|-h|-rpath|-rpath-link|--version-script|-Map) skip=1;;
+        --start-group|--end-group|--as-needed|--no-as-needed|--gc-sections|--warn-common|--sort-common|-O1|-O2|--hash-style=*|-soname=*|--version-script=*|-Bsymbolic*|--cref|--no-undefined|--fatal-warnings|--enable-new-dtags|--disable-new-dtags|-rpath=*|-rpath-link=*|--build-id*|-Map=*|-E|--export-dynamic|--icf=*|-znoexecstack|-zrelro|-znow|-zdefs) ;;
+        *) k+=("\$x");;
+      esac
+    done
+    [ \${#k[@]} -gt 0 ] && A+=("-Wl,\$(IFS=,; echo "\${k[*]}")");;
   *) A+=("\$a");; esac; done
 if [ \$link = 1 ] && [ \$shared = 1 ]; then
   objs=()
@@ -98,6 +111,43 @@ EOF
 done
 printf '#!/bin/sh\nargs=""\nfor a in "$@"; do [ "$a" = "-nostdlib" ] || args="$args $a"; done\nexec %s/wasm-ld $args\n' "$L" > bin/wali-ld
 chmod +x bin/wali-ld
+# BSD headers musl leaves out and Alpine adds with bsd-compat-headers: sys/queue.h (the
+# runner's glibc copy, BSD-licensed, self-contained) and a minimal sys/cdefs.h shim.
+mkdir -p $S/include/sys
+[ -f $S/include/sys/queue.h ] || cp /usr/include/x86_64-linux-gnu/sys/queue.h $S/include/sys/queue.h
+[ -f $S/include/sys/tree.h ] || { [ -f /usr/include/bsd/sys/tree.h ] && cp /usr/include/bsd/sys/tree.h $S/include/sys/tree.h; } || true
+[ -f $S/include/sys/cdefs.h ] || cat > $S/include/sys/cdefs.h <<'EOF'
+/* walios farm: the BSD <sys/cdefs.h> macros old code expects (what Alpine's
+   bsd-compat-headers provides; musl deliberately ships no cdefs.h). */
+#ifndef _SYS_CDEFS_H
+#define _SYS_CDEFS_H
+#ifdef __cplusplus
+# define __BEGIN_DECLS extern "C" {
+# define __END_DECLS }
+#else
+# define __BEGIN_DECLS
+# define __END_DECLS
+#endif
+#define __THROW
+#define __NTH(fct) fct
+#define __P(args) args
+#define __PMT(args) args
+#define __CONCAT(x,y) x ## y
+#define __STRING(x) #x
+#define __ptr_t void *
+#define __long_double_t long double
+#define __attribute_malloc__ __attribute__((__malloc__))
+#define __attribute_pure__ __attribute__((__pure__))
+#define __attribute_const__ __attribute__((__const__))
+#define __attribute_used__ __attribute__((__used__))
+#define __attribute_noinline__ __attribute__((__noinline__))
+#define __attribute_deprecated__ __attribute__((__deprecated__))
+#define __wur __attribute__((__warn_unused_result__))
+#define __nonnull(params) __attribute__((__nonnull__ params))
+#define __unused __attribute__((__unused__))
+#define __dead2 __attribute__((__noreturn__))
+#endif
+EOF
 # musl keeps crypt/resolv/util/... in libc; their -l names exist as empty archives (as in musl).
 for l in crypt resolv util xnet; do [ -f $S/lib/lib$l.a ] || $L/llvm-ar rcs $S/lib/lib$l.a; done
 # Recipes and Makefiles that call cc/gcc/c++ directly get the WALI compiler; tools built to
@@ -161,6 +211,9 @@ set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
 set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY BOTH)
 set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE BOTH)
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "")
+# Not ELF: cmake cannot rewrite RPATHs at install time, and walios binaries are static anyway.
+set(CMAKE_SKIP_RPATH ON CACHE BOOL "")
+set(CMAKE_BUILD_WITH_INSTALL_RPATH ON CACHE BOOL "")
 set(CMAKE_POSITION_INDEPENDENT_CODE OFF CACHE BOOL "")
 EOF
 echo "toolchain ready: $TC (LLVM $LLVM_VER, sysroot $TAG, extras $XTAG)"
