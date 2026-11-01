@@ -3,5 +3,5 @@
   "max": 3000,
   "chunk": 4,
   "publish": true,
-  "note": "full catalog run 2: rounds 1-4 + non-interactive builds"
+  "note": "full catalog run 3: rounds 1-6 + process-group kill of hung builds (10 min)"
 }

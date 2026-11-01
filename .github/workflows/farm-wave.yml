@@ -14,7 +14,7 @@ env:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 350
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       max-parallel: 20
@@ -46,8 +46,12 @@ jobs:
           source "$TC/env.sh"
           for p in ${{ matrix.chunk }}; do
             echo "::group::$p"
-            timeout 1200 bash farm/ci/build-one.sh "$p" overlay out > /dev/null < /dev/null
-            [ -f "out/$p.json" ] || echo "{\"pkg\":\"$p\",\"ver\":\"?\",\"status\":\"fail\",\"reason\":\"timeout\",\"secs\":1200}" > "out/$p.json"
+            # Own process group, killed whole after 10 min: `timeout bash ...` only signals bash,
+            # which waits for its hung child (a test, a prompt) and so never ends.
+            setsid bash farm/ci/build-one.sh "$p" overlay out > /dev/null < /dev/null & bp=$!
+            ( sleep 600; kill -KILL -- -$bp 2>/dev/null ) & wp=$!
+            wait $bp || true; kill $wp 2>/dev/null || true; wait $wp 2>/dev/null || true
+            [ -f "out/$p.json" ] || echo "{\"pkg\":\"$p\",\"ver\":\"?\",\"status\":\"fail\",\"reason\":\"timeout\",\"secs\":600}" > "out/$p.json"
             cat "out/$p.json"
             echo "::endgroup::"
           done
