@@ -53,7 +53,10 @@ EOF
 # misleading OOB traps), exported growable table (signal handlers), and libc + builtins.
 # Executables are static, so a -shared link (libtool, meson, cmake shared libs) produces a
 # static archive under the .so name: wasm-ld reads it by its magic, and dependents link it
-# like any -lfoo. $WALI_EXTRA_* let the farm add the overlay of already-built deps.
+# like any -lfoo. $WALI_EXTRA_* let the farm add the overlay of already-built deps, and with
+# $WALI_OVERLAY set every overlay archive joins the link as one --start-group: static
+# libraries carry no record of their own dependencies (readline needs ncurses' tputs), and
+# a group lets each pull exactly the members it needs.
 # -flto is dropped: setjmp/longjmp lowering (-wasm-enable-sjlj) is a compile-time pass, and
 # LTO objects reach the linker with it undone ("undefined symbol: longjmp").
 for d in cc c++; do
@@ -103,7 +106,8 @@ fi
 if [ \$link = 1 ]; then
   exec $L/$drv "\${F[@]}" "\${A[@]}" -L$S/lib \${WALI_EXTRA_LDFLAGS:-} -nodefaultlibs \
     -Wl,--shared-memory,--import-memory,--export-memory,--max-memory=2147483648,-z,stack-size=8388608,--export-table,--growable-table \
-    \${WALI_EXTRA_LIBS:-} $cxxlibs -lc $S/lib/libclang_rt.builtins.a
+    \${WALI_EXTRA_LIBS:-} \$( [ -n "\${WALI_OVERLAY:-}" ] && { ls "\$WALI_OVERLAY"/usr/lib/*.a "\$WALI_OVERLAY"/lib/*.a 2>/dev/null | grep -q . && echo "-Wl,--start-group \$(ls "\$WALI_OVERLAY"/usr/lib/*.a "\$WALI_OVERLAY"/lib/*.a 2>/dev/null | tr '
+' ' ') -Wl,--end-group"; } )     $cxxlibs -lwali-farm -lc $S/lib/libclang_rt.builtins.a
 fi
 exec $L/$drv "\${F[@]}" "\${A[@]}"
 EOF
@@ -148,6 +152,44 @@ mkdir -p $S/include/sys
 #define __dead2 __attribute__((__noreturn__))
 #endif
 EOF
+# libwali-farm.a: the glibc-isms musl leaves out (error(), closefrom()), the three-argument
+# main bridge and musl's cancellation labels (see farm/ci/shim/*.c). An archive, so each
+# member links only where something needs it; it goes before -lc on every link.
+if [ ! -f $S/lib/libwali-farm.a ]; then
+  HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+  for c in "$HERE"/shim/*.c; do
+    $L/clang --target=wasm32-unknown-linux-muslwali --sysroot=$S -nostdlibinc -isystem $S/include -D_GNU_SOURCE       -O2 -mllvm -wasm-enable-sjlj -fwasm-exceptions -matomics -mbulk-memory -mexception-handling -pthread       -c "$c" -o "$S/lib/farm-$(basename "${c%.c}").o"
+  done
+  $L/llvm-ar rcs $S/lib/libwali-farm.a $S/lib/farm-*.o
+fi
+[ -f $S/include/error.h ] || cat > $S/include/error.h <<'EOF'
+/* glibc <error.h>, implemented by libwali-farm.a (farm/ci/shim/error.c). */
+#ifndef _ERROR_H
+#define _ERROR_H
+#ifdef __cplusplus
+extern "C" {
+#endif
+void error(int status, int errnum, const char *format, ...);
+void error_at_line(int status, int errnum, const char *filename, unsigned int linenum, const char *format, ...);
+extern void (*error_print_progname)(void);
+extern unsigned int error_message_count;
+extern int error_one_per_line;
+#ifdef __cplusplus
+}
+#endif
+#endif
+EOF
+# OpenSSL is in the sysroot (libssl.a, libcrypto.a, include/openssl) but has no .pc files,
+# so pkg-config-driven configures did not find it. Compiler default paths, so no flags.
+mkdir -p $S/lib/pkgconfig
+for pc in openssl:"-lssl -lcrypto" libssl:"-lssl" libcrypto:"-lcrypto"; do
+  printf 'Name: %s
+Description: OpenSSL (walios sysroot)
+Version: 3.0.0
+Libs: %s
+Cflags:
+' "${pc%%:*}" "${pc#*:}" > $S/lib/pkgconfig/${pc%%:*}.pc
+done
 # musl keeps crypt/resolv/util/... in libc; their -l names exist as empty archives (as in musl).
 for l in crypt resolv util xnet; do [ -f $S/lib/lib$l.a ] || $L/llvm-ar rcs $S/lib/lib$l.a; done
 # Recipes and Makefiles that call cc/gcc/c++ directly get the WALI compiler; tools built to

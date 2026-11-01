@@ -3,5 +3,5 @@
   "max": 3000,
   "chunk": 4,
   "publish": true,
-  "note": "full catalog run 3: rounds 1-6 + process-group kill of hung builds (10 min)"
+  "note": "full catalog run 4: rounds 1-7 (libwali-farm shim: 3-arg main, error(), closefrom, cancel labels; openssl .pc; overlay link group)"
 }
