@@ -33,6 +33,11 @@ if [ ! -f sysroot/lib/libc++.a ]; then
   fetch $REL/$XTAG/wali-libcxx.tar.gz x1.tgz && tar xzf x1.tgz -C sysroot && rm x1.tgz          # include/c++/v1, unwind headers, lib/*.a
   fetch $REL/$XTAG/wali-linux-headers.tar.gz x2.tgz && tar xzf x2.tgz -C sysroot && rm x2.tgz    # include/{linux,asm,asm-generic,...}
 fi
+# walios perl.wasm's C headers and Config (sandpie walios/build/perl): what an XS module
+# compiles against (build-one.sh points MakeMaker's PERL_INC here).
+if [ ! -f perl-core/5.44.0/wasm32-linux/CORE/perl.h ]; then
+  mkdir -p perl-core && fetch $REL/$XTAG/perl-core.tar.gz pc.tgz && tar xzf pc.tgz -C perl-core && rm pc.tgz
+fi
 L=$TC/$P/bin
 S=$TC/sysroot
 # C++ exceptions need the wasm EH tag __cpp_exception defined once per program (libc
@@ -95,7 +100,7 @@ F=(--target=wasm32-unknown-linux-muslwali --sysroot=$S -nostdlibinc $cxx -isyste
 [ -n "\${WALI_SIDE:-}" ] && F+=(-fPIC -fvisibility=default)
 A=()
 for a in "\$@"; do case "\$a" in
-  -rdynamic|-static|-s|-fPIC|-fpic|-fPIE|-fpie|-pie|-flto|-flto=*|-ffat-lto-objects|-fuse-linker-plugin) ;;
+  -rdynamic|-static|-s|-fPIC|-fpic|-fPIE|-fpie|-pie|-flto|-flto=*|-ffat-lto-objects|-fuse-linker-plugin|-fstack-protector*|-fstack-clash-protection) ;;   # (host perl Config ldflags in Makefile.PL probes)
   -Wl,*)
     # ELF-linker options wasm-ld rejects, filtered token by token: one -Wl, can carry several
     # (-Wl,-Map=x.map,--cref). -z/-soname/-rpath/... take the next token as their value.

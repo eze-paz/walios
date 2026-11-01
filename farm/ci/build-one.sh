@@ -61,6 +61,24 @@ if [ -z "$NOARCH" ] && grep -q '^_luaversions=' "$bdir/APKBUILD"; then
   LUAMOD=1; export WALI_SIDE="$HERE/lua-exports.txt"
   sed -i 's/^_luaversions=.*/_luaversions="5.4"/' "$bdir/APKBUILD"
 fi
+# Perl XS modules (perl-*, not noarch): side modules perl.wasm's DynaLoader dlopen()s,
+# importing only its exports (perl-exports.txt, from walios/build/perl in sandpie). The
+# recipe's `perl Makefile.PL` runs on the runner's perl and writes the host's Config into
+# the Makefile; MakeMaker ignores PERL_INC/CCFLAGS arguments, so make's own command-line
+# overrides (through MAKEFLAGS, which every make in the recipe sees) point it at walios
+# perl's headers (the toolchain's perl-core), the wasm compiler, no host ccflags, no host
+# header deps (PERL_HDRS names 5.38's), and walios' vendor dirs. No value may contain a
+# space; perl's -fwrapv -fno-strict-aliasing ride in WALI_EXTRA_CFLAGS instead.
+PERLXS="" PERLXS_MAKE=""
+if [ -z "$NOARCH" ] && case "$pkg" in perl-*) true;; *) false;; esac; then
+  PERLXS=1; export WALI_SIDE="$HERE/perl-exports.txt" PERL_MM_OPT="CC=$CC LD=$CC"
+  # Makefile.PL's compiler probes (ExtUtils::CBuilder, Config::AutoConf) link with $LD, which
+  # the toolchain sets to the bare wasm-ld wrapper; and they `use` build-time modules the
+  # farm built as pure-Perl packages (Canary::Stability...), in the overlay's noarch dir.
+  export LD="$CC" PERL5LIB="$OVERLAY/usr/share/perl5/vendor_perl:$OVERLAY/usr/share/perl5${PERL5LIB:+:$PERL5LIB}"
+  pc=$WALI_TC/perl-core/5.44.0/wasm32-linux/CORE
+  PERLXS_MAKE="PERL_HDRS= PERL_INC=$pc PERL_INCDEP=$pc CC=$CC LD=$CC CCFLAGS=-D_GNU_SOURCE OPTIMIZE=-O2 CCCDLFLAGS=-fPIC LDDLFLAGS=-shared LDFLAGS= INSTALLVENDORARCH=/usr/lib/perl5/vendor_perl INSTALLVENDORLIB=/usr/share/perl5/vendor_perl"
+fi
 
 src_entry=$(apk source | tr ' \t' '\n\n' | grep -E 'https?://' | head -1)
 src_name="${src_entry%%::*}"; src_url="${src_entry##*::}"
@@ -108,7 +126,7 @@ pkgdir="$bdir/pkg"; mkdir -p "$pkgdir"
 cat > "$bdir/.farm-build.sh" <<'EOS'
 set +u
 # (Lua modules: some recipes pass -I/usr/include/lua$lver themselves, the build host's path.)
-export WALI_EXTRA_CFLAGS="-I$OVERLAY/usr/include${LUAMOD:+ -I$OVERLAY/usr/include/lua5.4}" WALI_EXTRA_LDFLAGS="-L$OVERLAY/usr/lib -L$OVERLAY/lib" WALI_OVERLAY="$OVERLAY"
+export WALI_EXTRA_CFLAGS="-I$OVERLAY/usr/include${LUAMOD:+ -I$OVERLAY/usr/include/lua5.4}${PERLXS:+ -fwrapv -fno-strict-aliasing}" WALI_EXTRA_LDFLAGS="-L$OVERLAY/usr/lib -L$OVERLAY/lib" WALI_OVERLAY="$OVERLAY"
 # Deps' *-config scripts (gpgrt-config, pcre2-config, xml2-config...) are shell scripts the
 # recipes look up on PATH -- last, so host tools still win over the overlay's wasm binaries.
 # (No CMAKE_PREFIX_PATH: cmake searches PREFIX/bin for programs and took the overlay's wasm ninja.)
@@ -118,7 +136,7 @@ export CFLAGS="" CXXFLAGS="" LDFLAGS="" CPPFLAGS="" CONFIG_SITE="$HERE/config.si
 # be found, or a recipe enables a feature whose wasm library does not exist.
 export PKG_CONFIG_LIBDIR="$OVERLAY/usr/lib/pkgconfig:$OVERLAY/usr/share/pkgconfig:$OVERLAY/lib/pkgconfig:$WALI_SYSROOT/lib/pkgconfig" PKG_CONFIG_PATH="" PKG_CONFIG_SYSROOT_DIR="$OVERLAY"
 export CARCH=wasm32 CLIBC=musl CBUILD=x86_64-pc-linux-gnu CHOST=wasm32-unknown-linux-musl CTARGET=wasm32-unknown-linux-musl
-export CTARGET_ARCH=wasm32 CBUILD_ARCH=x86_64 cross_compiling=yes JOBS=$(nproc) MAKEFLAGS="-j$(nproc)"
+export CTARGET_ARCH=wasm32 CBUILD_ARCH=x86_64 cross_compiling=yes JOBS=$(nproc) MAKEFLAGS="-j$(nproc)${PERLXS_MAKE:+ -- $PERLXS_MAKE}"
 export CC_FOR_BUILD=/usr/bin/gcc CXX_FOR_BUILD=/usr/bin/g++ BUILD_CC=/usr/bin/gcc BUILD_CXX=/usr/bin/g++ HOSTCC=/usr/bin/gcc HOSTCXX=/usr/bin/g++
 export srcdir="$BDIR" builddir="$SRC" pkgdir="$PKGDIR" subpkgdir="$BDIR/subpkg" startdir="$BDIR"
 msg() { echo ">>> $*"; }; msg2() { echo "  > $*"; }; warning() { echo "WARNING: $*"; }; warning2() { warning "$@"; }
@@ -150,7 +168,7 @@ fi
 _t0=$(date +%s)
 # stdin is /dev/null and the perl/test knobs say "no questions": a Makefile.PL prompt used to
 # hang a job until its timeout.
-LUAMOD="$LUAMOD" OVERLAY="$OVERLAY" HERE="$HERE" BDIR="$bdir" SRC="$SRC" PKGDIR="$pkgdir"   PERL_MM_USE_DEFAULT=1 AUTOMATED_TESTING=1 NONINTERACTIVE_TESTING=1 DEBIAN_FRONTEND=noninteractive   fakeroot -- bash "$bdir/.farm-build.sh" >>"$log" 2>&1 </dev/null
+LUAMOD="$LUAMOD" PERLXS="$PERLXS" PERLXS_MAKE="$PERLXS_MAKE" OVERLAY="$OVERLAY" HERE="$HERE" BDIR="$bdir" SRC="$SRC" PKGDIR="$pkgdir"   PERL_MM_USE_DEFAULT=1 AUTOMATED_TESTING=1 NONINTERACTIVE_TESTING=1 DEBIAN_FRONTEND=noninteractive   fakeroot -- bash "$bdir/.farm-build.sh" >>"$log" 2>&1 </dev/null
 BUILD_SECS=$(( $(date +%s) - _t0 ))
 
 # Only wasm archives may reach the overlay: every later link pulls all overlay archives into
@@ -169,6 +187,13 @@ done
 # libtool .la files name /usr/lib/... paths, which then break every dependent's libtool link
 # ("'/usr/lib/libXdmcp.la' is not a valid libtool archive"); Alpine deletes them too.
 find "$pkgdir" -name '*.la' -delete 2>/dev/null
+# Perl modules installed by the runner's (Debian's) perl land in its arch dirs; walios perl
+# reads Alpine's (PERL5LIB in sandpie's walios-backend.js), so they move there.
+for d in "$pkgdir"/usr/lib/x86_64-linux-gnu/perl5/5.* "$pkgdir"/usr/lib/x86_64-linux-gnu/perl/5.* "$pkgdir"/usr/local/lib/x86_64-linux-gnu/perl/5.*; do
+  [ -d "$d" ] || continue
+  mkdir -p "$pkgdir/usr/lib/perl5/vendor_perl" && cp -a "$d/." "$pkgdir/usr/lib/perl5/vendor_perl/" && rm -rf "$d"
+done
+rmdir -p "$pkgdir/usr/lib/x86_64-linux-gnu/perl5" "$pkgdir/usr/lib/x86_64-linux-gnu/perl" 2>/dev/null
 # Some recipes install libraries under /lib (zlib, ncurses' terminfo libs), not /usr/lib.
 ovdirs=$(cd "$pkgdir" && ls -d usr lib 2>/dev/null)
 [ -n "$ovdirs" ] && tar czf "$OUT/$pkg.overlay.tar.gz" -C "$pkgdir" $ovdirs
@@ -195,6 +220,16 @@ if [ -n "$LUAMOD" ]; then
     tar czf "$OUT/$pkg.mod.tar.gz" -C "$pkgdir" $(cd "$pkgdir" && ls -d usr/lib/lua/5.4 usr/share/lua/5.4 usr/share/lua/common 2>/dev/null); emit pass module mod
   fi
   emit fail "lua-no-module:$(grep -m1 -E 'error|Error|ERROR' "$log" | tr -d '\000-\037"\\' | cut -c1-60)"
+fi
+if [ -n "$PERLXS" ]; then
+  # auto/**/*.so side modules + the .pm files that bootstrap them, under walios' vendor dirs.
+  sm=$(cd "$pkgdir" && find usr/lib/perl5 -name '*.so' 2>/dev/null | while read -r f; do
+    node -e "process.exit(WebAssembly.Module.customSections(new WebAssembly.Module(require('fs').readFileSync(process.argv[1])),'dylink.0').length?0:1)" "$f" 2>/dev/null && echo "$f"; done)
+  # (an arch=all recipe with no .xs at all is pure Perl after all)
+  if [ -n "$sm" ] || { ! find "$SRC" -name '*.xs' | grep -q . && (cd "$pkgdir" && find usr -name '*.pm' 2>/dev/null) | grep -q .; }; then
+    tar czf "$OUT/$pkg.mod.tar.gz" -C "$pkgdir" $(cd "$pkgdir" && ls -d usr/lib/perl5 usr/share/perl5 2>/dev/null); emit pass module mod
+  fi
+  emit fail "perl-no-xs-module:$(grep -m1 -E 'error|Error|ERROR' "$log" | tr -d '\000-\037"\\' | cut -c1-60)"
 fi
 [ -n "$PYPKG" ] && emit fail "python-no-output:$(grep -m1 -E 'ERROR|Error|error' "$log" | tr -d '\000-\037"\\' | cut -c1-60)"
 if [ -n "$NOARCH" ]; then

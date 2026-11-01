@@ -3,5 +3,5 @@
   "max": 3000,
   "chunk": 4,
   "publish": true,
-  "note": "full catalog run 12: rounds 1-19 (Python modules; Lua C modules as wasm side modules for lua.wasm 5.4)"
+  "note": "full catalog run 13: rounds 1-20 (Python modules; Lua C modules and Perl XS modules as wasm side modules)"
 }
