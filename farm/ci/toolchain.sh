@@ -8,6 +8,7 @@
 # abuild helpers Alpine recipes call (abuild-meson). Idempotent; CI caches $TC.
 #   toolchain.sh <dir> [pkgs-tag] [toolchain-tag]
 set -euo pipefail
+HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)   # before any cd: the path may be relative
 TC=$(realpath -m "${1:?usage: toolchain.sh <dir> [pkgs-tag] [toolchain-tag]}")
 TAG=${2:-pkgs-2026-10-31}
 XTAG=${3:-toolchain-2026-10-31}
@@ -156,7 +157,6 @@ EOF
 # main bridge and musl's cancellation labels (see farm/ci/shim/*.c). An archive, so each
 # member links only where something needs it; it goes before -lc on every link.
 if [ ! -f $S/lib/libwali-farm.a ]; then
-  HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
   for c in "$HERE"/shim/*.c; do
     $L/clang --target=wasm32-unknown-linux-muslwali --sysroot=$S -nostdlibinc -isystem $S/include -D_GNU_SOURCE       -O2 -mllvm -wasm-enable-sjlj -fwasm-exceptions -matomics -mbulk-memory -mexception-handling -pthread       -c "$c" -o "$S/lib/farm-$(basename "${c%.c}").o"
   done
