@@ -29,7 +29,7 @@ concurrency:
 
 env:
   TC: ${{ github.workspace }}/../wali-tc
-  TC_KEY: wali-tc-llvm22.1.3-pkgs-2026-10-31-x1-v6
+  TC_KEY: wali-tc-llvm22.1.3-pkgs-2026-10-31-x1-v7
 
 jobs:
   plan:
@@ -81,7 +81,7 @@ jobs:
         id: tc
         with: { path: '${{ env.TC }}', key: '${{ env.TC_KEY }}' }
       - if: steps.tc.outputs.cache-hit != 'true'
-        run: bash farm/ci/toolchain.sh "$TC"
+        run: sudo apt-get install -y -qq libbsd-dev >/dev/null && bash farm/ci/toolchain.sh "$TC"
 
   wave0:
     needs: plan

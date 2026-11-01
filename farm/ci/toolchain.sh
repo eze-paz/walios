@@ -77,7 +77,7 @@ F=(--target=wasm32-unknown-linux-muslwali --sysroot=$S -nostdlibinc $cxx -isyste
    -O2 -mllvm -wasm-enable-sjlj -fwasm-exceptions -matomics -mbulk-memory -mexception-handling -pthread
    -Wno-implicit-function-declaration -Wno-int-conversion -Wno-incompatible-pointer-types
    -Wno-incompatible-function-pointer-types -Wno-unused-command-line-argument -Wno-ignored-optimization-argument
-   -Wno-unknown-warning-option $cxxdefs
+   -Wno-unknown-warning-option -Wno-long-long $cxxdefs
    \${WALI_EXTRA_CFLAGS:-})
 A=()
 for a in "\$@"; do case "\$a" in
@@ -119,8 +119,13 @@ chmod +x bin/wali-ld
 # BSD headers musl leaves out and Alpine adds with bsd-compat-headers: sys/queue.h (the
 # runner's glibc copy, BSD-licensed, self-contained) and a minimal sys/cdefs.h shim.
 mkdir -p $S/include/sys
-[ -f $S/include/sys/queue.h ] || cp /usr/include/x86_64-linux-gnu/sys/queue.h $S/include/sys/queue.h
-[ -f $S/include/sys/tree.h ] || { [ -f /usr/include/bsd/sys/tree.h ] && cp /usr/include/bsd/sys/tree.h $S/include/sys/tree.h; } || true
+# libbsd's queue.h (full BSD set: TAILQ_FOREACH_SAFE...) when the host has libbsd-dev,
+# else glibc's, which lacks the _SAFE iterators.
+if [ ! -f $S/include/sys/queue.h ]; then
+  if [ -f /usr/include/bsd/sys/queue.h ]; then sed 's|#include <bsd/sys/cdefs.h>|#include <sys/cdefs.h>|' /usr/include/bsd/sys/queue.h > $S/include/sys/queue.h
+  else cp /usr/include/x86_64-linux-gnu/sys/queue.h $S/include/sys/queue.h; fi
+fi
+[ -f $S/include/sys/tree.h ] || { [ -f /usr/include/bsd/sys/tree.h ] && sed 's|#include <bsd/sys/cdefs.h>|#include <sys/cdefs.h>|' /usr/include/bsd/sys/tree.h > $S/include/sys/tree.h; } || true
 [ -f $S/include/sys/cdefs.h ] || cat > $S/include/sys/cdefs.h <<'EOF'
 /* walios farm: the BSD <sys/cdefs.h> macros old code expects (what Alpine's
    bsd-compat-headers provides; musl deliberately ships no cdefs.h). */
