@@ -276,6 +276,21 @@ exec meson setup --cross-file $TC/wali.meson --prefix=/usr --libdir=/usr/lib --l
   -Db_lto=false -Db_pie=false -Db_staticpic=false "\$@"
 EOF
 chmod +x bin/abuild-meson
+# A recipe calling `meson setup` directly (glib) would get a NATIVE build, whose sanity check
+# runs a compiled wasm test program and stops ("Executables created by c compiler ... are
+# not runnable"). This meson, first on PATH, adds the cross file when the call has none.
+cat > bin/meson <<EOF
+#!/bin/bash
+real=""; IFS=:
+for d in \$PATH; do [ "\$d" = "$TC/bin" ] && continue; [ -x "\$d/meson" ] && { real="\$d/meson"; break; }; done
+unset IFS
+[ -n "\$real" ] || { echo "meson: not installed" >&2; exit 127; }
+if [ "\$1" = setup ]; then
+  case " \$* " in *" --cross-file"*) ;; *) shift; exec "\$real" setup --cross-file $TC/wali.meson "\$@";; esac
+fi
+exec "\$real" "\$@"
+EOF
+chmod +x bin/meson
 # cmake: CMAKE_TOOLCHAIN_FILE (env) is honoured by cmake >= 3.21.
 cat > wali.cmake <<EOF
 set(CMAKE_SYSTEM_NAME Linux)

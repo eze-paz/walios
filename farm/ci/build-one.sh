@@ -55,7 +55,10 @@ src_name="${src_entry%%::*}"; src_url="${src_entry##*::}"
 if [ -n "$src_url" ]; then
   # Upstream first (with a normal user agent: gitlab.alpinelinux.org answers bots 418), then
   # Alpine's own mirror of every recipe's sources, keyed by the same file name.
-  dl() { curl -sSfL --retry 2 --connect-timeout 30 --max-time 300 -A "Mozilla/5.0 (walios farm)" "$1" -o "$bdir/$src_name" 2>>"$log"; }
+  # A 200 can still be a bot-check page (gitlab.freedesktop.org serves the runners HTML),
+  # which only failed later at extraction: an HTML body counts as a failed download.
+  dl() { curl -sSfL --retry 2 --connect-timeout 30 --max-time 300 -A "Mozilla/5.0 (walios farm)" "$1" -o "$bdir/$src_name" 2>>"$log" &&
+         ! head -c 512 "$bdir/$src_name" | grep -qiE '<!doctype html|<html'; }
   dl "$src_url" || dl "https://distfiles.alpinelinux.org/distfiles/edge/$src_name"     || dl "https://distfiles.alpinelinux.org/distfiles/v3.22/$src_name" || emit fail dl-failed
   # tar first; bsdtar for what GNU tar cannot open (.zip, .tar.lz, .7z...)
   case "$src_name" in *.tar*|*.tgz|*.tbz*|*.txz|*.zip|*.7z|*.lz|*.zst)
