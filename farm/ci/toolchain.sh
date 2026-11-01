@@ -156,6 +156,15 @@ fi
 #define __nonnull(params) __attribute__((__nonnull__ params))
 #define __unused __attribute__((__unused__))
 #define __dead2 __attribute__((__noreturn__))
+#define __dead __attribute__((__noreturn__))
+#define __packed __attribute__((__packed__))
+#define __aligned(x) __attribute__((__aligned__(x)))
+#define __predict_true(e) __builtin_expect(!!(e), 1)
+#define __predict_false(e) __builtin_expect(!!(e), 0)
+#define __offsetof(type, field) __builtin_offsetof(type, field)
+#define __containerof(x, s, m) ((s *)((char *)(x) - __offsetof(s, m)))
+#define __DEQUALIFY(type, var) ((type)(__UINTPTR_TYPE__)(const volatile void *)(var))
+#define __DECONST(type, var) ((type)(__UINTPTR_TYPE__)(const void *)(var))
 #endif
 EOF
 # libwali-farm.a: the glibc-isms musl leaves out (error(), closefrom()), the three-argument
