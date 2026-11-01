@@ -147,6 +147,12 @@ for a in $(find "$pkgdir" -name '*.a' 2>/dev/null); do
   m=$($AR t "$a" 2>/dev/null | grep -v '^/' | head -1)
   { [ -n "$m" ] && [ "$($AR p "$a" "$m" 2>/dev/null | head -c4 | od -An -tx1 | tr -d ' \n')" = "0061736d" ]; } || { echo "farm: dropping non-wasm archive $a" >> "$log"; rm -f "$a"; }
 done
+# A recipe that installs only lib*.so* (our -shared output is an ar archive under that name)
+# leaves dependents' -lfoo unresolved: wasm-ld's -l searches lib*.a only. Add the .a beside it.
+for f in $(find "$pkgdir" -name 'lib*.so*' \( -type f -o -type l \) 2>/dev/null); do
+  a="${f%%.so*}.a"
+  [ -e "$a" ] || { [ "$(head -c7 "$f" 2>/dev/null)" = '!<arch>' ] && cp -L "$f" "$a"; }
+done
 # libtool .la files name /usr/lib/... paths, which then break every dependent's libtool link
 # ("'/usr/lib/libXdmcp.la' is not a valid libtool archive"); Alpine deletes them too.
 find "$pkgdir" -name '*.la' -delete 2>/dev/null
