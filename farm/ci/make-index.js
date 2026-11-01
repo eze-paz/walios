@@ -19,7 +19,8 @@ for (const r of rows.sort((a, b) => a.pkg.localeCompare(b.pkg))) {
     const name = r.kind === 'exe' ? `${r.pkg}.wasm` : `${r.pkg}.mod.tar.gz`, buf = fs.readFileSync(path.join(dir, name));
     let file = name; if (++nexe > SPILL) { file = `../${tag}-b/${name}`; spill.push(name); }
     index.packages[r.pkg] = { ver: r.ver, kind: r.kind, file, size: buf.length, sha256: crypto.createHash('sha256').update(buf).digest('hex'), secs: r.secs,
-      ...(r.kind === 'exe' ? { smoke: r.smoke } : { deps: r.deps || [] }) };
+      ...(r.kind === 'exe' ? { smoke: r.smoke } : { deps: r.deps || [] }),
+      ...(r.abiwarn ? { abiwarn: r.abiwarn } : {}) };  // format calls that print garbage (abiwarn.js)
   } else if (r.status === 'pass') index.packages[r.pkg] = { ver: r.ver, kind: r.kind, secs: r.secs };
   else if (r.status === 'skip') (index.skipped = index.skipped || {})[r.pkg] = { ver: r.ver, reason: r.reason };
   else index.failed[r.pkg] = { ver: r.ver, reason: r.reason, secs: r.secs };

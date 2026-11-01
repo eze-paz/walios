@@ -98,8 +98,11 @@ done
 # __STDC_ISO_10646__: gcc on musl/glibc pre-includes stdc-predef.h, which defines it (wchar_t
 # holds Unicode code points); clang for wasm does not, and libedit refuses to build without
 # it. (Not the whole header: it redefines two clang builtins, a warning under -Werror.)
+# _MPFR_PREC_FORMAT=2: MPFR's precision type follows GMP's mp_size_t (long), but a precision
+# in bytes must fit size_t, which is 32-bit here (MPFR's own static assertion); int is the
+# setting MPFR provides for that. Global, so every program including mpfr.h sees the same ABI.
 F=(--target=wasm32-unknown-linux-muslwali --sysroot=$S -nostdlibinc $cxx -isystem $S/include -D_GNU_SOURCE
-   -D__STDC_ISO_10646__=201206L -O2 -mllvm -wasm-enable-sjlj -fwasm-exceptions -matomics -mbulk-memory -mexception-handling -pthread
+   -D__STDC_ISO_10646__=201206L -D_MPFR_PREC_FORMAT=2 -O2 -mllvm -wasm-enable-sjlj -fwasm-exceptions -matomics -mbulk-memory -mexception-handling -pthread
    -Wno-implicit-function-declaration -Wno-int-conversion -Wno-incompatible-pointer-types
    -Wno-incompatible-function-pointer-types -Wno-unused-command-line-argument -Wno-ignored-optimization-argument
    -Wno-unknown-warning-option -Wno-long-long $cxxdefs

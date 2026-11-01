@@ -3,5 +3,5 @@
   "max": 3000,
   "chunk": 4,
   "publish": true,
-  "note": "full catalog run 16: rounds 1-23 (libffi WALI port in the sysroot; glib without introspection)"
+  "note": "full catalog run 17: rounds 1-24 (WALI ABI: mpfr int precision, oniguruma/jq pointer-sized types, abiwarn counts)"
 }

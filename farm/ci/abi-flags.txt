@@ -1,0 +1,7 @@
+# Per-package compiler flags for the WALI ABI: 32-bit pointers, 64-bit long (x86_64 struct
+# layouts for the kernel), a combination no other Linux ABI has. Code that picks "the integer
+# as wide as a pointer" from {long, long long} by SIZEOF_VOIDP finds neither and leaves the
+# type undefined; these name it uintptr_t instead. Flags, never source patches.
+#   <aport> <flags...>
+oniguruma -include stdint.h -Dst_data_t=uintptr_t -Dhash_data_type=uintptr_t
+jq -include stdint.h -Dst_data_t=uintptr_t -Dhash_data_type=uintptr_t

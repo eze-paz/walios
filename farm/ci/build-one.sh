@@ -37,8 +37,11 @@ emit() {  # status reason kind smoke
   local row deps
   # Runtime depends, as plain package names (the index lets `apk add` pull a module's deps).
   deps=$(for d in $DEPS; do d=${d%%[<>=~]*}; case "$d" in ''|*:*|!*) ;; *) printf '"%s",' "$d";; esac; done)
-  row=$(printf '{"pkg":"%s","ver":"%s","status":"%s","reason":"%s","kind":"%s","secs":%s,"smoke":"%s","deps":[%s]}' \
-    "$pkg" "$pkgver" "$1" "$2" "${3:-}" "$BUILD_SECS" "$(printf '%s' "${4:-}" | tr -d '\000-\037"\\' | cut -c1-80)" "${deps%,}")
+  # abiwarn: format calls whose argument width differs from what the format reads (abiwarn.js);
+  # they compile and run, printing garbage, so a built package carries the count.
+  row=$(printf '{"pkg":"%s","ver":"%s","status":"%s","reason":"%s","kind":"%s","secs":%s,"smoke":"%s","abiwarn":%s,"deps":[%s]}' \
+    "$pkg" "$pkgver" "$1" "$2" "${3:-}" "$BUILD_SECS" "$(printf '%s' "${4:-}" | tr -d '\000-\037"\\' | cut -c1-80)" \
+    "$(node "$HERE/abiwarn.js" "$log" 2>/dev/null || echo 0)" "${deps%,}")
   echo "$row" > "$OUT/$pkg.json"; echo "$row"; exit 0
 }
 
@@ -162,7 +165,7 @@ pkgdir="$bdir/pkg"; mkdir -p "$pkgdir"
 cat > "$bdir/.farm-build.sh" <<'EOS'
 set +u
 # (Lua modules: some recipes pass -I/usr/include/lua$lver themselves, the build host's path.)
-export WALI_EXTRA_CFLAGS="-I$OVERLAY/usr/include${LUAMOD:+ -I$OVERLAY/usr/include/lua5.4}${PERLXS:+ -fwrapv -fno-strict-aliasing}" WALI_EXTRA_LDFLAGS="-L$OVERLAY/usr/lib -L$OVERLAY/lib" WALI_OVERLAY="$OVERLAY"
+export WALI_EXTRA_CFLAGS="-I$OVERLAY/usr/include${LUAMOD:+ -I$OVERLAY/usr/include/lua5.4}${PERLXS:+ -fwrapv -fno-strict-aliasing}${ABIFLAGS:+ $ABIFLAGS}" WALI_EXTRA_LDFLAGS="-L$OVERLAY/usr/lib -L$OVERLAY/lib" WALI_OVERLAY="$OVERLAY"
 # Deps' *-config scripts (gpgrt-config, pcre2-config, xml2-config...) are shell scripts the
 # recipes look up on PATH -- last, so host tools still win over the overlay's wasm binaries.
 # (No CMAKE_PREFIX_PATH: cmake searches PREFIX/bin for programs and took the overlay's wasm ninja.)
@@ -201,10 +204,13 @@ if [ -n "${WALI_OVERLAY_IDX:-}" ] && [ -f "${APORTS_DIR:-}/deps.json" ]; then
   export WALI_OVERLAY_LIBS
   echo "farm: linking against deps' archives: $WALI_OVERLAY_LIBS" >> "$log"
 fi
+# WALI ABI (32-bit pointers, 64-bit long) flags for this package, from abi-flags.txt.
+ABIFLAGS=$(awk -v p="$pkg" '$1 == p { $1 = ""; print substr($0, 2) }' "$HERE/abi-flags.txt")
+[ -n "$ABIFLAGS" ] && echo "farm: ABI flags: $ABIFLAGS" >> "$log"
 _t0=$(date +%s)
 # stdin is /dev/null and the perl/test knobs say "no questions": a Makefile.PL prompt used to
 # hang a job until its timeout.
-LUAMOD="$LUAMOD" PERLXS="$PERLXS" PERLXS_MAKE="$PERLXS_MAKE" OVERLAY="$OVERLAY" HERE="$HERE" BDIR="$bdir" SRC="$SRC" PKGDIR="$pkgdir"   PERL_MM_USE_DEFAULT=1 AUTOMATED_TESTING=1 NONINTERACTIVE_TESTING=1 DEBIAN_FRONTEND=noninteractive   fakeroot -- bash "$bdir/.farm-build.sh" >>"$log" 2>&1 </dev/null
+ABIFLAGS="$ABIFLAGS" LUAMOD="$LUAMOD" PERLXS="$PERLXS" PERLXS_MAKE="$PERLXS_MAKE" OVERLAY="$OVERLAY" HERE="$HERE" BDIR="$bdir" SRC="$SRC" PKGDIR="$pkgdir"   PERL_MM_USE_DEFAULT=1 AUTOMATED_TESTING=1 NONINTERACTIVE_TESTING=1 DEBIAN_FRONTEND=noninteractive   fakeroot -- bash "$bdir/.farm-build.sh" >>"$log" 2>&1 </dev/null
 BUILD_SECS=$(( $(date +%s) - _t0 ))
 
 # Only wasm archives may reach the overlay: every later link pulls all overlay archives into
