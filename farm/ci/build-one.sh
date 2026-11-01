@@ -47,11 +47,19 @@ case " $(apk makedepends) " in *" cargo "*|*" rust "*|*" cargo-auditable "*) emi
 src_entry=$(apk source | tr ' \t' '\n\n' | grep -E 'https?://' | head -1)
 src_name="${src_entry%%::*}"; src_url="${src_entry##*::}"
 [ "$src_name" = "$src_url" ] && src_name="$(basename "$src_url")"
-[ -z "$src_url" ] && emit fail no-source
-curl -sSfL --retry 3 --max-time 300 "$src_url" -o "$bdir/$src_name" 2>>"$log" || emit fail dl-failed
-tar xf "$bdir/$src_name" -C "$bdir" 2>>"$log" || emit fail extract-failed
-SRC=$(find "$bdir" -mindepth 1 -maxdepth 1 -type d ! -name pkg | head -1)
-[ -z "$SRC" ] && emit fail no-srcdir
+if [ -n "$src_url" ]; then
+  curl -sSfL --retry 3 --max-time 300 "$src_url" -o "$bdir/$src_name" 2>>"$log" || emit fail dl-failed
+  # tar first; bsdtar for what GNU tar cannot open (.zip, .tar.lz, .7z...)
+  case "$src_name" in *.tar*|*.tgz|*.tbz*|*.txz|*.zip|*.7z|*.lz|*.zst)
+    tar xf "$bdir/$src_name" -C "$bdir" 2>>"$log" || bsdtar xf "$bdir/$src_name" -C "$bdir" 2>>"$log" || emit fail extract-failed;;
+  esac
+  SRC=$(find "$bdir" -mindepth 1 -maxdepth 1 -type d ! -name pkg | head -1)
+  # a single-file source (a .c, a script) or a tarball without a top dir
+  [ -z "$SRC" ] && { SRC="$bdir/$pkg-$pkgver"; mkdir -p "$SRC"; }
+else
+  # only local files (alpine-keys, bsd-compat-headers...): the recipe builds from $srcdir
+  SRC="$bdir/$pkg-$pkgver"; mkdir -p "$SRC"
+fi
 for f in $(apk source | tr ' \t' '\n\n' | grep -vE 'https?://|^$'); do
   [ -f "$bdir/$f" ] || curl -sSfL --retry 3 --max-time 30 "$APORTS/$repo_sub/$pkg/$f" -o "$bdir/$f" 2>>"$log"
   [ -f "$bdir/$f" ] && cp "$bdir/$f" "$SRC/" 2>/dev/null
@@ -82,12 +90,13 @@ export CFLAGS="" CXXFLAGS="" LDFLAGS="" CPPFLAGS="" CONFIG_SITE="$HERE/config.si
 export PKG_CONFIG_LIBDIR="$OVERLAY/usr/lib/pkgconfig:$OVERLAY/usr/share/pkgconfig:$OVERLAY/lib/pkgconfig" PKG_CONFIG_PATH="" PKG_CONFIG_SYSROOT_DIR="$OVERLAY"
 export CARCH=wasm32 CLIBC=musl CBUILD=x86_64-pc-linux-gnu CHOST=wasm32-unknown-linux-musl CTARGET=wasm32-unknown-linux-musl
 export CTARGET_ARCH=wasm32 CBUILD_ARCH=x86_64 cross_compiling=yes JOBS=$(nproc) MAKEFLAGS="-j$(nproc)"
+export CC_FOR_BUILD=/usr/bin/gcc CXX_FOR_BUILD=/usr/bin/g++ BUILD_CC=/usr/bin/gcc BUILD_CXX=/usr/bin/g++ HOSTCC=/usr/bin/gcc HOSTCXX=/usr/bin/g++
 export srcdir="$BDIR" builddir="$SRC" pkgdir="$PKGDIR" subpkgdir="$BDIR/subpkg" startdir="$BDIR"
 msg() { echo ">>> $*"; }; msg2() { echo "  > $*"; }; warning() { echo "WARNING: $*"; }; warning2() { warning "$@"; }
 error() { echo "ERROR: $*"; }; die() { error "$@"; exit 1; }
 update_config_sub() { find "${1:-.}" -name config.sub -exec chmod u+w {} \; -exec cp /usr/share/misc/config.sub {} \; ; }
 update_config_guess() { find "${1:-.}" -name config.guess -exec chmod u+w {} \; -exec cp /usr/share/misc/config.guess {} \; ; }
-amove() { :; }; default_check() { :; }; default_doc() { :; }; default_dev() { :; }; default_libs() { :; }
+want_check() { return 1; }; amove() { :; }; default_check() { :; }; default_doc() { :; }; default_dev() { :; }; default_libs() { :; }
 default_prepare() { cd "$builddir"; for p in $source; do case "${p%%::*}" in
     *.patch) [ -f "$srcdir/${p%%::*}" ] && { msg "applying $p"; patch -p1 <"$srcdir/${p%%::*}" || return 1; };; esac; done; }
 cd "$BDIR"

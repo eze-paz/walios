@@ -57,8 +57,10 @@ EOF
 # -flto is dropped: setjmp/longjmp lowering (-wasm-enable-sjlj) is a compile-time pass, and
 # LTO objects reach the linker with it undone ("undefined symbol: longjmp").
 for d in cc c++; do
-  drv=clang; cxx=""; cxxlibs=""
-  [ $d = c++ ] && { drv=clang++; cxx="-isystem $S/include/c++/v1"; cxxlibs="-lc++ -lc++abi -lunwind -lwali-cppexc"; }
+  drv=clang; cxx=""; cxxlibs=""; cxxdefs=""
+  [ $d = c++ ] && { drv=clang++; cxx="-isystem $S/include/c++/v1"; cxxlibs="-lc++ -lc++abi -lunwind -lwali-cppexc"
+    # pre-C++17 code still uses std::unary_function/binary_function (removed in C++17).
+    cxxdefs="-D_LIBCPP_ENABLE_CXX17_REMOVED_UNARY_BINARY_FUNCTION"; }
   cat > bin/wali-$d <<EOF
 #!/bin/bash
 link=1 shared=0 out=a.out
@@ -71,10 +73,11 @@ F=(--target=wasm32-unknown-linux-muslwali --sysroot=$S -nostdlibinc $cxx -isyste
    -O2 -mllvm -wasm-enable-sjlj -fwasm-exceptions -matomics -mbulk-memory -mexception-handling -pthread
    -Wno-implicit-function-declaration -Wno-int-conversion -Wno-incompatible-pointer-types
    -Wno-incompatible-function-pointer-types -Wno-unused-command-line-argument -Wno-ignored-optimization-argument
+   -Wno-unknown-warning-option $cxxdefs
    \${WALI_EXTRA_CFLAGS:-})
 A=()
 for a in "\$@"; do case "\$a" in
-  -Wl,--start-group|-Wl,--end-group|-Wl,--as-needed|-Wl,--no-as-needed|-Wl,--gc-sections|-Wl,--warn-common|-Wl,--sort-common|-Wl,-O1|-Wl,--hash-style=*|-Wl,-z,relro|-Wl,-z,now|-Wl,-soname*|-Wl,-soname,*|-Wl,--version-script*|-Wl,-Bsymbolic*|-rdynamic|-static|-s|-fPIC|-fpic|-fPIE|-fpie|-pie|-flto|-flto=*|-ffat-lto-objects|-fuse-linker-plugin) ;;
+  -Wl,--start-group|-Wl,--end-group|-Wl,--as-needed|-Wl,--no-as-needed|-Wl,--gc-sections|-Wl,--warn-common|-Wl,--sort-common|-Wl,-O1|-Wl,--hash-style=*|-Wl,-z,relro|-Wl,-z,now|-Wl,-soname*|-Wl,-soname,*|-Wl,--version-script*|-Wl,-Bsymbolic*|-Wl,--cref|-Wl,--no-undefined|-Wl,-z,*|-Wl,--fatal-warnings|-Wl,--enable-new-dtags|-Wl,-rpath*|-Wl,--build-id*|-rdynamic|-static|-s|-fPIC|-fpic|-fPIE|-fpie|-pie|-flto|-flto=*|-ffat-lto-objects|-fuse-linker-plugin) ;;
   *) A+=("\$a");; esac; done
 if [ \$link = 1 ] && [ \$shared = 1 ]; then
   objs=()
@@ -95,6 +98,26 @@ EOF
 done
 printf '#!/bin/sh\nargs=""\nfor a in "$@"; do [ "$a" = "-nostdlib" ] || args="$args $a"; done\nexec %s/wasm-ld $args\n' "$L" > bin/wali-ld
 chmod +x bin/wali-ld
+# musl keeps crypt/resolv/util/... in libc; their -l names exist as empty archives (as in musl).
+for l in crypt resolv util xnet; do [ -f $S/lib/lib$l.a ] || $L/llvm-ar rcs $S/lib/lib$l.a; done
+# Recipes and Makefiles that call cc/gcc/c++ directly get the WALI compiler; tools built to
+# run during the build use CC_FOR_BUILD/BUILD_CC/HOSTCC, which build-one.sh points at gcc.
+for n in cc gcc; do ln -sf wali-cc bin/$n; done
+for n in c++ g++; do ln -sf wali-c++ bin/$n; done
+# Alpine helpers some recipes call: cmake3.5 (cmake with the 3.5 policy floor), and doc/ELF
+# tools the farm does not need (scdoc writes man pages, scanelf audits ELF -- no-ops here).
+cat > bin/cmake3.5 <<'EOF'
+#!/bin/sh
+case "$1" in --build|--install|-E|-P) exec cmake "$@";; esac
+exec cmake -DCMAKE_POLICY_VERSION_MINIMUM=3.5 "$@"
+EOF
+printf '#!/bin/sh
+cat >/dev/null
+' > bin/scdoc
+printf '#!/bin/sh
+exit 0
+' > bin/scanelf
+chmod +x bin/cmake3.5 bin/scdoc bin/scanelf
 
 # meson: a cross file, and abuild-meson (Alpine's wrapper around `meson setup`).
 cat > wali.meson <<EOF
@@ -114,7 +137,11 @@ endian = 'little'
 needs_exe_wrapper = true
 EOF
 cat > bin/abuild-meson <<EOF
-#!/bin/sh
+#!/bin/bash
+# The recipe's own library-type/LTO/PIE choices give way to the farm's (static, no LTO).
+A=()
+for a in "\$@"; do case "\$a" in -Ddefault_library=*|--default-library=*|-Db_lto=*|-Db_pie=*|-Db_staticpic=*) ;; *) A+=("\$a");; esac; done
+set -- "\${A[@]}"
 exec meson setup --cross-file $TC/wali.meson --prefix=/usr --libdir=/usr/lib --libexecdir=/usr/libexec \
   --bindir=/usr/bin --sbindir=/usr/sbin --includedir=/usr/include --datadir=/usr/share --mandir=/usr/share/man \
   --sysconfdir=/etc --localstatedir=/var --buildtype=plain --default-library=static --wrap-mode=nodownload \
