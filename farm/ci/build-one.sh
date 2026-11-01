@@ -49,8 +49,9 @@ DEPS=$(apk depends)
 # overlay. Rust and Go need their own toolchains.
 NOARCH=""; [ "$(apk arch)" = noarch ] && NOARCH=1
 case " $(apk makedepends) " in *" cargo "*|*" rust "*|*" cargo-auditable "*) emit skip needs-rust;; *" go "*) emit skip needs-go;; esac
-# Python packages built with gpep517 (C extensions) need a walios Python build environment.
-grep -q gpep517 "$bdir/APKBUILD" && emit skip needs-python
+# Python packages (gpep517 + installer, on the runner's Python) are built as Alpine builds
+# them; the result is classified after package(): pure Python ships, C extensions do not.
+PYPKG=""; grep -q gpep517 "$bdir/APKBUILD" && PYPKG=1
 
 src_entry=$(apk source | tr ' \t' '\n\n' | grep -E 'https?://' | head -1)
 src_name="${src_entry%%::*}"; src_url="${src_entry##*::}"
@@ -161,6 +162,20 @@ ovdirs=$(cd "$pkgdir" && ls -d usr lib 2>/dev/null)
 [ -n "$ovdirs" ] && tar czf "$OUT/$pkg.overlay.tar.gz" -C "$pkgdir" $ovdirs
 # A pure-Perl or pure-Lua module (noarch, installs into Alpine's module paths) is a package in
 # its own right on walios: those files, as a tarball `apk add` mounts at /.
+# Python: site-packages built with the runner's Python (3.x) goes to walios Python's
+# /site-packages (on its PYTHONPATH). Compiled extensions were built for the wrong Python and
+# by a wasm compiler that cannot make loadable modules here -- those are failures, named.
+# Wherever the build host's Python installed it: Debian's is usr/local/lib/python3.X/
+# dist-packages, a venv's is under the venv path, Alpine's is usr/lib/python3.X/site-packages.
+pyd=$(cd "$pkgdir" && find . -type d \( -name site-packages -o -name dist-packages \) 2>/dev/null | head -1 | sed 's|^\./||')
+if [ -n "$pyd" ] && { [ -n "$PYPKG" ] || [ -n "$NOARCH" ]; }; then   # not a C library's bindings
+  if (cd "$pkgdir/$pyd" && find . -name '*.so' -o -name '*.pyd' | grep -q .); then emit fail python-c-extension; fi
+  if (cd "$pkgdir/$pyd" && find . -name '*.py' | grep -q .); then
+    # (no __pycache__: compiled for the build host's Python, not walios')
+    tar czf "$OUT/$pkg.mod.tar.gz" -C "$pkgdir" --exclude=__pycache__ --transform "s|^$pyd|site-packages|" "$pyd"; emit pass module mod
+  fi
+fi
+[ -n "$PYPKG" ] && emit fail "python-no-output:$(grep -m1 -E 'ERROR|Error|error' "$log" | tr -d '\000-\037"\\' | cut -c1-60)"
 if [ -n "$NOARCH" ]; then
   mdirs=$(cd "$pkgdir" && ls -d usr/share/perl5 usr/lib/perl5 usr/share/lua 2>/dev/null)
   if [ -n "$mdirs" ] && (cd "$pkgdir" && find $mdirs -type f \( -name '*.pm' -o -name '*.pl' -o -name '*.lua' \)) | grep -q .; then

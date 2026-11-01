@@ -3,5 +3,5 @@
   "max": 3000,
   "chunk": 4,
   "publish": true,
-  "note": "full catalog run 10: rounds 1-16 (pure-Perl/Lua modules as packages; links use only the package deps archives)"
+  "note": "full catalog run 11: rounds 1-18 (pure-Python packages built with gpep517 and shipped as modules; lib*.so -> lib*.a)"
 }
