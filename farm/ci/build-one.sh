@@ -53,7 +53,10 @@ src_entry=$(apk source | tr ' \t' '\n\n' | grep -E 'https?://' | head -1)
 src_name="${src_entry%%::*}"; src_url="${src_entry##*::}"
 [ "$src_name" = "$src_url" ] && src_name="$(basename "$src_url")"
 if [ -n "$src_url" ]; then
-  curl -sSfL --retry 3 --max-time 300 "$src_url" -o "$bdir/$src_name" 2>>"$log" || emit fail dl-failed
+  # Upstream first (with a normal user agent: gitlab.alpinelinux.org answers bots 418), then
+  # Alpine's own mirror of every recipe's sources, keyed by the same file name.
+  dl() { curl -sSfL --retry 2 --connect-timeout 30 --max-time 300 -A "Mozilla/5.0 (walios farm)" "$1" -o "$bdir/$src_name" 2>>"$log"; }
+  dl "$src_url" || dl "https://distfiles.alpinelinux.org/distfiles/edge/$src_name"     || dl "https://distfiles.alpinelinux.org/distfiles/v3.22/$src_name" || emit fail dl-failed
   # tar first; bsdtar for what GNU tar cannot open (.zip, .tar.lz, .7z...)
   case "$src_name" in *.tar*|*.tgz|*.tbz*|*.txz|*.zip|*.7z|*.lz|*.zst)
     tar xf "$bdir/$src_name" -C "$bdir" 2>>"$log" || bsdtar xf "$bdir/$src_name" -C "$bdir" 2>>"$log" || emit fail extract-failed;;
@@ -129,6 +132,9 @@ for a in $(find "$pkgdir" -name '*.a' 2>/dev/null); do
   m=$($AR t "$a" 2>/dev/null | grep -v '^/' | head -1)
   { [ -n "$m" ] && [ "$($AR p "$a" "$m" 2>/dev/null | head -c4 | od -An -tx1 | tr -d ' \n')" = "0061736d" ]; } || { echo "farm: dropping non-wasm archive $a" >> "$log"; rm -f "$a"; }
 done
+# libtool .la files name /usr/lib/... paths, which then break every dependent's libtool link
+# ("'/usr/lib/libXdmcp.la' is not a valid libtool archive"); Alpine deletes them too.
+find "$pkgdir" -name '*.la' -delete 2>/dev/null
 # Some recipes install libraries under /lib (zlib, ncurses' terminfo libs), not /usr/lib.
 ovdirs=$(cd "$pkgdir" && ls -d usr lib 2>/dev/null)
 [ -n "$ovdirs" ] && tar czf "$OUT/$pkg.overlay.tar.gz" -C "$pkgdir" $ovdirs

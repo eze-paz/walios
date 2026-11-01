@@ -31,6 +31,18 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq autoconf automake libtool autopoint pkgconf bison flex gettext texinfo gperf help2man meson ninja-build cmake fakeroot autotools-dev autoconf-archive libarchive-tools lzip unzip xmlto asciidoc-base scons lua5.4 python3-docutils docbook-xsl xsltproc >/dev/null
+          # Ubuntu's meson (1.3) is older than glib and friends require; pip's lands in
+          # /usr/local/bin, ahead of /usr/bin on PATH.
+          sudo pip3 install -q --break-system-packages --upgrade meson
+          meson --version
+          # wasm binaries run on the host through host/host.js (binfmt_misc): recipes that
+          # build a helper with $CC and run it mid-build (libcap's _makenames, code
+          # generators) used to die with "Exec format error".
+          printf '#!/bin/sh\nexec node %s "$@"\n' "$PWD/host/host.js" | sudo tee /usr/local/bin/wali-run >/dev/null
+          sudo chmod +x /usr/local/bin/wali-run
+          [ -e /proc/sys/fs/binfmt_misc/register ] || sudo mount -t binfmt_misc binfmt_misc /proc/sys/fs/binfmt_misc
+          echo ':wasm:M::\x00asm::/usr/local/bin/wali-run:' | sudo tee /proc/sys/fs/binfmt_misc/register >/dev/null || true
+          ls /proc/sys/fs/binfmt_misc/ | tr '\n' ' '; echo
       - uses: actions/download-artifact@v4
         with: { name: aports, path: . }
       - name: Overlays from earlier waves
