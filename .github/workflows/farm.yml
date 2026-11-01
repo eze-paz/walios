@@ -29,7 +29,7 @@ concurrency:
 
 env:
   TC: ${{ github.workspace }}/../wali-tc
-  TC_KEY: wali-tc-llvm22.1.3-pkgs-2026-10-31-x1-v12
+  TC_KEY: wali-tc-llvm22.1.3-pkgs-2026-10-31-x1-v13
 
 jobs:
   plan:
@@ -68,10 +68,11 @@ jobs:
           WAVES: '8'
           APORTS_DIR: ${{ github.workspace }}/../aports
           APORTS_LIST: ${{ github.workspace }}/../aports-list.txt
+          DEPS_OUT: ${{ github.workspace }}/../aports/deps.json
           ALIASES_OUT: ${{ github.workspace }}/aliases.json
         run: node farm/ci/plan.js
       - name: Recipes the build jobs need
-        run: tar czf aports.tar.gz -C ../aports $(cat ../aports-list.txt)
+        run: tar czf aports.tar.gz -C ../aports deps.json $(cat ../aports-list.txt)
       - uses: actions/upload-artifact@v4
         with: { name: aports, path: 'aports.tar.gz', retention-days: 7 }
       - uses: actions/upload-artifact@v4

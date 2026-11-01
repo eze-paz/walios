@@ -124,7 +124,11 @@ if [ \$link = 1 ]; then
     -Wl,--shared-memory,--import-memory,--export-memory,--max-memory=2147483648,-z,stack-size=8388608,--export-table,--growable-table)
   TAIL=($cxxlibs -lwali-farm -lc $S/lib/libclang_rt.builtins.a)
   G=()
-  if [ -n "\${WALI_OVERLAY:-}" ]; then
+  if [ -n "\${WALI_OVERLAY_LIBS+set}" ]; then
+    # the package's own deps' archives (build-one.sh, from the plan's dependency closure)
+    ov=(\${WALI_OVERLAY_LIBS})
+    [ \${#ov[@]} -gt 0 ] && G=("\${ov[@]}")
+  elif [ -n "\${WALI_OVERLAY:-}" ]; then
     ov=(\$(ls "\$WALI_OVERLAY"/usr/lib/*.a "\$WALI_OVERLAY"/lib/*.a 2>/dev/null))
     # No --start-group: wasm-ld rejects it, and like lld it resolves archives in any order.
     [ \${#ov[@]} -gt 0 ] && G=("\${ov[@]}")

@@ -105,6 +105,14 @@ const chunked = waves.map(w => { const n = Math.max(CHUNK, Math.ceil(w.length / 
 const missing = Object.keys(meta).filter(p => meta[p].missing);
 const out = { count: set.size, seeds: seeds.length, missing, waves: chunked };
 console.log(JSON.stringify({ count: out.count, seeds: out.seeds, missing: missing.length, waves: waves.map(w => w.length) }));
+// Each package's transitive build deps (within the set): a build links only those packages'
+// archives from the overlay, not every library built so far (unrelated archives clashed).
+if (process.env.DEPS_OUT) {
+  const closure = {};
+  const walk = (p, acc) => { for (const d of meta[p].deps) if (set.has(d) && !acc.has(d)) { acc.add(d); walk(d, acc); } return acc; };
+  for (const p of set) closure[p] = [...walk(p, new Set())].filter(d => d !== p).sort();
+  fs.writeFileSync(process.env.DEPS_OUT, JSON.stringify(closure));
+}
 // The recipe dirs the build jobs need (CI ships them as one artifact).
 if (process.env.APORTS_LIST) fs.writeFileSync(process.env.APORTS_LIST, [...set].map(p => where[p]).filter(Boolean).join('\n') + '\n');
 if (process.env.GITHUB_OUTPUT) {

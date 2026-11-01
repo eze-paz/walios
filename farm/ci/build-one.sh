@@ -126,6 +126,14 @@ cd "$builddir" 2>/dev/null || cd "$SRC"
 cd "$builddir" 2>/dev/null || cd "$SRC"
 ( if type package >/dev/null 2>&1; then package; fi )
 EOS
+# Link against this package's deps' archives only (plan.js deps.json + the wave job's
+# per-package archive lists); without both, the wrapper falls back to every overlay archive.
+if [ -n "${WALI_OVERLAY_IDX:-}" ] && [ -f "${APORTS_DIR:-}/deps.json" ]; then
+  WALI_OVERLAY_LIBS=$(for d in $(node -e 'const j=require(process.argv[1]);console.log((j[process.argv[2]]||[]).join(" "))' "$APORTS_DIR/deps.json" "$pkg"); do
+    [ -f "$WALI_OVERLAY_IDX/$d.list" ] && sed "s|^|$OVERLAY/|" "$WALI_OVERLAY_IDX/$d.list"; done | tr '\n' ' ')
+  export WALI_OVERLAY_LIBS
+  echo "farm: linking against deps' archives: $WALI_OVERLAY_LIBS" >> "$log"
+fi
 _t0=$(date +%s)
 # stdin is /dev/null and the perl/test knobs say "no questions": a Makefile.PL prompt used to
 # hang a job until its timeout.
