@@ -61,7 +61,9 @@ EOF
 # -flto is dropped: setjmp/longjmp lowering (-wasm-enable-sjlj) is a compile-time pass, and
 # LTO objects reach the linker with it undone ("undefined symbol: longjmp").
 for d in cc c++; do
-  drv=clang; cxx=""; cxxlibs=""; cxxdefs=""
+  # The C++ runtime archives go on C links too (after everything else): a C program can link a
+  # C++ static library, and archives only contribute members something references.
+  drv=clang; cxx=""; cxxlibs="-lc++ -lc++abi -lunwind -lwali-cppexc"; cxxdefs=""
   [ $d = c++ ] && { drv=clang++; cxx="-isystem $S/include/c++/v1"; cxxlibs="-lc++ -lc++abi -lunwind -lwali-cppexc"
     # pre-C++17 code still uses std::unary_function/binary_function (removed in C++17).
     cxxdefs="-D_LIBCPP_ENABLE_CXX17_REMOVED_UNARY_BINARY_FUNCTION"; }
@@ -98,7 +100,12 @@ for a in "\$@"; do case "\$a" in
   *) A+=("\$a");; esac; done
 if [ \$link = 1 ] && [ \$shared = 1 ]; then
   objs=()
-  for a in "\${A[@]}"; do case "\$a" in *.o|*.lo|*.obj) objs+=("\$a");; esac; done
+  for a in "\${A[@]}"; do
+    case "\$a" in
+      *.o|*.lo|*.obj) objs+=("\$a");;
+      @*) [ -f "\${a#@}" ] && for x in \$(cat "\${a#@}"); do case "\$x" in *.o|*.lo|*.obj) objs+=("\$x");; esac; done;;   # cmake/ninja response files
+    esac
+  done
   rm -f "\$out"; $L/llvm-ar rcs "\$out" "\${objs[@]}" || exit 1
   # -lfoo only searches lib*.a here (no dynamic linking), so give the archive that name too.
   case "\$out" in *lib*.so*) cp -f "\$out" "\${out%%.so*}.a";; esac
