@@ -49,9 +49,22 @@ DEPS=$(apk depends)
 # overlay. Rust and Go need their own toolchains.
 NOARCH=""; [ "$(apk arch)" = noarch ] && NOARCH=1
 case " $(apk makedepends) " in *" cargo "*|*" rust "*|*" cargo-auditable "*) emit skip needs-rust;; *" go "*) emit skip needs-go;; esac
-# Python packages (gpep517 + installer, on the runner's Python) are built as Alpine builds
-# them; the result is classified after package(): pure Python ships, C extensions do not.
-PYPKG=""; grep -q gpep517 "$bdir/APKBUILD" && PYPKG=1
+# Python packages (gpep517 + installer) are built as Alpine builds them, on the runner's
+# Python 3.14 -- the version walios runs, and the same extension suffix
+# (.cpython-314-x86_64-linux-gnu.so) -- whose pyconfig.h the workflow swapped for walios
+# Python's (32-bit pointers, 64-bit long). Its compiler is `gcc`, i.e. the wasm wrapper, so
+# with WALI_SIDE a C extension links as a wasm side module importing only python_cxx.wasm's
+# exports (python-exports.txt = sandpie walios/build/cpython/main-exports.txt).
+PYPKG=""; grep -q gpep517 "$bdir/APKBUILD" && { PYPKG=1; export WALI_SIDE="$HERE/python-exports.txt"
+  # (setuptools/meson take these over the compiler recorded in the host Python's sysconfig)
+  export LDSHARED="$CC -shared" LDCXXSHARED="$CXX -shared"; }
+# Its build-time Python deps (makedepends py3-foo, mostly PyPI's foo: build backends,
+# expandvars, cython...) run on the HOST Python: installed from PyPI, wheels only -- an sdist
+# would compile with `gcc`, which here is the wasm compiler.
+if [ -n "$PYPKG" ]; then
+  for d in $(apk makedepends); do case "$d" in py3-*)
+    python3 -m pip install -q --only-binary=:all: "${d#py3-}" >>"$log" 2>&1 || echo "farm: no host wheel for ${d#py3-}" >>"$log";; esac; done
+fi
 # Lua C modules (recipes looping over $_luaversions): built for Lua 5.4 only, what walios'
 # lua.wasm is, as wasm side modules it dlopen()s -- PIC, importing only lua.wasm's exports
 # (lua-exports.txt, from walios/build/lua in sandpie). Alpine installs them from the
@@ -199,14 +212,16 @@ ovdirs=$(cd "$pkgdir" && ls -d usr lib 2>/dev/null)
 [ -n "$ovdirs" ] && tar czf "$OUT/$pkg.overlay.tar.gz" -C "$pkgdir" $ovdirs
 # A pure-Perl or pure-Lua module (noarch, installs into Alpine's module paths) is a package in
 # its own right on walios: those files, as a tarball `apk add` mounts at /.
-# Python: site-packages built with the runner's Python (3.x) goes to walios Python's
-# /site-packages (on its PYTHONPATH). Compiled extensions were built for the wrong Python and
-# by a wasm compiler that cannot make loadable modules here -- those are failures, named.
+# Python: site-packages built with the runner's Python goes to walios Python's /site-packages
+# (on its PYTHONPATH), C extensions included when every one is a wasm side module.
 # Wherever the build host's Python installed it: Debian's is usr/local/lib/python3.X/
 # dist-packages, a venv's is under the venv path, Alpine's is usr/lib/python3.X/site-packages.
 pyd=$(cd "$pkgdir" && find . -type d \( -name site-packages -o -name dist-packages \) 2>/dev/null | head -1 | sed 's|^\./||')
 if [ -n "$pyd" ] && { [ -n "$PYPKG" ] || [ -n "$NOARCH" ]; }; then   # not a C library's bindings
-  if (cd "$pkgdir/$pyd" && find . -name '*.so' -o -name '*.pyd' | grep -q .); then emit fail python-c-extension; fi
+  for so in $(cd "$pkgdir/$pyd" && find . -name '*.so' -o -name '*.pyd'); do
+    node -e "process.exit(WebAssembly.Module.customSections(new WebAssembly.Module(require('fs').readFileSync(process.argv[1])),'dylink.0').length?0:1)" "$pkgdir/$pyd/$so" 2>/dev/null ||
+      emit fail "python-c-extension:$(basename "$so") is not a wasm side module"
+  done
   if (cd "$pkgdir/$pyd" && find . -name '*.py' | grep -q .); then
     # (no __pycache__: compiled for the build host's Python, not walios')
     tar czf "$OUT/$pkg.mod.tar.gz" -C "$pkgdir" --exclude=__pycache__ --transform "s|^$pyd|site-packages|" "$pyd"; emit pass module mod

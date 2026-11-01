@@ -9,7 +9,7 @@ on:
 
 env:
   TC: ${{ github.workspace }}/../wali-tc
-  TC_KEY: wali-tc-llvm22.1.3-pkgs-2026-10-31-x1-v15
+  TC_KEY: wali-tc-llvm22.1.3-pkgs-2026-10-31-x1-v16
 
 jobs:
   build:
@@ -27,6 +27,10 @@ jobs:
         with: { path: '${{ env.TC }}', key: '${{ env.TC_KEY }}' }
       - if: steps.tc.outputs.cache-hit != 'true'
         run: bash farm/ci/toolchain.sh "$TC"
+      # Python recipes build on Python 3.14, the version walios runs (same extension suffix);
+      # first on PATH, so `python3`/`gpep517` in the recipes are this one.
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.14' }
       - name: Build tools
         run: |
           sudo apt-get update -qq
@@ -34,11 +38,17 @@ jobs:
           # Ubuntu's meson (1.3) is older than glib and friends require; pip's lands in
           # /usr/local/bin, ahead of /usr/bin on PATH.
           sudo pip3 install -q --break-system-packages --upgrade meson
-          # Python recipes: gpep517 + installer (Alpine's wheel build/install) and the common
-          # PEP 517 backends, so pure-Python packages build as Alpine builds them.
-          sudo pip3 install -q --break-system-packages gpep517 installer build wheel setuptools setuptools-scm \
-            flit-core hatchling hatch-vcs hatch-fancy-pypi-readme poetry-core pdm-backend
-          gpep517 --help >/dev/null && echo gpep517 ok
+          # Python recipes: gpep517 + installer (Alpine's wheel build/install), the common
+          # PEP 517 backends and cython, in setup-python's 3.14 (sudo pip3 above is the system's).
+          python3 -m pip install -q gpep517 installer build wheel setuptools setuptools-scm \
+            flit-core hatchling hatch-vcs hatch-fancy-pypi-readme poetry-core pdm-backend cython
+          # ...whose pyconfig.h becomes walios python_cxx.wasm's (32-bit pointers, 64-bit long):
+          # C extensions then compile for walios (gcc = the wasm wrapper), with this Python's
+          # suffix .cpython-314-x86_64-linux-gnu.so, the one walios Python imports.
+          inc=$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["include"])')
+          cp "$TC/python/pyconfig.h" "$inc/pyconfig.h"
+          python3 --version; gpep517 --help >/dev/null && echo gpep517 ok
+          grep -q 'define SIZEOF_VOID_P 4' "$inc/pyconfig.h" && echo "pyconfig.h: walios"
           meson --version
           # wasm binaries run on the host through host/host.js (binfmt_misc): recipes that
           # build a helper with $CC and run it mid-build (libcap's _makenames, code

@@ -38,6 +38,9 @@ fi
 if [ ! -f perl-core/5.44.0/wasm32-linux/CORE/perl.h ]; then
   mkdir -p perl-core && fetch $REL/$XTAG/perl-core.tar.gz pc.tgz && tar xzf pc.tgz -C perl-core && rm pc.tgz
 fi
+# walios python_cxx.wasm's pyconfig.h (CPython 3.14 configured for wasm32-wali): the farm
+# workflow puts it into the runner's Python 3.14 so C extensions compile for walios.
+[ -f python/pyconfig.h ] || { mkdir -p python && fetch $REL/$XTAG/python-pyconfig.h python/pyconfig.h; }
 L=$TC/$P/bin
 S=$TC/sysroot
 # C++ exceptions need the wasm EH tag __cpp_exception defined once per program (libc
