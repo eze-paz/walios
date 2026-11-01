@@ -284,7 +284,9 @@ set(CMAKE_C_COMPILER $TC/bin/wali-cc)
 set(CMAKE_CXX_COMPILER $TC/bin/wali-c++)
 set(CMAKE_AR $L/llvm-ar CACHE FILEPATH "")
 set(CMAKE_RANLIB $L/llvm-ranlib CACHE FILEPATH "")
-set(CMAKE_FIND_ROOT_PATH $S)
+# The farm's overlay of already-built deps (build-one.sh exports WALI_OVERLAY), so
+# find_package/find_library see them as well as the sysroot.
+set(CMAKE_FIND_ROOT_PATH $S \$ENV{WALI_OVERLAY} \$ENV{WALI_OVERLAY}/usr)
 set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
 set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY BOTH)
 set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE BOTH)
