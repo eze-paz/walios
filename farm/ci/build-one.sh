@@ -46,6 +46,8 @@ pkgver=$(apk pkgver)
 # overlay. Rust and Go need their own toolchains.
 NOARCH=""; [ "$(apk arch)" = noarch ] && NOARCH=1
 case " $(apk makedepends) " in *" cargo "*|*" rust "*|*" cargo-auditable "*) emit skip needs-rust;; *" go "*) emit skip needs-go;; esac
+# Python packages built with gpep517 (C extensions) need a walios Python build environment.
+grep -q gpep517 "$bdir/APKBUILD" && emit skip needs-python
 
 src_entry=$(apk source | tr ' \t' '\n\n' | grep -E 'https?://' | head -1)
 src_name="${src_entry%%::*}"; src_url="${src_entry##*::}"

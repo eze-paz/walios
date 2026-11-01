@@ -30,7 +30,7 @@ jobs:
       - name: Build tools
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq autoconf automake libtool autopoint pkgconf bison flex gettext texinfo gperf help2man meson ninja-build cmake fakeroot autotools-dev autoconf-archive libarchive-tools lzip unzip >/dev/null
+          sudo apt-get install -y -qq autoconf automake libtool autopoint pkgconf bison flex gettext texinfo gperf help2man meson ninja-build cmake fakeroot autotools-dev autoconf-archive libarchive-tools lzip unzip xmlto asciidoc-base scons lua5.4 python3-docutils docbook-xsl xsltproc >/dev/null
       - uses: actions/download-artifact@v4
         with: { name: aports, path: . }
       - name: Overlays from earlier waves
@@ -43,6 +43,8 @@ jobs:
           tar xzf aports.tar.gz -C aports
           export APORTS_DIR=$PWD/aports
           for t in ov/*.overlay.tar.gz; do [ -f "$t" ] && tar xzf "$t" -C overlay; done
+          # skalibs-based recipes (s6, execline, ...) hard-code /usr/lib/skalibs/sysdeps.
+          [ -d overlay/usr/lib/skalibs ] && sudo ln -sfn "$PWD/overlay/usr/lib/skalibs" /usr/lib/skalibs || true
           source "$TC/env.sh"
           for p in ${{ matrix.chunk }}; do
             echo "::group::$p"
