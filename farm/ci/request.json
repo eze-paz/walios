@@ -3,5 +3,5 @@
   "max": 3000,
   "chunk": 4,
   "publish": true,
-  "note": "full catalog run 8: rounds 1-13 minus CMAKE_PREFIX_PATH (cmake picked the overlay wasm ninja)"
+  "note": "full catalog run 9: rounds 1-15 (meson wrapper, HTML downloads, lrint/lround)"
 }
