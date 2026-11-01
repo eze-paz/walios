@@ -52,6 +52,15 @@ case " $(apk makedepends) " in *" cargo "*|*" rust "*|*" cargo-auditable "*) emi
 # Python packages (gpep517 + installer, on the runner's Python) are built as Alpine builds
 # them; the result is classified after package(): pure Python ships, C extensions do not.
 PYPKG=""; grep -q gpep517 "$bdir/APKBUILD" && PYPKG=1
+# Lua C modules (recipes looping over $_luaversions): built for Lua 5.4 only, what walios'
+# lua.wasm is, as wasm side modules it dlopen()s -- PIC, importing only lua.wasm's exports
+# (lua-exports.txt, from walios/build/lua in sandpie). Alpine installs them from the
+# lua5.X-<name> subpackage functions, so the farm runs the 5.4 one into $pkgdir.
+LUAMOD=""
+if [ -z "$NOARCH" ] && grep -q '^_luaversions=' "$bdir/APKBUILD"; then
+  LUAMOD=1; export WALI_SIDE="$HERE/lua-exports.txt"
+  sed -i 's/^_luaversions=.*/_luaversions="5.4"/' "$bdir/APKBUILD"
+fi
 
 src_entry=$(apk source | tr ' \t' '\n\n' | grep -E 'https?://' | head -1)
 src_name="${src_entry%%::*}"; src_url="${src_entry##*::}"
@@ -98,7 +107,8 @@ for f in $(find "$SRC" -name sigsegv.in.h 2>/dev/null); do
 pkgdir="$bdir/pkg"; mkdir -p "$pkgdir"
 cat > "$bdir/.farm-build.sh" <<'EOS'
 set +u
-export WALI_EXTRA_CFLAGS="-I$OVERLAY/usr/include" WALI_EXTRA_LDFLAGS="-L$OVERLAY/usr/lib -L$OVERLAY/lib" WALI_OVERLAY="$OVERLAY"
+# (Lua modules: some recipes pass -I/usr/include/lua$lver themselves, the build host's path.)
+export WALI_EXTRA_CFLAGS="-I$OVERLAY/usr/include${LUAMOD:+ -I$OVERLAY/usr/include/lua5.4}" WALI_EXTRA_LDFLAGS="-L$OVERLAY/usr/lib -L$OVERLAY/lib" WALI_OVERLAY="$OVERLAY"
 # Deps' *-config scripts (gpgrt-config, pcre2-config, xml2-config...) are shell scripts the
 # recipes look up on PATH -- last, so host tools still win over the overlay's wasm binaries.
 # (No CMAKE_PREFIX_PATH: cmake searches PREFIX/bin for programs and took the overlay's wasm ninja.)
@@ -126,6 +136,8 @@ cd "$builddir" 2>/dev/null || cd "$SRC"
 ( if type build >/dev/null 2>&1; then build; else make; fi )
 cd "$builddir" 2>/dev/null || cd "$SRC"
 ( if type package >/dev/null 2>&1; then package; fi )
+if [ -n "$LUAMOD" ]; then for sp in $subpackages; do case "$sp" in
+  lua5.4-*:*) ( subpkgname=${sp%%:*}; subpkgdir="$PKGDIR"; cd "$builddir" 2>/dev/null || cd "$SRC"; "${sp##*:}" );; esac; done; fi
 EOS
 # Link against this package's deps' archives only (plan.js deps.json + the wave job's
 # per-package archive lists); without both, the wrapper falls back to every overlay archive.
@@ -138,7 +150,7 @@ fi
 _t0=$(date +%s)
 # stdin is /dev/null and the perl/test knobs say "no questions": a Makefile.PL prompt used to
 # hang a job until its timeout.
-OVERLAY="$OVERLAY" HERE="$HERE" BDIR="$bdir" SRC="$SRC" PKGDIR="$pkgdir"   PERL_MM_USE_DEFAULT=1 AUTOMATED_TESTING=1 NONINTERACTIVE_TESTING=1 DEBIAN_FRONTEND=noninteractive   fakeroot -- bash "$bdir/.farm-build.sh" >>"$log" 2>&1 </dev/null
+LUAMOD="$LUAMOD" OVERLAY="$OVERLAY" HERE="$HERE" BDIR="$bdir" SRC="$SRC" PKGDIR="$pkgdir"   PERL_MM_USE_DEFAULT=1 AUTOMATED_TESTING=1 NONINTERACTIVE_TESTING=1 DEBIAN_FRONTEND=noninteractive   fakeroot -- bash "$bdir/.farm-build.sh" >>"$log" 2>&1 </dev/null
 BUILD_SECS=$(( $(date +%s) - _t0 ))
 
 # Only wasm archives may reach the overlay: every later link pulls all overlay archives into
@@ -174,6 +186,15 @@ if [ -n "$pyd" ] && { [ -n "$PYPKG" ] || [ -n "$NOARCH" ]; }; then   # not a C l
     # (no __pycache__: compiled for the build host's Python, not walios')
     tar czf "$OUT/$pkg.mod.tar.gz" -C "$pkgdir" --exclude=__pycache__ --transform "s|^$pyd|site-packages|" "$pyd"; emit pass module mod
   fi
+fi
+if [ -n "$LUAMOD" ]; then
+  # Only real side modules (a dylink.0 section) count: lua.wasm cannot load anything else.
+  sm=$(cd "$pkgdir" && find usr/lib/lua/5.4 -name '*.so' 2>/dev/null | while read -r f; do
+    node -e "process.exit(WebAssembly.Module.customSections(new WebAssembly.Module(require('fs').readFileSync(process.argv[1])),'dylink.0').length?0:1)" "$f" 2>/dev/null && echo "$f"; done)
+  if [ -n "$sm" ]; then
+    tar czf "$OUT/$pkg.mod.tar.gz" -C "$pkgdir" $(cd "$pkgdir" && ls -d usr/lib/lua/5.4 usr/share/lua/5.4 usr/share/lua/common 2>/dev/null); emit pass module mod
+  fi
+  emit fail "lua-no-module:$(grep -m1 -E 'error|Error|ERROR' "$log" | tr -d '\000-\037"\\' | cut -c1-60)"
 fi
 [ -n "$PYPKG" ] && emit fail "python-no-output:$(grep -m1 -E 'ERROR|Error|error' "$log" | tr -d '\000-\037"\\' | cut -c1-60)"
 if [ -n "$NOARCH" ]; then

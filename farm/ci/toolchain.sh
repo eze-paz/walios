@@ -89,6 +89,10 @@ F=(--target=wasm32-unknown-linux-muslwali --sysroot=$S -nostdlibinc $cxx -isyste
    -Wno-unknown-warning-option -Wno-long-long $cxxdefs
    -fno-builtin-lrint -fno-builtin-lrintf -fno-builtin-lround -fno-builtin-lroundf -fno-builtin-lrintl -fno-builtin-lroundl
    \${WALI_EXTRA_CFLAGS:-})
+# \$WALI_SIDE = a runtime's export list (lua-exports.txt, perl-exports.txt): the package is a
+# C module that runtime dlopen()s, so objects are PIC with visible symbols and -shared links
+# a wasm side module that may import only what the runtime exports.
+[ -n "\${WALI_SIDE:-}" ] && F+=(-fPIC -fvisibility=default)
 A=()
 for a in "\$@"; do case "\$a" in
   -rdynamic|-static|-s|-fPIC|-fpic|-fPIE|-fpie|-pie|-flto|-flto=*|-ffat-lto-objects|-fuse-linker-plugin) ;;
@@ -106,6 +110,11 @@ for a in "\$@"; do case "\$a" in
     done
     [ \${#k[@]} -gt 0 ] && A+=("-Wl,\$(IFS=,; echo "\${k[*]}")");;
   *) A+=("\$a");; esac; done
+if [ \$link = 1 ] && [ \$shared = 1 ] && [ -n "\${WALI_SIDE:-}" ]; then
+  # libc, libm and the runtime's own library come from the runtime (its exports), not a copy.
+  S2=(); for a in "\${A[@]}"; do case "\$a" in -lc|-lm|-ldl|-lpthread|-lrt|-llua*|-lperl) ;; *) S2+=("\$a");; esac; done
+  exec $L/clang "\${F[@]}" "\${S2[@]}" -nostdlib -Wl,--no-entry,--experimental-pic,--shared-memory,--allow-undefined-file=\$WALI_SIDE
+fi
 if [ \$link = 1 ] && [ \$shared = 1 ]; then
   objs=()
   for a in "\${A[@]}"; do
