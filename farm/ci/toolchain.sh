@@ -16,18 +16,22 @@ REL=https://github.com/eze-paz/walios/releases/download
 LLVM_VER=22.1.3
 P=LLVM-$LLVM_VER-Linux-X64
 mkdir -p "$TC/bin" && cd "$TC"
+# Downloads go to a file with retries, then extract: a reset mid-stream (seen on a runner
+# after the cache was evicted) used to kill the job.
+fetch() { curl -sSfL --retry 6 --retry-all-errors --retry-delay 5 -o "$2" "$1"; }
 if [ ! -x $P/bin/clang ]; then
-  curl -sSfL https://github.com/llvm/llvm-project/releases/download/llvmorg-$LLVM_VER/$P.tar.xz \
-    | tar xJ --wildcards "$P/bin/clang" "$P/bin/clang-22" "$P/bin/clang++" "$P/bin/lld" "$P/bin/wasm-ld" \
-        "$P/bin/llvm-ar" "$P/bin/llvm-ranlib" "$P/bin/llvm-nm" "$P/bin/llvm-strip" "$P/bin/llvm-objcopy" "$P/lib/clang/*"
+  fetch https://github.com/llvm/llvm-project/releases/download/llvmorg-$LLVM_VER/$P.tar.xz llvm.tar.xz
+  tar xJf llvm.tar.xz --wildcards "$P/bin/clang" "$P/bin/clang-22" "$P/bin/clang++" "$P/bin/lld" "$P/bin/wasm-ld" \
+      "$P/bin/llvm-ar" "$P/bin/llvm-ranlib" "$P/bin/llvm-nm" "$P/bin/llvm-strip" "$P/bin/llvm-objcopy" "$P/lib/clang/*"
+  rm -f llvm.tar.xz
 fi
 if [ ! -f sysroot/lib/libc.a ]; then
   mkdir -p sysroot
-  curl -sSfL $REL/$TAG/wali-sysroot.tar.gz | tar xz -C sysroot
+  fetch $REL/$TAG/wali-sysroot.tar.gz sr.tgz && tar xzf sr.tgz -C sysroot && rm sr.tgz
 fi
 if [ ! -f sysroot/lib/libc++.a ]; then
-  curl -sSfL $REL/$XTAG/wali-libcxx.tar.gz | tar xz -C sysroot      # include/c++/v1, unwind headers, lib/*.a
-  curl -sSfL $REL/$XTAG/wali-linux-headers.tar.gz | tar xz -C sysroot   # include/{linux,asm,asm-generic,...}
+  fetch $REL/$XTAG/wali-libcxx.tar.gz x1.tgz && tar xzf x1.tgz -C sysroot && rm x1.tgz          # include/c++/v1, unwind headers, lib/*.a
+  fetch $REL/$XTAG/wali-linux-headers.tar.gz x2.tgz && tar xzf x2.tgz -C sysroot && rm x2.tgz    # include/{linux,asm,asm-generic,...}
 fi
 L=$TC/$P/bin
 S=$TC/sysroot
