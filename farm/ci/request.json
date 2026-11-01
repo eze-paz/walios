@@ -3,5 +3,5 @@
   "max": 3000,
   "chunk": 4,
   "publish": true,
-  "note": "full catalog run 1: all 1660 catalog names (subpackages mapped to their aport) + dependency closure"
+  "note": "full catalog run 2: rounds 1-4 + non-interactive builds"
 }

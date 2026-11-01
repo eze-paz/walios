@@ -21,6 +21,12 @@ on:
 permissions:
   contents: write
 
+# A newer request replaces a run still in progress (the token that triggers runs cannot
+# cancel them through the API).
+concurrency:
+  group: farm
+  cancel-in-progress: true
+
 env:
   TC: ${{ github.workspace }}/../wali-tc
   TC_KEY: wali-tc-llvm22.1.3-pkgs-2026-10-31-x1-v4
