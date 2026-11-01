@@ -90,8 +90,11 @@ for a in "\$@"; do
   case "\$a" in -c|-E|-S|-M|-MM) link=0;; -shared) shared=1;; esac
   [ "\$prev" = -o ] && out="\$a"; prev="\$a"
 done
+# __STDC_ISO_10646__: gcc on musl/glibc pre-includes stdc-predef.h, which defines it (wchar_t
+# holds Unicode code points); clang for wasm does not, and libedit refuses to build without
+# it. (Not the whole header: it redefines two clang builtins, a warning under -Werror.)
 F=(--target=wasm32-unknown-linux-muslwali --sysroot=$S -nostdlibinc $cxx -isystem $S/include -D_GNU_SOURCE
-   -O2 -mllvm -wasm-enable-sjlj -fwasm-exceptions -matomics -mbulk-memory -mexception-handling -pthread
+   -D__STDC_ISO_10646__=201206L -O2 -mllvm -wasm-enable-sjlj -fwasm-exceptions -matomics -mbulk-memory -mexception-handling -pthread
    -Wno-implicit-function-declaration -Wno-int-conversion -Wno-incompatible-pointer-types
    -Wno-incompatible-function-pointer-types -Wno-unused-command-line-argument -Wno-ignored-optimization-argument
    -Wno-unknown-warning-option -Wno-long-long $cxxdefs
@@ -137,8 +140,12 @@ if [ \$link = 1 ] && [ \$shared = 1 ]; then
   exit 0
 fi
 if [ \$link = 1 ]; then
+  # --allow-multiple-definition: a program may define a libc function itself (linux-pam's
+  # tests replace getpwnam_r). Against a shared libc on Linux the program's copy wins; in this
+  # static link both would collide -- first definition wins, and the program's objects come
+  # before every library.
   LINK=(-L$S/lib \${WALI_EXTRA_LDFLAGS:-} -nodefaultlibs
-    -Wl,--shared-memory,--import-memory,--export-memory,--max-memory=2147483648,-z,stack-size=8388608,--export-table,--growable-table)
+    -Wl,--shared-memory,--import-memory,--export-memory,--max-memory=2147483648,-z,stack-size=8388608,--export-table,--growable-table,--allow-multiple-definition)
   TAIL=($cxxlibs -lwali-farm -lc $S/lib/libclang_rt.builtins.a)
   G=()
   if [ -n "\${WALI_OVERLAY_LIBS+set}" ]; then
@@ -157,10 +164,53 @@ if [ \$link = 1 ]; then
   fi
   exec $L/$drv "\${F[@]}" "\${A[@]}" "\${LINK[@]}" \${WALI_EXTRA_LIBS:-} "\${TAIL[@]}"
 fi
-exec $L/$drv "\${F[@]}" "\${A[@]}"
+# A compile that fails in ELF-only inline assembly gets one retry without it (wali-noelfasm).
+e=\$(mktemp); $L/$drv "\${F[@]}" "\${A[@]}" 2>"\$e"; rc=\$?
+if [ \$rc != 0 ] && grep -q '<inline asm>' "\$e" && $TC/bin/wali-noelfasm $L/$drv "\${F[@]}" "\${A[@]}"; then rm -f "\$e"; exit 0; fi
+cat "\$e" >&2; rm -f "\$e"; exit \$rc
 EOF
   chmod +x bin/wali-$d
 done
+# ELF-only assembler directives in C sources: symbol versions (.symver, attr's compat
+# symbols) and glibc-style link warnings (.gnu.warning.* sections, alsa-lib). wasm objects
+# have neither and clang's wasm assembler rejects them. wali-noelfasm <compiler command>:
+# preprocess the one source, drop exactly those statements/attributes, compile the result.
+cat > bin/wali-noelfasm <<'EOF'
+#!/bin/bash
+cc=$1; shift
+src="" out="" P=() C=() skip=""
+for a in "$@"; do
+  if [ -n "$skip" ]; then skip=""; P+=("$a"); continue; fi
+  case "$a" in
+    *.c|*.cc|*.cpp|*.cxx|*.C) [ -f "$a" ] && { [ -n "$src" ] && exit 1; src=$a; continue; } ;;
+  esac
+  P+=("$a")
+  case "$a" in -MF|-MT|-MQ) skip=1;; esac
+done
+[ -n "$src" ] || exit 1
+case "$src" in *.c) ext=i;; *) ext=ii;; esac
+t=$(mktemp -d)
+# 1. preprocess with the same flags (-c becomes -E; -o names the .i; dependency flags stay
+#    here, so make's .d files still name the real headers)
+E=(); n=0; for a in "${P[@]}"; do case "$a" in -c) E+=(-E);; *) E+=("$a");; esac; done
+oi=0; for i in "${!E[@]}"; do [ "${E[$i]}" = -o ] && { out=${E[$((i+1))]}; E[$((i+1))]=$t/s.$ext; oi=1; }; done
+[ $oi = 1 ] || { rm -rf "$t"; exit 1; }
+"$cc" "${E[@]}" "$src" 2>/dev/null || { rm -rf "$t"; exit 1; }
+# 2. drop the ELF-only pieces
+perl -0pi -e '
+  s/\b(?:__asm__|__asm|asm)\s*(?:__volatile__\s*)?\(\s*"\s*\.(?:symver|section[\s"]+\.gnu\.warning|stabs)[^;]*;//g;
+  s/__attribute__\s*\(\(\s*(?:__)?section(?:__)?\s*\(\s*"\.gnu\.warning\.[^)]*\)\s*\)\)//g;
+' "$t/s.$ext"
+# 3. compile the result, without the dependency/preprocessor-only flags
+K=(); skip=""
+for a in "${P[@]}"; do
+  if [ -n "$skip" ]; then skip=""; continue; fi
+  case "$a" in -MF|-MT|-MQ) skip=1;; -MD|-MMD|-MP) ;; *) K+=("$a");; esac
+done
+"$cc" "${K[@]}" -Wno-unused-command-line-argument "$t/s.$ext"; rc=$?
+rm -rf "$t"; exit $rc
+EOF
+chmod +x bin/wali-noelfasm
 printf '#!/bin/sh\nargs=""\nfor a in "$@"; do [ "$a" = "-nostdlib" ] || args="$args $a"; done\nexec %s/wasm-ld $args\n' "$L" > bin/wali-ld
 chmod +x bin/wali-ld
 # BSD headers musl leaves out and Alpine adds with bsd-compat-headers: sys/queue.h (the
@@ -298,7 +348,9 @@ set -- "\${A[@]}"
 exec meson setup --cross-file $TC/wali.meson --prefix=/usr --libdir=/usr/lib --libexecdir=/usr/libexec \
   --bindir=/usr/bin --sbindir=/usr/sbin --includedir=/usr/include --datadir=/usr/share --mandir=/usr/share/man \
   --sysconfdir=/etc --localstatedir=/var --buildtype=plain --default-library=static --wrap-mode=nodownload \
-  -Db_lto=false -Db_pie=false -Db_staticpic=false "\$@"
+  -Db_lto=false -Db_pie=false -Db_staticpic=true "\$@"
+# (b_staticpic=true: with it false meson refuses a recipe's explicit shared_library() over a
+#  static helper -- linux-pam; the wrapper drops -fPIC anyway, outside WALI_SIDE builds.)
 EOF
 chmod +x bin/abuild-meson
 # A recipe calling `meson setup` directly (glib) would get a NATIVE build, whose sanity check

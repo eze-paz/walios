@@ -3,5 +3,5 @@
   "max": 3000,
   "chunk": 4,
   "publish": true,
-  "note": "full catalog run 14: rounds 1-21 (Python C extensions, Lua C modules and Perl XS modules as wasm side modules)"
+  "note": "full catalog run 15: rounds 1-22 (28 waves; base-library fixes)"
 }

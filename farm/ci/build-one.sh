@@ -17,6 +17,19 @@ mkdir -p "$OUT" "$OVERLAY/usr/include" "$OVERLAY/usr/lib" "$OVERLAY/lib"
 # A static-inline <error.h> some package installs would clash with every gnulib error.c;
 # libwali-farm.a provides the real error()/error_at_line().
 rm -f "$OVERLAY/usr/include/error.h"
+# pkg-config's python3 / python-3.X (-embed), for recipes that build Python bindings or embed
+# Python (libxml2 asks for the build host's version): walios Python's headers, i.e. the
+# runner's 3.14 include dir once the workflow put walios' pyconfig.h in it. No Libs: an
+# extension takes the interpreter's symbols from python_cxx.wasm.
+if [ ! -f "$OVERLAY/usr/lib/pkgconfig/python3.pc" ] && command -v python3.14 >/dev/null; then
+  pinc=$(python3.14 -c 'import sysconfig; print(sysconfig.get_paths()["include"])')
+  if grep -q 'define SIZEOF_VOID_P 4' "$pinc/pyconfig.h" 2>/dev/null; then
+    mkdir -p "$OVERLAY/usr/include/python3.14" "$OVERLAY/usr/lib/pkgconfig" && cp -r "$pinc/." "$OVERLAY/usr/include/python3.14/"
+    for n in python3 python-3.14 python-3.13 python-3.12 python-3.11; do for e in "" -embed; do
+      printf 'prefix=/usr\nincludedir=${prefix}/include/python3.14\nName: Python\nDescription: walios Python\nVersion: 3.14\nLibs:\nCflags: -I${includedir}\n' > "$OVERLAY/usr/lib/pkgconfig/$n$e.pc"
+    done; done
+  fi
+fi
 log="$OUT/$pkg.log"; : > "$log"
 bdir=$(mktemp -d); trap 'rm -rf "$bdir"' EXIT
 pkgver="?"; BUILD_SECS=0; DEPS=""
@@ -48,6 +61,9 @@ DEPS=$(apk depends)
 # header/data ones (xorgproto, xcb-proto, util-macros) are what C dependents need in the
 # overlay. Rust and Go need their own toolchains.
 NOARCH=""; [ "$(apk arch)" = noarch ] && NOARCH=1
+# Already part of the walios sysroot (libssl/libcrypto + their .pc files, musl): dependents
+# link those; Alpine's openssl recipe has no wasm32 target ("Unable to determine architecture").
+case "$pkg" in openssl|musl) emit skip in-sysroot;; esac
 case " $(apk makedepends) " in *" cargo "*|*" rust "*|*" cargo-auditable "*) emit skip needs-rust;; *" go "*) emit skip needs-go;; esac
 # Python packages (gpep517 + installer) are built as Alpine builds them, on the runner's
 # Python 3.14 -- the version walios runs, and the same extension suffix
@@ -93,22 +109,28 @@ if [ -z "$NOARCH" ] && case "$pkg" in perl-*) true;; *) false;; esac; then
   PERLXS_MAKE="PERL_HDRS= PERL_INC=$pc PERL_INCDEP=$pc CC=$CC LD=$CC CCFLAGS=-D_GNU_SOURCE OPTIMIZE=-O2 CCCDLFLAGS=-fPIC LDDLFLAGS=-shared LDFLAGS= INSTALLVENDORARCH=/usr/lib/perl5/vendor_perl INSTALLVENDORLIB=/usr/share/perl5/vendor_perl"
 fi
 
-src_entry=$(apk source | tr ' \t' '\n\n' | grep -E 'https?://' | head -1)
-src_name="${src_entry%%::*}"; src_url="${src_entry##*::}"
-[ "$src_name" = "$src_url" ] && src_name="$(basename "$src_url")"
-if [ -n "$src_url" ]; then
+# Every remote source, like abuild (freetype's second tarball is ft2demos); the first one's
+# top directory is $SRC.
+srcs=$(apk source | tr ' \t' '\n\n' | grep -E 'https?://')
+if [ -n "$srcs" ]; then
   # Upstream first (with a normal user agent: gitlab.alpinelinux.org answers bots 418), then
   # Alpine's own mirror of every recipe's sources, keyed by the same file name.
   # A 200 can still be a bot-check page (gitlab.freedesktop.org serves the runners HTML),
   # which only failed later at extraction: an HTML body counts as a failed download.
   dl() { curl -sSfL --retry 2 --connect-timeout 30 --max-time 300 -A "Mozilla/5.0 (walios farm)" "$1" -o "$bdir/$src_name" 2>>"$log" &&
          ! head -c 512 "$bdir/$src_name" | grep -qiE '<!doctype html|<html'; }
-  dl "$src_url" || dl "https://distfiles.alpinelinux.org/distfiles/edge/$src_name"     || dl "https://distfiles.alpinelinux.org/distfiles/v3.22/$src_name" || emit fail dl-failed
-  # tar first; bsdtar for what GNU tar cannot open (.zip, .tar.lz, .7z...)
-  case "$src_name" in *.tar*|*.tgz|*.tbz*|*.txz|*.zip|*.7z|*.lz|*.zst)
-    tar xf "$bdir/$src_name" -C "$bdir" 2>>"$log" || bsdtar xf "$bdir/$src_name" -C "$bdir" 2>>"$log" || emit fail extract-failed;;
-  esac
-  SRC=$(find "$bdir" -mindepth 1 -maxdepth 1 -type d ! -name pkg | head -1)
+  SRC=""
+  for src_entry in $srcs; do
+    src_name="${src_entry%%::*}"; src_url="${src_entry##*::}"
+    [ "$src_name" = "$src_url" ] && src_name="$(basename "$src_url")"
+    dl "$src_url" || dl "https://distfiles.alpinelinux.org/distfiles/edge/$src_name"     || dl "https://distfiles.alpinelinux.org/distfiles/v3.22/$src_name" || emit fail dl-failed
+    # tar first; bsdtar for what GNU tar cannot open (.zip, .tar.lz, .7z...)
+    before=$(ls "$bdir")
+    case "$src_name" in *.tar*|*.tgz|*.tbz*|*.txz|*.zip|*.7z|*.lz|*.zst)
+      tar xf "$bdir/$src_name" -C "$bdir" 2>>"$log" || bsdtar xf "$bdir/$src_name" -C "$bdir" 2>>"$log" || emit fail extract-failed;;
+    esac
+    [ -z "$SRC" ] && SRC=$(comm -13 <(printf '%s\n' "$before" | sort) <(ls "$bdir" | sort) | while read -r d; do [ -d "$bdir/$d" ] && [ "$d" != pkg ] && echo "$bdir/$d"; done | head -1)
+  done
   # a single-file source (a .c, a script) or a tarball without a top dir
   [ -z "$SRC" ] && { SRC="$bdir/$pkg-$pkgver"; mkdir -p "$SRC"; }
 else

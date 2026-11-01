@@ -7,3 +7,6 @@ enable_static=yes
 # Always a cross build, even when a recipe runs ./configure without --host: otherwise
 # AC_PROG_CC tries to RUN a test program ("cannot run C compiled programs").
 cross_compiling=yes
+# No JIT backend targets wasm (pcre2's sljit: "Unsupported architecture"); Alpine enables
+# it for every arch it knows. config.site is read after the command line, so this wins.
+enable_jit=no
