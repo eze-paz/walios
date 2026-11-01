@@ -3,5 +3,5 @@
   "max": 3000,
   "chunk": 4,
   "publish": true,
-  "note": "full catalog run 15: rounds 1-22 (28 waves; base-library fixes)"
+  "note": "full catalog run 16: rounds 1-23 (libffi WALI port in the sysroot; glib without introspection)"
 }

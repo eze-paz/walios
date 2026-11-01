@@ -61,9 +61,10 @@ DEPS=$(apk depends)
 # header/data ones (xorgproto, xcb-proto, util-macros) are what C dependents need in the
 # overlay. Rust and Go need their own toolchains.
 NOARCH=""; [ "$(apk arch)" = noarch ] && NOARCH=1
-# Already part of the walios sysroot (libssl/libcrypto + their .pc files, musl): dependents
+# Already part of the walios sysroot (libssl/libcrypto, musl, libffi with its WALI port --
+# toolchain.sh): dependents
 # link those; Alpine's openssl recipe has no wasm32 target ("Unable to determine architecture").
-case "$pkg" in openssl|musl) emit skip in-sysroot;; esac
+case "$pkg" in openssl|musl|libffi) emit skip in-sysroot;; esac
 case " $(apk makedepends) " in *" cargo "*|*" rust "*|*" cargo-auditable "*) emit skip needs-rust;; *" go "*) emit skip needs-go;; esac
 # Python packages (gpep517 + installer) are built as Alpine builds them, on the runner's
 # Python 3.14 -- the version walios runs, and the same extension suffix

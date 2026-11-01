@@ -99,6 +99,61 @@ const unknownSyscalls = new Set();
 // (WebAssembly.Suspending) and yield to the event loop so siblings run. This is
 // what makes live interactive sessions (a shell driving a running pipeline, sshd)
 // possible instead of atomic run-at-wait4.
+// libffi for walios guests (walios/build/libffi/ffi.c): calls by a signature only known at
+// run time, and closures, through the guest's own function table. exp() = the instance's
+// exports (memory, __indirect_function_table). jspi: the guest runs on a JSPI stack, so a
+// call or closure goes through WebAssembly.promising and may suspend inside (a syscall).
+// Signatures: sig[0] = result ('v' none, 'i' i32, 'j' i64, 'f' f32, 'd' f64), then the
+// parameters; values travel in 8-byte slots.
+function waliFfiImports(exp, jspi) {
+  const VT = { i: 0x7f, j: 0x7e, f: 0x7d, d: 0x7c };
+  const freeIdx = [];
+  const dv = () => new DataView(exp().memory.buffer);
+  const tbl = () => exp().__indirect_function_table;
+  const sigOf = (p) => { const u = new Uint8Array(exp().memory.buffer); let s = ''; while (u[p]) s += String.fromCharCode(u[p++]); return s; };
+  const rd = (d, c, o) => (c === 'i' ? d.getInt32(o, true) : c === 'j' ? d.getBigInt64(o, true) : c === 'f' ? d.getFloat32(o, true) : d.getFloat64(o, true));
+  const wr = (d, c, o, v) => { if (c === 'i') d.setInt32(o, v, true); else if (c === 'j') d.setBigInt64(o, BigInt(v), true); else if (c === 'f') d.setFloat32(o, v, true); else if (c === 'd') d.setFloat64(o, v, true); };
+  const args = (sig, slots) => { const d = dv(), a = []; for (let i = 1; i < sig.length; i++) a.push(rd(d, sig[i], slots + 8 * (i - 1))); return a; };
+  // A wasm function of signature sig that calls f: the only way to put a JS function in a
+  // wasm table is to import it into a module of its own and take the export.
+  const leb = (n) => { const b = []; do { let x = n & 0x7f; n >>>= 7; if (n) x |= 0x80; b.push(x); } while (n); return b; };
+  const sec = (id, body) => [id, ...leb(body.length), ...body];
+  const wasmFn = (sig, f) => {
+    const ps = [...sig.slice(1)].map((c) => VT[c]), rs = sig[0] === 'v' ? [] : [VT[sig[0]]];
+    const bytes = new Uint8Array([0, 0x61, 0x73, 0x6d, 1, 0, 0, 0,
+      ...sec(1, [1, 0x60, ...leb(ps.length), ...ps, ...leb(rs.length), ...rs]),
+      ...sec(2, [1, 1, 0x65, 1, 0x66, 0, 0]),            // import e.f : type 0
+      ...sec(7, [1, 1, 0x66, 0, 0])]);                    // export f = function 0
+    return new WebAssembly.Instance(new WebAssembly.Module(bytes), { e: { f } }).exports.f;
+  };
+  const call = jspi
+    ? new WebAssembly.Suspending(async (fn, sigP, slots, ret) => {
+      const sig = sigOf(sigP), r = await WebAssembly.promising(tbl().get(fn))(...args(sig, slots));
+      if (sig[0] !== 'v') wr(dv(), sig[0], ret, r);
+    })
+    : (fn, sigP, slots, ret) => {
+      const sig = sigOf(sigP), r = tbl().get(fn)(...args(sig, slots));
+      if (sig[0] !== 'v') wr(dv(), sig[0], ret, r);
+    };
+  const closure = (idx, sigP, clo, bufFn, enterFn) => {
+    const sig = sigOf(sigP), n = sig.length - 1, T = tbl();
+    // slots come from the guest's malloc (bufFn), so a closure may re-enter itself
+    const fill = (a) => { const b = T.get(bufFn)(0, 8 * (n + 1)), d = dv(); a.forEach((v, i) => wr(d, sig[i + 1], b + 8 * (i + 1), v)); return b; };
+    const done = (b) => { const r = sig[0] === 'v' ? undefined : rd(dv(), sig[0], b); T.get(bufFn)(b, 0); return r; };
+    const h = jspi
+      ? new WebAssembly.Suspending(async (...a) => { const b = fill(a); await WebAssembly.promising(T.get(enterFn))(clo, b); return done(b); })
+      : (...a) => { const b = fill(a); T.get(enterFn)(clo, b); return done(b); };
+    T.set(idx, wasmFn(sig, h));
+    return 0;
+  };
+  return {
+    __wali_ffi_call: call,
+    __wali_ffi_table_alloc: () => (freeIdx.length ? freeIdx.pop() : tbl().grow(1)),
+    __wali_ffi_closure: closure,
+    __wali_ffi_closure_free: (idx) => { tbl().set(idx, null); freeIdx.push(idx); },
+  };
+}
+
 const JSPI = !!process.env.WALI_JSPI && typeof WebAssembly.Suspending === 'function'
           && typeof WebAssembly.promising === 'function';
 if (process.env.WALI_JSPI && !JSPI) process.stderr.write('[wali-host] WALI_JSPI set but JSPI unavailable (need node 24 + --experimental-wasm-jspi); using synchronous model\n');
@@ -1526,6 +1581,11 @@ class Process {
       if (im.module === 'wasi_snapshot_preview1') {
         (extra.wasi_snapshot_preview1 = extra.wasi_snapshot_preview1 || {})[im.name] =
           wasi[im.name] || ((...a2) => { if (!unknownSyscalls.has('wasi.' + im.name)) { unknownSyscalls.add('wasi.' + im.name); process.stderr.write(`[wali-host] WASI stub ${im.name}\n`); } return 0; });
+        continue;
+      }
+      if (im.module === 'env' && im.name.startsWith('__wali_ffi_')) {   // libffi (walios/build/libffi)
+        S._ffi = S._ffi || waliFfiImports(() => S.inst.exports, JSPI);
+        (extra.env = extra.env || {})[im.name] = S._ffi[im.name];
         continue;
       }
       if (im.module !== 'wali') {

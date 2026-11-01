@@ -41,6 +41,11 @@ fi
 # walios python_cxx.wasm's pyconfig.h (CPython 3.14 configured for wasm32-wali): the farm
 # workflow puts it into the runner's Python 3.14 so C extensions compile for walios.
 [ -f python/pyconfig.h ] || { mkdir -p python && fetch $REL/$XTAG/python-pyconfig.h python/pyconfig.h; }
+# libffi with the WALI port (sandpie walios/build/libffi: calls and closures through the
+# kernel): part of the sysroot, like openssl -- Alpine's libffi has an Emscripten-only wasm32.
+if [ ! -f sysroot/lib/libffi.a ]; then
+  fetch $REL/$XTAG/libffi-wali.tar.gz ffi.tgz && tar xzf ffi.tgz -C sysroot --strip-components=1 && rm ffi.tgz
+fi
 L=$TC/$P/bin
 S=$TC/sysroot
 # C++ exceptions need the wasm EH tag __cpp_exception defined once per program (libc
@@ -343,7 +348,11 @@ cat > bin/abuild-meson <<EOF
 #!/bin/bash
 # The recipe's own library-type/LTO/PIE choices give way to the farm's (static, no LTO).
 A=()
-for a in "\$@"; do case "\$a" in -Ddefault_library=*|--default-library=*|-Db_lto=*|-Db_pie=*|-Db_staticpic=*) ;; *) A+=("\$a");; esac; done
+# GObject introspection data is made by running g-ir-scanner against the just-built (wasm)
+# libraries, and nothing on walios reads it: a recipe's introspection=enabled/true is turned off.
+for a in "\$@"; do case "\$a" in -Ddefault_library=*|--default-library=*|-Db_lto=*|-Db_pie=*|-Db_staticpic=*) ;;
+  -Dintrospection=enabled) A+=(-Dintrospection=disabled);; -Dintrospection=true) A+=(-Dintrospection=false);;
+  *) A+=("\$a");; esac; done
 set -- "\${A[@]}"
 exec meson setup --cross-file $TC/wali.meson --prefix=/usr --libdir=/usr/lib --libexecdir=/usr/libexec \
   --bindir=/usr/bin --sbindir=/usr/sbin --includedir=/usr/include --datadir=/usr/share --mandir=/usr/share/man \
