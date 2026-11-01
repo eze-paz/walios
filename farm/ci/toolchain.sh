@@ -62,6 +62,9 @@ EOF
 # $WALI_OVERLAY set every overlay archive joins the link: static
 # libraries carry no record of their own dependencies (readline needs ncurses' tputs), and
 # wasm-ld pulls from each archive exactly the members something needs.
+# -fno-builtin-lrint/lround: LLVM's wasm32 backend lowers them as returning i32, but long is
+# 64-bit on WALI, so calls disagree with libm's definitions ("function signature mismatch:
+# lround") and the module fails to load (found building Perl: walios/build/perl in sandpie).
 # -flto is dropped: setjmp/longjmp lowering (-wasm-enable-sjlj) is a compile-time pass, and
 # LTO objects reach the linker with it undone ("undefined symbol: longjmp").
 for d in cc c++; do
@@ -84,6 +87,7 @@ F=(--target=wasm32-unknown-linux-muslwali --sysroot=$S -nostdlibinc $cxx -isyste
    -Wno-implicit-function-declaration -Wno-int-conversion -Wno-incompatible-pointer-types
    -Wno-incompatible-function-pointer-types -Wno-unused-command-line-argument -Wno-ignored-optimization-argument
    -Wno-unknown-warning-option -Wno-long-long $cxxdefs
+   -fno-builtin-lrint -fno-builtin-lrintf -fno-builtin-lround -fno-builtin-lroundf -fno-builtin-lrintl -fno-builtin-lroundl
    \${WALI_EXTRA_CFLAGS:-})
 A=()
 for a in "\$@"; do case "\$a" in
