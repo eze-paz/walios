@@ -46,8 +46,8 @@ jobs:
           source "$TC/env.sh"
           for p in ${{ matrix.chunk }}; do
             echo "::group::$p"
-            timeout 2400 bash farm/ci/build-one.sh "$p" overlay out > /dev/null
-            [ -f "out/$p.json" ] || echo "{\"pkg\":\"$p\",\"ver\":\"?\",\"status\":\"fail\",\"reason\":\"timeout\",\"secs\":2400}" > "out/$p.json"
+            timeout 1200 bash farm/ci/build-one.sh "$p" overlay out > /dev/null < /dev/null
+            [ -f "out/$p.json" ] || echo "{\"pkg\":\"$p\",\"ver\":\"?\",\"status\":\"fail\",\"reason\":\"timeout\",\"secs\":1200}" > "out/$p.json"
             cat "out/$p.json"
             echo "::endgroup::"
           done

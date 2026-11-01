@@ -109,7 +109,9 @@ cd "$builddir" 2>/dev/null || cd "$SRC"
 ( if type package >/dev/null 2>&1; then package; fi )
 EOS
 _t0=$(date +%s)
-OVERLAY="$OVERLAY" HERE="$HERE" BDIR="$bdir" SRC="$SRC" PKGDIR="$pkgdir" fakeroot -- bash "$bdir/.farm-build.sh" >>"$log" 2>&1
+# stdin is /dev/null and the perl/test knobs say "no questions": a Makefile.PL prompt used to
+# hang a job until its timeout.
+OVERLAY="$OVERLAY" HERE="$HERE" BDIR="$bdir" SRC="$SRC" PKGDIR="$pkgdir"   PERL_MM_USE_DEFAULT=1 AUTOMATED_TESTING=1 NONINTERACTIVE_TESTING=1 DEBIAN_FRONTEND=noninteractive   fakeroot -- bash "$bdir/.farm-build.sh" >>"$log" 2>&1 </dev/null
 BUILD_SECS=$(( $(date +%s) - _t0 ))
 
 # Some recipes install libraries under /lib (zlib, ncurses' terminfo libs), not /usr/lib.
