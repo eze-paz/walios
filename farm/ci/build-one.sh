@@ -21,13 +21,26 @@ rm -f "$OVERLAY/usr/include/error.h"
 # Python (libxml2 asks for the build host's version): walios Python's headers, i.e. the
 # runner's 3.14 include dir once the workflow put walios' pyconfig.h in it. No Libs: an
 # extension takes the interpreter's symbols from python_cxx.wasm.
-if [ ! -f "$OVERLAY/usr/lib/pkgconfig/python3.pc" ] && command -v python3.14 >/dev/null; then
+if command -v python3.14 >/dev/null; then
   pinc=$(python3.14 -c 'import sysconfig; print(sysconfig.get_paths()["include"])')
   if grep -q 'define SIZEOF_VOID_P 4' "$pinc/pyconfig.h" 2>/dev/null; then
-    mkdir -p "$OVERLAY/usr/include/python3.14" "$OVERLAY/usr/lib/pkgconfig" && cp -r "$pinc/." "$OVERLAY/usr/include/python3.14/"
-    for n in python3 python-3.14 python-3.13 python-3.12 python-3.11; do for e in "" -embed; do
-      printf 'prefix=/usr\nincludedir=${prefix}/include/python3.14\nName: Python\nDescription: walios Python\nVersion: 3.14\nLibs:\nCflags: -I${includedir}\n' > "$OVERLAY/usr/lib/pkgconfig/$n$e.pc"
-    done; done
+    if [ ! -f "$OVERLAY/usr/lib/pkgconfig/python3.pc" ]; then
+      mkdir -p "$OVERLAY/usr/include/python3.14" "$OVERLAY/usr/lib/pkgconfig" && cp -r "$pinc/." "$OVERLAY/usr/include/python3.14/"
+      for n in python3 python-3.14 python-3.13 python-3.12 python-3.11; do for e in "" -embed; do
+        printf 'prefix=/usr
+includedir=${prefix}/include/python3.14
+Name: Python
+Description: walios Python
+Version: 3.14
+Libs:
+Cflags: -I${includedir}
+' > "$OVERLAY/usr/lib/pkgconfig/$n$e.pc"
+      done; done
+    fi
+    # meson's python module reads the interpreter's own python-3.14.pc (its LIBPC dir), whose
+    # includedir is the runner's path -- which PKG_CONFIG_SYSROOT_DIR then puts under the
+    # overlay ("Cannot compile `Python.h`", numpy). The same headers, at that path.
+    [ -e "$OVERLAY$pinc" ] || { mkdir -p "$(dirname "$OVERLAY$pinc")" && ln -s "$pinc" "$OVERLAY$pinc"; }
   fi
 fi
 log="$OUT/$pkg.log"; : > "$log"
@@ -78,15 +91,28 @@ X=""; [ "${WALI_ABI:-ilp32}" = ilp32 ] && X=32
 # Python's (the toolchain's ABI). Its compiler is `gcc`, i.e. the wasm wrapper, so
 # with WALI_SIDE a C extension links as a wasm side module importing only python_cxx.wasm's
 # exports (python-exports.txt = sandpie walios/build/cpython/main-exports.txt).
-PYPKG=""; grep -q gpep517 "$bdir/APKBUILD" && { PYPKG=1; export WALI_SIDE="$HERE/python-exports$X.txt"
+PYPKG=""; grep -qE 'gpep517|python3 -m (build|installer)' "$bdir/APKBUILD" && { PYPKG=1; export WALI_SIDE="$HERE/python-exports$X.txt"
   # (setuptools/meson take these over the compiler recorded in the host Python's sysconfig)
   export LDSHARED="$CC -shared" LDCXXSHARED="$CXX -shared"; }
 # Its build-time Python deps (makedepends py3-foo, mostly PyPI's foo: build backends,
 # expandvars, cython...) run on the HOST Python: installed from PyPI, wheels only -- an sdist
 # would compile with `gcc`, which here is the wasm compiler.
 if [ -n "$PYPKG" ]; then
-  for d in $(apk makedepends); do case "$d" in py3-*)
-    python3 -m pip install -q --only-binary=:all: "${d#py3-}" >>"$log" 2>&1 || echo "farm: no host wheel for ${d#py3-}" >>"$log";; esac; done
+  # (PyPI names: numpy-dev is numpy, py3-pybind11-dev pybind11, py3-python-versioneer versioneer)
+  for d in $(apk makedepends); do case "$d" in py3-*|numpy-dev)
+    n=${d#py3-}; n=${n%-dev}
+    python3 -m pip install -q --only-binary=:all: "$n" >>"$log" 2>&1 || python3 -m pip install -q --only-binary=:all: "${n#python-}" >>"$log" 2>&1 ||
+      echo "farm: no host wheel for $n" >>"$log";; esac; done
+  # Extensions built against numpy (pandas, contourpy, matplotlib) take its headers from the
+  # host numpy (numpy.get_include()); they must be walios numpy's, whose config headers record
+  # this ABI (NPY_SIZEOF_LONG...) -- like pyconfig.h, swapped in.
+  hn=$(python3 -c 'import numpy, os; print(os.path.dirname(numpy.get_include()))' 2>/dev/null)
+  wn=$(ls -d "$OVERLAY"/usr/lib/python3*/site-packages/numpy/_core 2>/dev/null | head -1)
+  if [ -n "$hn" ] && [ -n "$wn" ] && [ -d "$wn/include" ]; then
+    rm -rf "$hn/include" && cp -r "$wn/include" "$hn/include"
+    [ -d "$wn/lib" ] && cp -r "$wn/lib/." "$hn/lib/" 2>/dev/null
+    echo "farm: host numpy headers <- walios numpy" >>"$log"
+  fi
 fi
 # Lua C modules (recipes looping over $_luaversions): built for Lua 5.4 only, what walios'
 # lua.wasm is, as wasm side modules it dlopen()s -- PIC, importing only lua.wasm's exports
@@ -152,7 +178,8 @@ done
 # Old config.sub/config.guess reject wasm32; abuild's update_config_sub does this per recipe.
 for f in $(find "$SRC" -name config.sub 2>/dev/null); do chmod u+w "$f"; cp /usr/share/misc/config.sub "$f"; done
 for f in $(find "$SRC" -name config.guess 2>/dev/null); do chmod u+w "$f"; cp /usr/share/misc/config.guess "$f"; done
-# gnulib on wasm: no signals, no /proc VMA introspection. Its __linux__ checks fire for our
+# gnulib on wasm: no signals, no /proc VMA introspection. (config.h first, like every gnulib
+# source: gnulib's own stdint.h/sys/types.h replacements insist on it.) Its __linux__ checks fire for our
 # -linux-muslwali triple, so give c-stack/sigsegv their no-op paths (what stackvma-none.c is).
 for sv in $(find "$SRC" -name stackvma.c 2>/dev/null); do
   printf '#include "stackvma.h"\nint sigsegv_get_vma (uintptr_t address, struct vma_struct *vma) { (void)address; (void)vma; return -1; }\n' > "$sv"; done

@@ -1,7 +1,7 @@
 {
-  "pkgs": "py3-numpy py3-pandas py3-pillow py3-lxml py3-matplotlib py3-contourpy py3-kiwisolver py3-msgpack py3-reportlab py3-fonttools py3-markupsafe py3-wrapt py3-tabulate lua-cjson lua-lpeg lua-filesystem lua-inspect perl-json-xs perl-digest-sha1 perl-try-tiny jq tree",
+  "pkgs": "py3-numpy py3-pandas py3-pillow py3-lxml py3-matplotlib py3-contourpy py3-kiwisolver py3-msgpack py3-reportlab py3-fonttools py3-markupsafe py3-wrapt py3-tabulate lua-cjson lua-lpeg lua-filesystem lua-inspect perl-json-xs perl-digest-sha1 perl-try-tiny jq tree m4",
   "max": 600,
   "chunk": 3,
   "publish": true,
-  "note": "R27 ILP32 default: python bundle packages (numpy, pandas, pillow, lxml, matplotlib...) + lua/perl/py C modules + jq/tree"
+  "note": "R28: PIC everywhere (deps link into side modules), no host -I/-L, meson python headers, numpy headers swap, gnulib stub config.h"
 }

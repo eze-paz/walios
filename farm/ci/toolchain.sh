@@ -135,10 +135,15 @@ F=($TGT --sysroot=$S -nostdlibinc $cxx -isystem $S/include -D_GNU_SOURCE
 # \$WALI_SIDE = a runtime's export list (lua-exports.txt, perl-exports.txt): the package is a
 # C module that runtime dlopen()s, so objects are PIC with visible symbols and -shared links
 # a wasm side module that may import only what the runtime exports.
-[ -n "\${WALI_SIDE:-}" ] && F+=(-fPIC -fvisibility=default)
+# Everything else is PIC too: a library's archive may end up inside a side module (lxml links
+# libxml2/libxslt, Pillow libjpeg/libtiff), and wasm-ld links PIC objects into a static
+# program as well (GOT entries become internal globals).
+F+=(-fPIC); [ -n "\${WALI_SIDE:-}" ] && F+=(-fvisibility=default)
 A=()
 for a in "\$@"; do case "\$a" in
   -rdynamic|-static|-s|-fPIC|-fpic|-fPIE|-fpie|-pie|-flto|-flto=*|-ffat-lto-objects|-fuse-linker-plugin|-fstack-protector*|-fstack-clash-protection) ;;   # (host perl Config ldflags in Makefile.PL probes)
+  # the build host's headers and libraries (Pillow's setup.py adds /usr/include and /usr/lib)
+  -I/usr/include|-I/usr/include/*|-I/usr/local/include|-I/usr/local/include/*|-L/usr/lib|-L/usr/lib/*|-L/usr/local/lib|-L/usr/local/lib/*|-L/lib|-L/lib/*|-L/lib64) ;;
   -Wl,*)
     # ELF-linker options wasm-ld rejects, filtered token by token: one -Wl, can carry several
     # (-Wl,-Map=x.map,--cref). -z/-soname/-rpath/... take the next token as their value.
