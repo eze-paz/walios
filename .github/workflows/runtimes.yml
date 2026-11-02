@@ -22,7 +22,7 @@ concurrency:
 
 jobs:
   inputs:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       abi: ${{ steps.in.outputs.abi }}
       only: ${{ steps.in.outputs.only }}
@@ -46,7 +46,7 @@ jobs:
   # busybox, lua and perl: the farm toolchain (farm/ci/toolchain.sh) in the requested ABI
   small:
     needs: inputs
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 90
     strategy:
       fail-fast: false
@@ -85,7 +85,7 @@ jobs:
   cpython:
     needs: inputs
     if: contains(needs.inputs.outputs.only, 'cpython')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 240
     env:
       WALI_ABI: ${{ needs.inputs.outputs.abi }}
@@ -122,7 +122,7 @@ jobs:
   publish:
     needs: [inputs, small, cpython]
     if: always() && needs.inputs.result == 'success'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/download-artifact@v4
         with: { pattern: 'rt-*', merge-multiple: true, path: dist }
