@@ -7,11 +7,18 @@
 # Writes $TC/env.sh, cc/c++/ld wrappers, a meson cross file, a cmake toolchain file and the
 # abuild helpers Alpine recipes call (abuild-meson). Idempotent; CI caches $TC.
 #   toolchain.sh <dir> [pkgs-tag] [toolchain-tag]
+# WALI_ABI=ilp32 builds for the walios ILP32 ABI instead (sandpie walios/build/sysroot32:
+# 32-bit long like every other 32-bit Linux, where WALI's wasm32 has a 64-bit one): its
+# sysroot carries libc++ and openssl, and clang compiles for wasm32-unknown-linux-musl
+# (long = 32) while still driving the link through the WALI target, which has a link step.
 set -euo pipefail
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)   # before any cd: the path may be relative
 TC=$(realpath -m "${1:?usage: toolchain.sh <dir> [pkgs-tag] [toolchain-tag]}")
 TAG=${2:-pkgs-2026-10-31}
 XTAG=${3:-toolchain-2026-10-31}
+ABI=${WALI_ABI:-wali}
+TGT=--target=wasm32-unknown-linux-muslwali
+[ "$ABI" = ilp32 ] && TGT="$TGT -Xclang -triple -Xclang wasm32-unknown-linux-musl -fno-pic"
 REL=https://github.com/eze-paz/walios/releases/download
 LLVM_VER=22.1.3
 P=LLVM-$LLVM_VER-Linux-X64
@@ -27,10 +34,14 @@ if [ ! -x $P/bin/clang ]; then
 fi
 if [ ! -f sysroot/lib/libc.a ]; then
   mkdir -p sysroot
-  fetch $REL/$TAG/wali-sysroot.tar.gz sr.tgz && tar xzf sr.tgz -C sysroot && rm sr.tgz
+  if [ "$ABI" = ilp32 ]; then fetch $REL/$XTAG/wali32-sysroot.tar.gz sr.tgz   # musl, libc++, openssl, builtins
+  else fetch $REL/$TAG/wali-sysroot.tar.gz sr.tgz; fi
+  tar xzf sr.tgz -C sysroot && rm sr.tgz
 fi
 if [ ! -f sysroot/lib/libc++.a ]; then
   fetch $REL/$XTAG/wali-libcxx.tar.gz x1.tgz && tar xzf x1.tgz -C sysroot && rm x1.tgz          # include/c++/v1, unwind headers, lib/*.a
+fi
+if [ ! -f sysroot/include/linux/version.h ]; then
   fetch $REL/$XTAG/wali-linux-headers.tar.gz x2.tgz && tar xzf x2.tgz -C sysroot && rm x2.tgz    # include/{linux,asm,asm-generic,...}
 fi
 # walios perl.wasm's C headers and Config (sandpie walios/build/perl): what an XS module
@@ -44,7 +55,7 @@ fi
 # libffi with the WALI port (sandpie walios/build/libffi: calls and closures through the
 # kernel): part of the sysroot, like openssl -- Alpine's libffi has an Emscripten-only wasm32.
 if [ ! -f sysroot/lib/libffi.a ]; then
-  fetch $REL/$XTAG/libffi-wali.tar.gz ffi.tgz && tar xzf ffi.tgz -C sysroot --strip-components=1 && rm ffi.tgz
+  fetch $REL/$XTAG/libffi-wali$([ "$ABI" = ilp32 ] && echo 32).tar.gz ffi.tgz && tar xzf ffi.tgz -C sysroot --strip-components=1 && rm ffi.tgz
 fi
 L=$TC/$P/bin
 S=$TC/sysroot
@@ -55,7 +66,7 @@ if [ ! -f $S/lib/libwali-cppexc.a ]; then
 .tagtype __cpp_exception i32
 __cpp_exception:
 ' > $S/lib/cpp_exc.s
-  $L/clang --target=wasm32-unknown-linux-muslwali -mexception-handling -c $S/lib/cpp_exc.s -o $S/lib/cpp_exc.o
+  $L/clang $TGT -mexception-handling -c $S/lib/cpp_exc.s -o $S/lib/cpp_exc.o
   $L/llvm-ar rcs $S/lib/libwali-cppexc.a $S/lib/cpp_exc.o
 fi
 cat > env.sh <<EOF
@@ -80,6 +91,10 @@ EOF
 # lround") and the module fails to load (found building Perl: walios/build/perl in sandpie).
 # -flto is dropped: setjmp/longjmp lowering (-wasm-enable-sjlj) is a compile-time pass, and
 # LTO objects reach the linker with it undone ("undefined symbol: longjmp").
+# Both that and _MPFR_PREC_FORMAT (below) exist only because of WALI's 64-bit long; the
+# ILP32 ABI needs neither.
+ABIDEFS="-D_MPFR_PREC_FORMAT=2 -fno-builtin-lrint -fno-builtin-lrintf -fno-builtin-lround -fno-builtin-lroundf -fno-builtin-lrintl -fno-builtin-lroundl"
+[ "$ABI" = ilp32 ] && ABIDEFS=""
 for d in cc c++; do
   # The C++ runtime archives go on C links too (after everything else): a C program can link a
   # C++ static library, and archives only contribute members something references.
@@ -101,12 +116,11 @@ done
 # _MPFR_PREC_FORMAT=2: MPFR's precision type follows GMP's mp_size_t (long), but a precision
 # in bytes must fit size_t, which is 32-bit here (MPFR's own static assertion); int is the
 # setting MPFR provides for that. Global, so every program including mpfr.h sees the same ABI.
-F=(--target=wasm32-unknown-linux-muslwali --sysroot=$S -nostdlibinc $cxx -isystem $S/include -D_GNU_SOURCE
-   -D__STDC_ISO_10646__=201206L -D_MPFR_PREC_FORMAT=2 -O2 -mllvm -wasm-enable-sjlj -fwasm-exceptions -matomics -mbulk-memory -mexception-handling -pthread
+F=($TGT --sysroot=$S -nostdlibinc $cxx -isystem $S/include -D_GNU_SOURCE
+   -D__STDC_ISO_10646__=201206L -O2 -mllvm -wasm-enable-sjlj -fwasm-exceptions -matomics -mbulk-memory -mexception-handling -pthread
    -Wno-implicit-function-declaration -Wno-int-conversion -Wno-incompatible-pointer-types
    -Wno-incompatible-function-pointer-types -Wno-unused-command-line-argument -Wno-ignored-optimization-argument
-   -Wno-unknown-warning-option -Wno-long-long $cxxdefs
-   -fno-builtin-lrint -fno-builtin-lrintf -fno-builtin-lround -fno-builtin-lroundf -fno-builtin-lrintl -fno-builtin-lroundl
+   -Wno-unknown-warning-option -Wno-long-long $cxxdefs $ABIDEFS
    \${WALI_EXTRA_CFLAGS:-})
 # \$WALI_SIDE = a runtime's export list (lua-exports.txt, perl-exports.txt): the package is a
 # C module that runtime dlopen()s, so objects are PIC with visible symbols and -shared links
@@ -277,7 +291,7 @@ EOF
 # member links only where something needs it; it goes before -lc on every link.
 if [ ! -f $S/lib/libwali-farm.a ]; then
   for c in "$HERE"/shim/*.c; do
-    $L/clang --target=wasm32-unknown-linux-muslwali --sysroot=$S -nostdlibinc -isystem $S/include -D_GNU_SOURCE       -O2 -mllvm -wasm-enable-sjlj -fwasm-exceptions -matomics -mbulk-memory -mexception-handling -pthread       -c "$c" -o "$S/lib/farm-$(basename "${c%.c}").o"
+    $L/clang $TGT --sysroot=$S -nostdlibinc -isystem $S/include -D_GNU_SOURCE       -O2 -mllvm -wasm-enable-sjlj -fwasm-exceptions -matomics -mbulk-memory -mexception-handling -pthread       -c "$c" -o "$S/lib/farm-$(basename "${c%.c}").o"
   done
   $L/llvm-ar rcs $S/lib/libwali-farm.a $S/lib/farm-*.o
 fi

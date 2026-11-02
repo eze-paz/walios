@@ -69,6 +69,13 @@ NOARCH=""; [ "$(apk arch)" = noarch ] && NOARCH=1
 # link those; Alpine's openssl recipe has no wasm32 target ("Unable to determine architecture").
 case "$pkg" in openssl|musl|libffi) emit skip in-sysroot;; esac
 case " $(apk makedepends) " in *" cargo "*|*" rust "*|*" cargo-auditable "*) emit skip needs-rust;; *" go "*) emit skip needs-go;; esac
+# Under WALI_ABI=ilp32 a C module must match its interpreter's ABI, and walios' python, perl
+# and lua are still WALI (64-bit long) builds: those wait until the runtimes are rebuilt.
+if [ "${WALI_ABI:-wali}" = ilp32 ] && [ -z "$NOARCH" ]; then
+  grep -q gpep517 "$bdir/APKBUILD" && emit skip needs-ilp32-python
+  grep -q '^_luaversions=' "$bdir/APKBUILD" && emit skip needs-ilp32-lua
+  case "$pkg" in perl-*) emit skip needs-ilp32-perl;; esac
+fi
 # Python packages (gpep517 + installer) are built as Alpine builds them, on the runner's
 # Python 3.14 -- the version walios runs, and the same extension suffix
 # (.cpython-314-x86_64-linux-gnu.so) -- whose pyconfig.h the workflow swapped for walios
@@ -204,8 +211,10 @@ if [ -n "${WALI_OVERLAY_IDX:-}" ] && [ -f "${APORTS_DIR:-}/deps.json" ]; then
   export WALI_OVERLAY_LIBS
   echo "farm: linking against deps' archives: $WALI_OVERLAY_LIBS" >> "$log"
 fi
-# WALI ABI (32-bit pointers, 64-bit long) flags for this package, from abi-flags.txt.
-ABIFLAGS=$(awk -v p="$pkg" '$1 == p { $1 = ""; print substr($0, 2) }' "$HERE/abi-flags.txt")
+# WALI ABI (32-bit pointers, 64-bit long) flags for this package, from abi-flags.txt; the
+# ILP32 ABI needs none.
+ABIFLAGS=""
+[ "${WALI_ABI:-wali}" = wali ] && ABIFLAGS=$(awk -v p="$pkg" '$1 == p { $1 = ""; print substr($0, 2) }' "$HERE/abi-flags.txt")
 [ -n "$ABIFLAGS" ] && echo "farm: ABI flags: $ABIFLAGS" >> "$log"
 _t0=$(date +%s)
 # stdin is /dev/null and the perl/test knobs say "no questions": a Makefile.PL prompt used to

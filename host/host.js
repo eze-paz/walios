@@ -516,18 +516,18 @@ class Process {
     const abs = name === 'clock_nanosleep' && (a[1] & 1);
     const tp = name === 'nanosleep' ? a[0] : a[2];
     if (!tp) return 0;
-    const sec = Number(this.r64(tp)), ns = Number(this.r64(tp + 8));
+    const sec = Number(this.r64(tp)), ns = this.tsNs(tp);
     if (!abs) return sec * 1000 + ns / 1e6;
     const clk = a[0] | 0;
     const nowMs = (clk === 1 || clk === 4) ? (() => { const t = process.hrtime(); return t[0] * 1000 + t[1] / 1e6; })() : Date.now();
     return sec * 1000 + ns / 1e6 - nowMs;
   }
   wrTs(p, ms) { this.i64(p, BigInt(Math.floor(ms / 1000))); this.i64(p + 8, BigInt(Math.round((ms % 1000) * 1e6))); }
-  wrItimer(p, which) { // itimerval {interval, value} as {i64 sec, i64 usec} pairs
+  wrItimer(p, which) { // struct itimerval as musl passes it: long[4] {interval s, us, value s, us}
     const t = this.timers.get(which);
     const iv = t ? t.intervalMs : 0, rem = t && t.deadline ? Math.max(0, t.deadline - Date.now()) : 0;
-    this.i64(p, BigInt(Math.floor(iv / 1000))); this.i64(p + 8, BigInt(Math.round((iv % 1000) * 1000)));
-    this.i64(p + 16, BigInt(Math.floor(rem / 1000))); this.i64(p + 24, BigInt(Math.round((rem % 1000) * 1000)));
+    this.wLong(p, 0, Math.floor(iv / 1000)); this.wLong(p, 1, Math.round((iv % 1000) * 1000));
+    this.wLong(p, 2, Math.floor(rem / 1000)); this.wLong(p, 3, Math.round((rem % 1000) * 1000));
   }
   pollTfd(t) { // sync model: fire an expired timerfd at this boundary
     if (!JSPI && t.deadline && Date.now() >= t.deadline) {
@@ -567,7 +567,8 @@ class Process {
     const rd = [], wr = [];
     for (let fd = 0; fd < nfds; fd++) { if (bit(rp, fd)) rd.push(fd); if (bit(wp, fd)) wr.push(fd); }
     let tmo = -1;
-    if (tp) { const s = Number(this.r64(tp)), x = Number(this.r64(tp + 8)); tmo = s * 1000 + x / (name === 'select' ? 1000 : 1e6); }
+    // musl passes the timeout as long[2] {s, us} (select) or {s, ns} (pselect6)
+    if (tp) { const s = this.rLong(tp, 0), x = this.rLong(tp, 1); tmo = s * 1000 + x / (name === 'select' ? 1000 : 1e6); }
     const nb = (nfds + 7) >> 3;
     const commit = () => { this.refresh(); let n = 0;
       for (const p2 of [rp, wp, ep]) if (p2) this.u8.fill(0, p2, p2 + nb);
@@ -585,6 +586,17 @@ class Process {
   i32(p, v) { this.refresh(); this.dv.setInt32(p, Number(v), true); }
   r32(p) { this.refresh(); return this.dv.getInt32(p, true); }
   r64(p) { this.refresh(); return this.dv.getBigInt64(p, true); }
+  // C long in this process's ABI (makeImports reads it from the module): WALI's wasm32 has a
+  // 64-bit long, walios ILP32 binaries (custom section wali.abi = "ilp32") a 32-bit one.
+  // Element i of a long[] (musl passes select/ppoll/itimer/rusage times as long[]), and a
+  // timespec's tv_nsec: a long after the 64-bit tv_sec, whose other half is ILP32 padding.
+  get L() { return this.ilp32 ? 4 : 8; }
+  rLong(p, i = 0) { this.refresh(); return this.ilp32 ? this.dv.getInt32(p + 4 * i, true) : Number(this.dv.getBigInt64(p + 8 * i, true)); }
+  wLong(p, i, v) { this.refresh(); if (this.ilp32) this.dv.setInt32(p + 4 * i, Number(v), true); else this.dv.setBigInt64(p + 8 * i, BigInt(v), true); }
+  tsNs(p) { return this.rLong(p + 8); }
+  // struct msghdr / cmsghdr: 64-bit long pads msg_iovlen and msg_controllen to 8 bytes and the
+  // cmsghdr header to 16; ILP32 has neither pad.
+  get msgCtl() { return this.ilp32 ? { ctl: 16, ctllen: 20, flags: 24, hdr: 12 } : { ctl: 20, ctllen: 24, flags: 32, hdr: 16 }; }
   rPtrArray(p) { const out = []; for (;;) { const q = this.r32(p); if (!q) break; out.push(this.cstr(q)); p += 4; } return out; }
   rpath(s) { return redir(path.resolve(this.cwd.p, s)); }
   atPath(dirfd, s) {
@@ -733,7 +745,7 @@ class Process {
         let at = now, mt = now;
         if (tp) { S.refresh();
           if (name === 'utimes') { at = Number(S.r64(tp)) + Number(S.r64(tp + 8)) / 1e6; mt = Number(S.r64(tp + 16)) + Number(S.r64(tp + 24)) / 1e6; }
-          else { const ts = (o) => { const s = Number(S.r64(tp + o)), ns = Number(S.r64(tp + o + 8)); return ns === UTIME_OMIT ? null : ns >= 0x3ffffffd ? now : s + ns / 1e9; };
+          else { const ts = (o) => { const s = Number(S.r64(tp + o)), ns = S.tsNs(tp + o); return ns === UTIME_OMIT ? null : ns >= 0x3ffffffd ? now : s + ns / 1e9; };
             at = ts(0); mt = ts(16); } }
         try { const st = fs.statSync(p);
           fs.utimesSync(p, at === null ? st.atimeMs / 1000 : at, mt === null ? st.mtimeMs / 1000 : mt); return 0n;
@@ -834,6 +846,7 @@ class Process {
         if (pid < 0) return err(E.CHILD);
         const code = S.reaped.get(pid); S.reaped.delete(pid);
         if (a[1]) S.i32(a[1], (code & 0xff) << 8);
+        if (a[3]) { S.refresh(); S.u8.fill(0, a[3], a[3] + 18 * S.L); } // rusage, as getrusage
         return BigInt(pid); }
 
       case 'brk': { S.refresh(); if (!S.heapBrk) S.heapBrk = S.membuf.byteLength;
@@ -985,12 +998,12 @@ class Process {
           }
         } finally { S.sig.mask = oldMask; } }
       case 'clock_getres': { if (a[1]) { S.i64(a[1], 0n); S.i64(a[1] + 8, 1000000n); } return 0n; }
-      case 'times': { if (a[0]) { S.refresh(); S.u8.fill(0, a[0], a[0] + 16); } return BigInt(Math.floor(performance.now() / 10) & 0x7fffffff); }
+      case 'times': { if (a[0]) { S.refresh(); S.u8.fill(0, a[0], a[0] + 4 * S.L); } return BigInt(Math.floor(performance.now() / 10) & 0x7fffffff); }
       case 'setitimer': { const which = a[0] | 0; S.refresh();
         if (a[2]) S.wrItimer(a[2], which);
         if (a[1] && which === 0) { // ITIMER_REAL only (itimerval = two {i64 sec, i64 usec})
-          const ivMs = Number(S.r64(a[1])) * 1000 + Number(S.r64(a[1] + 8)) / 1000;
-          const vMs = Number(S.r64(a[1] + 16)) * 1000 + Number(S.r64(a[1] + 24)) / 1000;
+          const ivMs = S.rLong(a[1], 0) * 1000 + S.rLong(a[1], 1) / 1000;
+          const vMs = S.rLong(a[1], 2) * 1000 + S.rLong(a[1], 3) / 1000;
           S.armItimer(0, vMs, ivMs);
         }
         return 0n; }
@@ -1001,8 +1014,8 @@ class Process {
       case 'timerfd_settime': { const h = S.fds.get(a[0]); if (!h || !h.tfd) return err(E.BADF);
         S.refresh(); const t = h.tfd;
         if (a[3]) { S.wrTs(a[3], t.intervalMs); S.wrTs(a[3] + 16, t.deadline ? Math.max(0, t.deadline - Date.now()) : 0); }
-        const ivMs = Number(S.r64(a[2])) * 1000 + Number(S.r64(a[2] + 8)) / 1e6;
-        let vMs = Number(S.r64(a[2] + 16)) * 1000 + Number(S.r64(a[2] + 24)) / 1e6;
+        const ivMs = Number(S.r64(a[2])) * 1000 + S.tsNs(a[2]) / 1e6;
+        let vMs = Number(S.r64(a[2] + 16)) * 1000 + S.tsNs(a[2] + 16) / 1e6;
         if ((a[1] & 1) && vMs > 0) vMs -= Date.now(); // TFD_TIMER_ABSTIME (realtime)
         if (t.to) { clearTimeout(t.to); t.to = null; }
         t.deadline = 0; t.intervalMs = ivMs; t.count = 0;
@@ -1096,8 +1109,16 @@ class Process {
       case 'setrlimit': return 0n;
       case 'close_range': { const first = a[0] >>> 0, last = a[1] >>> 0;
         for (const fd of [...S.fds.keys()]) if (fd >= first && fd <= last) S.sys('close', [fd]); return 0n; }
-      case 'getrusage': { S.refresh(); S.u8.fill(0, a[1], a[1] + 144); return 0n; }
-      case 'sysinfo': { S.refresh(); S.u8.fill(0, a[0], a[0] + 112); S.i64(a[0], 1000n); S.i64(a[0] + 32, 4294967296n); S.i64(a[0] + 40, 2147483648n); return 0n; }
+      // the kernel's rusage = long[18] (two timevals as long pairs, then 14 counters); musl
+      // converts the ILP32 one into its 64-bit-time struct
+      case 'getrusage': { S.refresh(); S.u8.fill(0, a[1], a[1] + 18 * S.L); return 0n; }
+      case 'sysinfo': { // uptime, loads[3], totalram, freeram, ... (unsigned long), procs (u16),
+        // pad, totalhigh (11 L), freehigh (12 L), mem_unit (u32, 13 L): 4 GiB total / 2 GiB free
+        // in 4 KiB units (an ILP32 unsigned long cannot count 4 GiB of bytes)
+        const L = S.L, p = a[0]; S.refresh(); S.u8.fill(0, p, p + 13 * L + 4);
+        S.wLong(p, 0, 1000); S.wLong(p, 4, 1 << 20); S.wLong(p, 5, 1 << 19);
+        S.dv.setUint16(p + 10 * L, 1, true); S.dv.setUint32(p + 13 * L, 4096, true);
+        return 0n; }
       case 'getrandom': { const b = require('crypto').randomBytes(Math.min(a[1], 65536)); S.wbytes(a[0], b); return BigInt(b.length); }
       case 'poll': { S.refresh(); let ready = 0; // pollfd: fd(i32) events(i16) revents(i16), stride 8
         for (let i = 0; i < a[1]; i++) {
@@ -1198,10 +1219,10 @@ class Process {
             const iov = S.r32(a[1] + 8), iovn = S.r32(a[1] + 12); const parts = [];
             for (let i = 0; i < iovn; i++) { const p = S.r32(iov + i * 8), l = S.r32(iov + i * 8 + 4); if (l) parts.push(Buffer.from(S.u8.slice(p, p + l))); }
             payload = Buffer.concat(parts);
-            const ctl = S.r32(a[1] + 20), ctllen = S.r32(a[1] + 24); // wasm32-wali: long=64b padding shifts these
-            if (ctl && ctllen >= 16) { const clen = S.r32(ctl), lvl = S.r32(ctl + 8), typ = S.r32(ctl + 12);
-              if (lvl === 1 && typ === 1) { const nf = (clen - 16) >> 2; h.spair.wr.fds = h.spair.wr.fds || []; // SCM_RIGHTS, data @ctl+16
-                for (let i = 0; i < nf; i++) { const fd = S.r32(ctl + 16 + i * 4); const hh = S.fds.get(fd); if (hh) { h.spair.wr.fds.push({ ...hh, shared: true }); S.bumpFifo(hh); } } } }
+            const M = S.msgCtl, ctl = S.r32(a[1] + M.ctl), ctllen = S.r32(a[1] + M.ctllen);
+            if (ctl && ctllen >= M.hdr) { const clen = S.r32(ctl), lvl = S.r32(ctl + M.hdr - 8), typ = S.r32(ctl + M.hdr - 4);
+              if (lvl === 1 && typ === 1) { const nf = (clen - M.hdr) >> 2; h.spair.wr.fds = h.spair.wr.fds || []; // SCM_RIGHTS
+                for (let i = 0; i < nf; i++) { const fd = S.r32(ctl + M.hdr + i * 4); const hh = S.fds.get(fd); if (hh) { h.spair.wr.fds.push({ ...hh, shared: true }); S.bumpFifo(hh); } } } }
           } else payload = Buffer.from(S.u8.slice(a[1], a[1] + a[2]));
           if (h.spair.wr.readers <= 0) { postSignal(S, SIG.PIPE); return err(E.PIPE); }
           h.spair.wr.chunks.push(payload); wakePipe(h.spair.wr);
@@ -1241,12 +1262,12 @@ class Process {
           const iov = S.r32(a[1] + 8), iovn = S.r32(a[1] + 12); let total = 0;
           for (let i = 0; i < iovn; i++) { const p = S.r32(iov + i * 8), l = S.r32(iov + i * 8 + 4); if (!l) continue;
             const b = pipeRead(h.spair.rd, l); if (!b.length) break; S.wbytes(p, b); total += b.length; if (b.length < l) break; }
-          const ctl = S.r32(a[1] + 20), ctllen = S.r32(a[1] + 24); // long=64b padding
-          if (ctl && ctllen >= 16 && h.spair.rd.fds && h.spair.rd.fds.length) { // deliver one passed fd
+          const M = S.msgCtl, ctl = S.r32(a[1] + M.ctl), ctllen = S.r32(a[1] + M.ctllen);
+          if (ctl && ctllen >= M.hdr + 4 && h.spair.rd.fds && h.spair.rd.fds.length) { // deliver one passed fd
             const hh = h.spair.rd.fds.shift(); const g = S.allocFd(); S.fds.set(g, hh);
-            S.i32(ctl, 20); S.i32(ctl + 8, 1); S.i32(ctl + 12, 1); S.i32(ctl + 16, g); // cmsg_len=20, SOL_SOCKET, SCM_RIGHTS, fd@+16
-            S.i32(a[1] + 24, 20);                       // msg_controllen
-          } else if (ctl) S.i32(a[1] + 24, 0);
+            S.i32(ctl, M.hdr + 4); S.i32(ctl + M.hdr - 8, 1); S.i32(ctl + M.hdr - 4, 1); S.i32(ctl + M.hdr, g); // cmsg_len, SOL_SOCKET, SCM_RIGHTS, fd
+            S.i32(a[1] + M.ctllen, M.hdr + 4);          // msg_controllen
+          } else if (ctl) S.i32(a[1] + M.ctllen, 0);
           if (process.env.WALI_DBG) process.stderr.write(`[spair] p${S.pid} recv ${total}B ctl=${ctl} ctllen=${ctllen} qfds=${(h.spair.rd.fds || []).length}\n`);
           return BigInt(total);
         }
@@ -1463,7 +1484,7 @@ class Process {
       let pid = -1;
       if (want > 0) { if (S.reaped.has(want)) pid = want; }
       else if (S.reaped.size) pid = S.reaped.keys().next().value;
-      if (pid >= 0) { const code = S.reaped.get(pid); S.reaped.delete(pid); if (a[1]) S.i32(a[1], (code & 0xff) << 8); return BigInt(pid); }
+      if (pid >= 0) { const code = S.reaped.get(pid); S.reaped.delete(pid); if (a[1]) S.i32(a[1], (code & 0xff) << 8); if (a[3]) { S.refresh(); S.u8.fill(0, a[3], a[3] + 18 * S.L); } return BigInt(pid); }
       if (a[2] & 2) { // WUNTRACED: report a stopped child once
         for (const cpid of S.childTasks.keys()) {
           if (want > 0 && cpid !== want) continue;
@@ -1484,7 +1505,7 @@ class Process {
     const S = this; const nfds = a[1];
     S.refresh();
     const timeout = name === 'poll' ? (a[2] | 0)
-      : (a[2] ? Math.ceil(Number(S.r64(a[2])) * 1000 + Number(S.r64(a[2] + 8)) / 1e6) : -1); // ppoll: timespec or NULL=block
+      : (a[2] ? Math.ceil(S.rLong(a[2], 0) * 1000 + S.rLong(a[2], 1) / 1e6) : -1); // ppoll: musl's long[2] {s, ns} or NULL=block
     const evalReady = () => { S.refresh(); let ready = 0; const waitFifos = []; const waitPtys = []; let waitStdin = false, waitSock = false;
       for (let i = 0; i < nfds; i++) {
         const fd = S.r32(a[0] + i * 8), ev = S.dv.getInt16(a[0] + i * 8 + 4, true);
@@ -1570,6 +1591,8 @@ class Process {
   makeImports(mod) {
     const wali = {};
     const S = this;
+    // walios ILP32 binaries (32-bit long; sandpie walios/build/sysroot32) say so in a custom section
+    this.ilp32 = WebAssembly.Module.customSections(mod, 'wali.abi').some((b) => Buffer.from(b).toString().includes('ilp32'));
     const extra = {};
     // Asyncify-capable module (has the unwind/rewind controls wasm-opt --asyncify adds)?
     // If so, SYS_fork is implemented by unwinding the live stack into linear memory,
