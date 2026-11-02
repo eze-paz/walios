@@ -1,0 +1,6 @@
+#!/bin/sh
+# perl-cross reads type sizes from `readelf --syms try.o`; wasm objects are not ELF, so print
+# llvm-nm -S output in readelf's layout ("N: value size TYPE BIND VIS NDX name").
+f=
+for a in "$@"; do case "$a" in -*) ;; *) f=$a;; esac; done
+"$WALI_LLVM/llvm-nm" -S "$f" | awk 'NF == 4 { printf "%5d: %s %d OBJECT GLOBAL DEFAULT 1 %s\n", NR, $1, strtonum("0x" $2), $4 }'

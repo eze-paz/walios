@@ -69,20 +69,16 @@ NOARCH=""; [ "$(apk arch)" = noarch ] && NOARCH=1
 # link those; Alpine's openssl recipe has no wasm32 target ("Unable to determine architecture").
 case "$pkg" in openssl|musl|libffi) emit skip in-sysroot;; esac
 case " $(apk makedepends) " in *" cargo "*|*" rust "*|*" cargo-auditable "*) emit skip needs-rust;; *" go "*) emit skip needs-go;; esac
-# Under WALI_ABI=ilp32 a C module must match its interpreter's ABI, and walios' python, perl
-# and lua are still WALI (64-bit long) builds: those wait until the runtimes are rebuilt.
-if [ "${WALI_ABI:-wali}" = ilp32 ] && [ -z "$NOARCH" ]; then
-  grep -q gpep517 "$bdir/APKBUILD" && emit skip needs-ilp32-python
-  grep -q '^_luaversions=' "$bdir/APKBUILD" && emit skip needs-ilp32-lua
-  case "$pkg" in perl-*) emit skip needs-ilp32-perl;; esac
-fi
+# A C module must match its interpreter's ABI: under WALI_ABI=ilp32 it links against the
+# exports of walios' ILP32 python/perl/lua (the *-exports32.txt lists).
+X=""; [ "${WALI_ABI:-wali}" = ilp32 ] && X=32
 # Python packages (gpep517 + installer) are built as Alpine builds them, on the runner's
 # Python 3.14 -- the version walios runs, and the same extension suffix
 # (.cpython-314-x86_64-linux-gnu.so) -- whose pyconfig.h the workflow swapped for walios
 # Python's (32-bit pointers, 64-bit long). Its compiler is `gcc`, i.e. the wasm wrapper, so
 # with WALI_SIDE a C extension links as a wasm side module importing only python_cxx.wasm's
 # exports (python-exports.txt = sandpie walios/build/cpython/main-exports.txt).
-PYPKG=""; grep -q gpep517 "$bdir/APKBUILD" && { PYPKG=1; export WALI_SIDE="$HERE/python-exports.txt"
+PYPKG=""; grep -q gpep517 "$bdir/APKBUILD" && { PYPKG=1; export WALI_SIDE="$HERE/python-exports$X.txt"
   # (setuptools/meson take these over the compiler recorded in the host Python's sysconfig)
   export LDSHARED="$CC -shared" LDCXXSHARED="$CXX -shared"; }
 # Its build-time Python deps (makedepends py3-foo, mostly PyPI's foo: build backends,
@@ -98,7 +94,7 @@ fi
 # lua5.X-<name> subpackage functions, so the farm runs the 5.4 one into $pkgdir.
 LUAMOD=""
 if [ -z "$NOARCH" ] && grep -q '^_luaversions=' "$bdir/APKBUILD"; then
-  LUAMOD=1; export WALI_SIDE="$HERE/lua-exports.txt"
+  LUAMOD=1; export WALI_SIDE="$HERE/lua-exports$X.txt"
   sed -i 's/^_luaversions=.*/_luaversions="5.4"/' "$bdir/APKBUILD"
 fi
 # Perl XS modules (perl-*, not noarch): side modules perl.wasm's DynaLoader dlopen()s,
@@ -111,7 +107,7 @@ fi
 # space; perl's -fwrapv -fno-strict-aliasing ride in WALI_EXTRA_CFLAGS instead.
 PERLXS="" PERLXS_MAKE=""
 if [ -z "$NOARCH" ] && case "$pkg" in perl-*) true;; *) false;; esac; then
-  PERLXS=1; export WALI_SIDE="$HERE/perl-exports.txt" PERL_MM_OPT="CC=$CC LD=$CC"
+  PERLXS=1; export WALI_SIDE="$HERE/perl-exports$X.txt" PERL_MM_OPT="CC=$CC LD=$CC"
   # Makefile.PL's compiler probes (ExtUtils::CBuilder, Config::AutoConf) link with $LD, which
   # the toolchain sets to the bare wasm-ld wrapper; and they `use` build-time modules the
   # farm built as pure-Perl packages (Canary::Stability...), in the overlay's noarch dir.

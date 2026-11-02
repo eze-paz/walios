@@ -1,0 +1,137 @@
+# walios runtimes -- busybox, lua, perl, CPython (+ its stdlib C extensions) -- built from the
+# recipes in runtimes/ (mirrored from sandpie walios/build, where they are maintained) and
+# published as a release the box copies its runtime files from.
+name: runtimes
+on:
+  # A commit that changes runtimes/request.json runs this with the inputs in it (same keys as
+  # below), so a run can be asked for without Actions API rights.
+  push:
+    branches: [main]
+    paths: ['runtimes/request.json']
+  workflow_dispatch:
+    inputs:
+      abi: { description: 'wali (64-bit long) or ilp32 (32-bit long)', required: false, default: 'ilp32' }
+      only: { description: 'Runtimes to build (space separated: busybox lua perl cpython); empty = all', required: false, default: '' }
+
+permissions:
+  contents: write
+
+concurrency:
+  group: runtimes
+  cancel-in-progress: true
+
+jobs:
+  inputs:
+    runs-on: ubuntu-latest
+    outputs:
+      abi: ${{ steps.in.outputs.abi }}
+      only: ${{ steps.in.outputs.only }}
+      tag: ${{ steps.in.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { sparse-checkout: runtimes }
+      - id: in
+        env:
+          EV: ${{ github.event_name }}
+          IN: ${{ toJSON(inputs) }}
+        run: |
+          node -e '
+            const i = process.env.EV === "push" ? require("./runtimes/request.json") : JSON.parse(process.env.IN || "{}");
+            const abi = i.abi || "ilp32", only = (i.only || "busybox lua perl cpython").trim();
+            if (!["wali", "ilp32"].includes(abi)) throw new Error("abi: " + abi);
+            const tag = "runtimes-" + abi + "-" + new Date().toISOString().slice(0, 10) + "-" + process.env.GITHUB_RUN_NUMBER;
+            require("fs").appendFileSync(process.env.GITHUB_OUTPUT, `abi=${abi}\nonly=${only}\ntag=${tag}\n`);
+            console.log({ abi, only, tag });'
+
+  # busybox, lua and perl: the farm toolchain (farm/ci/toolchain.sh) in the requested ABI
+  small:
+    needs: inputs
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        rt: [busybox, lua, perl]
+    env:
+      WALI_ABI: ${{ needs.inputs.outputs.abi }}
+    steps:
+      - uses: actions/checkout@v4
+        if: contains(needs.inputs.outputs.only, matrix.rt)
+      - name: Toolchain
+        if: contains(needs.inputs.outputs.only, matrix.rt)
+        run: sudo apt-get install -y -qq libbsd-dev >/dev/null && bash farm/ci/toolchain.sh "$RUNNER_TEMP/tc"
+      - name: Build ${{ matrix.rt }}
+        if: contains(needs.inputs.outputs.only, matrix.rt)
+        run: WALI_TC="$RUNNER_TEMP/tc" bash runtimes/${{ matrix.rt }}/build.sh "$RUNNER_TEMP/out"
+      - name: Logs on failure
+        if: failure()
+        run: for f in "$RUNNER_TEMP"/out/*.log "$RUNNER_TEMP"/out/src/*.log; do [ -f "$f" ] && { echo "== $f"; tail -n 60 "$f"; }; done; true
+      - name: Collect
+        if: contains(needs.inputs.outputs.only, matrix.rt)
+        run: |
+          mkdir -p dist && cd "$RUNNER_TEMP/out"
+          case ${{ matrix.rt }} in
+            busybox) cp busybox.wasm busybox.links "$GITHUB_WORKSPACE/dist/";;
+            lua)     cp lua.wasm lua-exports.txt cjson.so "$GITHUB_WORKSPACE/dist/";;
+            perl)    cp perl.wasm perllib.tar.gz perl-core.tar.gz perl-exports.txt "$GITHUB_WORKSPACE/dist/";;
+          esac
+          ls -la "$GITHUB_WORKSPACE/dist"
+      - uses: actions/upload-artifact@v4
+        if: contains(needs.inputs.outputs.only, matrix.rt)
+        with: { name: 'rt-${{ matrix.rt }}', path: dist/*, retention-days: 7 }
+
+  # CPython: its own recipe (LLVM release + the sysroot tarball), then the stdlib extensions
+  cpython:
+    needs: inputs
+    if: contains(needs.inputs.outputs.only, 'cpython')
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    env:
+      WALI_ABI: ${{ needs.inputs.outputs.abi }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential cmake ninja-build pkg-config libssl-dev zlib1g-dev libbz2-dev \
+            liblzma-dev libsqlite3-dev libffi-dev libreadline-dev libncurses-dev uuid-dev unzip >/dev/null
+      - name: Sysroot
+        run: |
+          REL=https://github.com/eze-paz/walios/releases/download
+          if [ "$WALI_ABI" = ilp32 ]; then U=$REL/toolchain-2026-10-31/wali32-sysroot.tar.gz; else U=$REL/pkgs-2026-10-31/wali-sysroot.tar.gz; fi
+          curl -sSfL --retry 6 -o "$RUNNER_TEMP/sysroot.tar.gz" "$U"
+      - name: python_cxx.wasm
+        run: bash runtimes/cpython/build.sh "$RUNNER_TEMP/sysroot.tar.gz" "$RUNNER_TEMP/py"
+      - name: Stdlib extensions (zlib, _bz2, _sqlite3, _ssl)
+        run: bash runtimes/cpython/ext.sh "$RUNNER_TEMP/py"
+      - name: Logs on failure
+        if: failure()
+        run: for f in "$RUNNER_TEMP"/py/*.log; do echo "== $f"; tail -n 80 "$f"; done; true
+      - name: Collect
+        run: |
+          P="$RUNNER_TEMP/py"; mkdir -p dist
+          cp "$P/python_cxx.wasm" "$P/_sysconfigdata__linux_x86_64-linux-gnu.py" dist/
+          cp "$P/cross-py/pyconfig.h" dist/python-pyconfig.h
+          cp "$P/ext-obj/python-exports.txt" dist/
+          tar czf dist/python-ext.tar.gz -C "$P/ext" .
+          ls -la dist
+      - uses: actions/upload-artifact@v4
+        with: { name: rt-cpython, path: dist/*, retention-days: 7 }
+
+  publish:
+    needs: [inputs, small, cpython]
+    if: always() && needs.inputs.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { pattern: 'rt-*', merge-multiple: true, path: dist }
+      - name: Release ${{ needs.inputs.outputs.tag }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.inputs.outputs.tag }}
+        run: |
+          ls -la dist
+          [ -n "$(ls dist)" ] || { echo "nothing built"; exit 1; }
+          (cd dist && sha256sum * > SHA256SUMS)
+          gh release create "$TAG" -R "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease \
+            --title "$TAG" --notes "walios runtimes, ABI ${{ needs.inputs.outputs.abi }}, built by run ${{ github.run_id }} from runtimes/ at ${GITHUB_SHA::7}." dist/*

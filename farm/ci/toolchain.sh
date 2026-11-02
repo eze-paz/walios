@@ -69,8 +69,18 @@ __cpp_exception:
   $L/clang $TGT -mexception-handling -c $S/lib/cpp_exc.s -o $S/lib/cpp_exc.o
   $L/llvm-ar rcs $S/lib/libwali-cppexc.a $S/lib/cpp_exc.o
 fi
+# ILP32: a side module (C module a runtime dlopen()s) carries the same wali.abi marker as a
+# program, so the kernel refuses to load it into a process of the other ABI.
+SIDEOBJ=""
+if [ "$ABI" = ilp32 ]; then
+  SIDEOBJ=$S/lib/wali-abi-side.o
+  [ -f $SIDEOBJ ] || { printf '.section .custom_section.wali.abi,"",@
+.ascii "ilp32"
+' > $S/lib/wali-abi-side.s
+    $L/clang $TGT -c $S/lib/wali-abi-side.s -o $SIDEOBJ; }
+fi
 cat > env.sh <<EOF
-export WALI_TC=$TC WALI_LLVM=$L WALI_SYSROOT=$S
+export WALI_TC=$TC WALI_LLVM=$L WALI_SYSROOT=$S WALI_ABI=$ABI WALI_TARGET="$TGT" WALI_SIDE_OBJ="$SIDEOBJ"
 export CC=$TC/bin/wali-cc CXX=$TC/bin/wali-c++ LD=$TC/bin/wali-ld
 export AR=$L/llvm-ar RANLIB=$L/llvm-ranlib NM=$L/llvm-nm STRIP=$L/llvm-strip OBJCOPY=$L/llvm-objcopy
 export CMAKE_TOOLCHAIN_FILE=$TC/wali.cmake
@@ -146,7 +156,7 @@ for a in "\$@"; do case "\$a" in
 if [ \$link = 1 ] && [ \$shared = 1 ] && [ -n "\${WALI_SIDE:-}" ]; then
   # libc, libm and the runtime's own library come from the runtime (its exports), not a copy.
   S2=(); for a in "\${A[@]}"; do case "\$a" in -lc|-lm|-ldl|-lpthread|-lrt|-llua*|-lperl) ;; *) S2+=("\$a");; esac; done
-  exec $L/clang "\${F[@]}" "\${S2[@]}" -nostdlib -Wl,--no-entry,--experimental-pic,--shared-memory,--allow-undefined-file=\$WALI_SIDE
+  exec $L/clang "\${F[@]}" "\${S2[@]}" -nostdlib -Wl,--no-entry,--experimental-pic,--shared-memory,--allow-undefined-file=\$WALI_SIDE $SIDEOBJ
 fi
 if [ \$link = 1 ] && [ \$shared = 1 ]; then
   objs=()

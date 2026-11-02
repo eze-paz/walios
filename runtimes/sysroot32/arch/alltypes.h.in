@@ -1,0 +1,19 @@
+/* walios ILP32: 32-bit pointers AND 32-bit long, like every other 32-bit Linux (i386, arm).
+ * (WALI's wasm32 had a 64-bit long to mirror x86_64 struct layouts; see ../README.md.)
+ * _Addr is long, not int: clang's wasm32 size_t/ptrdiff_t/intptr_t are long-based. */
+#define _Addr long
+#define _Int64 long long
+#define _Reg long
+
+/* Only supports little-endian for consistency */
+#define __BYTE_ORDER 1234
+#define __LONG_MAX 0x7fffffffL
+
+#ifndef __cplusplus
+TYPEDEF int wchar_t;
+#endif
+
+TYPEDEF float float_t;
+TYPEDEF double double_t;
+
+TYPEDEF struct { long long __ll; long double __ld; } max_align_t;

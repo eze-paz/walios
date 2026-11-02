@@ -1,0 +1,42 @@
+# configure cache answers for the walios cross build (see build.sh).
+# The /dev/ptmx etc. checks cannot run on the build machine; every module set to n/a is
+# either shipped as a side module in a bundle (zlib, _ssl, _sqlite3, _bz2) or not built
+# (_multiprocessing does not compile with 32-bit pointers and a 64-bit long).
+ac_cv_file__dev_ptmx=yes
+ac_cv_file__dev_ptc=no
+ac_cv_buggy_getaddrinfo=no
+ac_cv_func_dlopen=yes
+ac_cv_lib_dl_dlopen=yes
+py_cv_module__hashlib=n/a
+py_cv_module__ssl=n/a
+py_cv_module_zlib=n/a
+py_cv_module__bz2=n/a
+py_cv_module__lzma=n/a
+py_cv_module__sqlite3=n/a
+py_cv_module__ctypes=n/a
+py_cv_module__ctypes_test=n/a
+py_cv_module__uuid=n/a
+py_cv_module_readline=n/a
+py_cv_module__curses=n/a
+py_cv_module__curses_panel=n/a
+py_cv_module__dbm=n/a
+py_cv_module__gdbm=n/a
+py_cv_module__tkinter=n/a
+py_cv_module__testcapi=n/a
+py_cv_module__testclinic=n/a
+py_cv_module__testclinic_limited=n/a
+py_cv_module__testlimitedcapi=n/a
+py_cv_module__testinternalcapi=n/a
+py_cv_module__testbuffer=n/a
+py_cv_module__testimportmultiple=n/a
+py_cv_module__testmultiphase=n/a
+py_cv_module__testsinglephase=n/a
+py_cv_module__testexternalinspection=n/a
+py_cv_module_xxsubtype=n/a
+py_cv_module_xxlimited=n/a
+py_cv_module_xxlimited_35=n/a
+py_cv_module__xxtestfuzz=n/a
+py_cv_module__crypt=n/a
+py_cv_module_nis=n/a
+py_cv_module__scproxy=n/a
+py_cv_module__multiprocessing=n/a
