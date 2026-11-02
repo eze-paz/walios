@@ -3,5 +3,5 @@
   "max": 600,
   "chunk": 3,
   "publish": true,
-  "note": "R28: PIC everywhere (deps link into side modules), no host -I/-L, meson python headers, numpy headers swap, gnulib stub config.h"
+  "note": "R28 rerun: run 41451757523 lost wave 2 to GitHub-side failures (84-min apt stall, HTTP 500 on release downloads, cancelled jobs)"
 }
