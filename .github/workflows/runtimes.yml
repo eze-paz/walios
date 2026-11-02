@@ -59,7 +59,8 @@ jobs:
         if: contains(needs.inputs.outputs.only, matrix.rt)
       - name: Toolchain
         if: contains(needs.inputs.outputs.only, matrix.rt)
-        run: sudo apt-get install -y -qq libbsd-dev >/dev/null && bash farm/ci/toolchain.sh "$RUNNER_TEMP/tc"
+        # (libxml2: the LLVM release's wasm-ld links against libxml2.so.2, which the runner image lacks)
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libbsd-dev libxml2 >/dev/null && bash farm/ci/toolchain.sh "$RUNNER_TEMP/tc"
       - name: Build ${{ matrix.rt }}
         if: contains(needs.inputs.outputs.only, matrix.rt)
         run: WALI_TC="$RUNNER_TEMP/tc" bash runtimes/${{ matrix.rt }}/build.sh "$RUNNER_TEMP/out"
@@ -94,7 +95,7 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq build-essential cmake ninja-build pkg-config libssl-dev zlib1g-dev libbz2-dev \
-            liblzma-dev libsqlite3-dev libffi-dev libreadline-dev libncurses-dev uuid-dev unzip >/dev/null
+            liblzma-dev libsqlite3-dev libffi-dev libreadline-dev libncurses-dev uuid-dev unzip libxml2 >/dev/null
       - name: Sysroot
         run: |
           REL=https://github.com/eze-paz/walios/releases/download

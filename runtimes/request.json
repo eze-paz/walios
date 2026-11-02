@@ -1,1 +1,1 @@
-{ "abi": "ilp32", "only": "busybox lua perl cpython" }
+{ "abi": "ilp32", "only": "busybox lua perl cpython", "try": 2 }
