@@ -1,7 +1,7 @@
 {
-  "all": true,
-  "max": 3000,
-  "chunk": 4,
+  "pkgs": "py3-numpy py3-pandas py3-pillow py3-lxml py3-matplotlib py3-contourpy py3-kiwisolver py3-msgpack py3-reportlab py3-fonttools py3-markupsafe py3-wrapt py3-tabulate lua-cjson lua-lpeg lua-filesystem lua-inspect perl-json-xs perl-digest-sha1 perl-try-tiny jq tree",
+  "max": 600,
+  "chunk": 3,
   "publish": true,
-  "note": "full catalog run 17: rounds 1-24 (WALI ABI: mpfr int precision, oniguruma/jq pointer-sized types, abiwarn counts)"
+  "note": "R27 ILP32 default: python bundle packages (numpy, pandas, pillow, lxml, matplotlib...) + lua/perl/py C modules + jq/tree"
 }
