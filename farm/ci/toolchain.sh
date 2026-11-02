@@ -7,16 +7,16 @@
 # Writes $TC/env.sh, cc/c++/ld wrappers, a meson cross file, a cmake toolchain file and the
 # abuild helpers Alpine recipes call (abuild-meson). Idempotent; CI caches $TC.
 #   toolchain.sh <dir> [pkgs-tag] [toolchain-tag]
-# WALI_ABI=ilp32 builds for the walios ILP32 ABI instead (sandpie walios/build/sysroot32:
-# 32-bit long like every other 32-bit Linux, where WALI's wasm32 has a 64-bit one): its
-# sysroot carries libc++ and openssl, and clang compiles for wasm32-unknown-linux-musl
-# (long = 32) while still driving the link through the WALI target, which has a link step.
+# The default ABI is the walios ILP32 one (runtimes/sysroot32: 32-bit long like every other
+# 32-bit Linux, where WALI's wasm32 has a 64-bit one): its sysroot carries libc++ and openssl,
+# and clang compiles for wasm32-unknown-linux-musl (long = 32) while still driving the link
+# through the WALI target, which has a link step. WALI_ABI=wali builds for WALI's own.
 set -euo pipefail
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)   # before any cd: the path may be relative
 TC=$(realpath -m "${1:?usage: toolchain.sh <dir> [pkgs-tag] [toolchain-tag]}")
 TAG=${2:-pkgs-2026-10-31}
 XTAG=${3:-toolchain-2026-10-31}
-ABI=${WALI_ABI:-wali}
+ABI=${WALI_ABI:-ilp32}
 TGT=--target=wasm32-unknown-linux-muslwali
 [ "$ABI" = ilp32 ] && TGT="$TGT -Xclang -triple -Xclang wasm32-unknown-linux-musl -fno-pic"
 REL=https://github.com/eze-paz/walios/releases/download
@@ -47,11 +47,11 @@ fi
 # walios perl.wasm's C headers and Config (sandpie walios/build/perl): what an XS module
 # compiles against (build-one.sh points MakeMaker's PERL_INC here).
 if [ ! -f perl-core/5.44.0/wasm32-linux/CORE/perl.h ]; then
-  mkdir -p perl-core && fetch $REL/$XTAG/perl-core.tar.gz pc.tgz && tar xzf pc.tgz -C perl-core && rm pc.tgz
+  mkdir -p perl-core && fetch $REL/$XTAG/perl-core$([ "$ABI" = ilp32 ] && echo 32).tar.gz pc.tgz && tar xzf pc.tgz -C perl-core && rm pc.tgz
 fi
 # walios python_cxx.wasm's pyconfig.h (CPython 3.14 configured for wasm32-wali): the farm
 # workflow puts it into the runner's Python 3.14 so C extensions compile for walios.
-[ -f python/pyconfig.h ] || { mkdir -p python && fetch $REL/$XTAG/python-pyconfig.h python/pyconfig.h; }
+[ -f python/pyconfig.h ] || { mkdir -p python && fetch $REL/$XTAG/python-pyconfig$([ "$ABI" = ilp32 ] && echo 32).h python/pyconfig.h; }
 # libffi with the WALI port (sandpie walios/build/libffi: calls and closures through the
 # kernel): part of the sysroot, like openssl -- Alpine's libffi has an Emscripten-only wasm32.
 if [ ! -f sysroot/lib/libffi.a ]; then

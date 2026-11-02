@@ -9,11 +9,11 @@ on:
 
 env:
   TC: ${{ github.workspace }}/../wali-tc
-  TC_KEY: wali-tc-llvm22.1.3-pkgs-2026-10-31-x1-v20
+  TC_KEY: wali-tc-llvm22.1.3-pkgs-2026-10-31-x1-v21-ilp32
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 120
     strategy:
       fail-fast: false
@@ -42,7 +42,7 @@ jobs:
           # PEP 517 backends and cython, in setup-python's 3.14 (sudo pip3 above is the system's).
           python3 -m pip install -q gpep517 installer build wheel setuptools setuptools-scm \
             flit-core hatchling hatch-vcs hatch-fancy-pypi-readme poetry-core pdm-backend cython
-          # ...whose pyconfig.h becomes walios python_cxx.wasm's (32-bit pointers, 64-bit long):
+          # ...whose pyconfig.h becomes walios python_cxx.wasm's (the toolchain's ABI: ILP32 by default):
           # C extensions then compile for walios (gcc = the wasm wrapper), with this Python's
           # suffix .cpython-314-x86_64-linux-gnu.so, the one walios Python imports.
           inc=$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["include"])')

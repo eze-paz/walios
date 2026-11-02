@@ -71,11 +71,11 @@ case "$pkg" in openssl|musl|libffi) emit skip in-sysroot;; esac
 case " $(apk makedepends) " in *" cargo "*|*" rust "*|*" cargo-auditable "*) emit skip needs-rust;; *" go "*) emit skip needs-go;; esac
 # A C module must match its interpreter's ABI: under WALI_ABI=ilp32 it links against the
 # exports of walios' ILP32 python/perl/lua (the *-exports32.txt lists).
-X=""; [ "${WALI_ABI:-wali}" = ilp32 ] && X=32
+X=""; [ "${WALI_ABI:-ilp32}" = ilp32 ] && X=32
 # Python packages (gpep517 + installer) are built as Alpine builds them, on the runner's
 # Python 3.14 -- the version walios runs, and the same extension suffix
 # (.cpython-314-x86_64-linux-gnu.so) -- whose pyconfig.h the workflow swapped for walios
-# Python's (32-bit pointers, 64-bit long). Its compiler is `gcc`, i.e. the wasm wrapper, so
+# Python's (the toolchain's ABI). Its compiler is `gcc`, i.e. the wasm wrapper, so
 # with WALI_SIDE a C extension links as a wasm side module importing only python_cxx.wasm's
 # exports (python-exports.txt = sandpie walios/build/cpython/main-exports.txt).
 PYPKG=""; grep -q gpep517 "$bdir/APKBUILD" && { PYPKG=1; export WALI_SIDE="$HERE/python-exports$X.txt"
@@ -210,7 +210,7 @@ fi
 # WALI ABI (32-bit pointers, 64-bit long) flags for this package, from abi-flags.txt; the
 # ILP32 ABI needs none.
 ABIFLAGS=""
-[ "${WALI_ABI:-wali}" = wali ] && ABIFLAGS=$(awk -v p="$pkg" '$1 == p { $1 = ""; print substr($0, 2) }' "$HERE/abi-flags.txt")
+[ "${WALI_ABI:-ilp32}" = wali ] && ABIFLAGS=$(awk -v p="$pkg" '$1 == p { $1 = ""; print substr($0, 2) }' "$HERE/abi-flags.txt")
 [ -n "$ABIFLAGS" ] && echo "farm: ABI flags: $ABIFLAGS" >> "$log"
 _t0=$(date +%s)
 # stdin is /dev/null and the perl/test knobs say "no questions": a Makefile.PL prompt used to
