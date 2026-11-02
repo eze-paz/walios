@@ -91,7 +91,7 @@ X=""; [ "${WALI_ABI:-ilp32}" = ilp32 ] && X=32
 # Python's (the toolchain's ABI). Its compiler is `gcc`, i.e. the wasm wrapper, so
 # with WALI_SIDE a C extension links as a wasm side module importing only python_cxx.wasm's
 # exports (python-exports.txt = sandpie walios/build/cpython/main-exports.txt).
-PYPKG=""; grep -qE 'gpep517|python3 -m (build|installer)' "$bdir/APKBUILD" && { PYPKG=1; export WALI_SIDE="$HERE/python-exports$X.txt"
+PYPKG=""; grep -qE 'gpep517|python3 -m (build|installer)|python3 setup\.py' "$bdir/APKBUILD" && { PYPKG=1; export WALI_SIDE="$HERE/python-exports$X.txt"
   # (setuptools/meson take these over the compiler recorded in the host Python's sysconfig)
   export LDSHARED="$CC -shared" LDCXXSHARED="$CXX -shared"; }
 # Its build-time Python deps (makedepends py3-foo, mostly PyPI's foo: build backends,
@@ -194,8 +194,8 @@ for f in $(find "$SRC" -name sigsegv.in.h 2>/dev/null); do
 pkgdir="$bdir/pkg"; mkdir -p "$pkgdir"
 cat > "$bdir/.farm-build.sh" <<'EOS'
 set +u
-# (Lua modules: some recipes pass -I/usr/include/lua$lver themselves, the build host's path.)
-export WALI_EXTRA_CFLAGS="-I$OVERLAY/usr/include${LUAMOD:+ -I$OVERLAY/usr/include/lua5.4}${PERLXS:+ -fwrapv -fno-strict-aliasing}${ABIFLAGS:+ $ABIFLAGS}" WALI_EXTRA_LDFLAGS="-L$OVERLAY/usr/lib -L$OVERLAY/lib" WALI_OVERLAY="$OVERLAY"
+# (Lua modules: 5.4's headers before /usr/include, which holds lua5.1's lua.h.)
+export WALI_EXTRA_CFLAGS="${LUAMOD:+-I$OVERLAY/usr/include/lua5.4 }-I$OVERLAY/usr/include${PERLXS:+ -fwrapv -fno-strict-aliasing}${ABIFLAGS:+ $ABIFLAGS}" WALI_EXTRA_LDFLAGS="-L$OVERLAY/usr/lib -L$OVERLAY/lib" WALI_OVERLAY="$OVERLAY"
 # Deps' *-config scripts (gpgrt-config, pcre2-config, xml2-config...) are shell scripts the
 # recipes look up on PATH -- last, so host tools still win over the overlay's wasm binaries.
 # (No CMAKE_PREFIX_PATH: cmake searches PREFIX/bin for programs and took the overlay's wasm ninja.)

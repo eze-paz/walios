@@ -3,5 +3,5 @@
   "max": 600,
   "chunk": 3,
   "publish": true,
-  "note": "R28 rerun: run 41451757523 lost wave 2 to GitHub-side failures (84-min apt stall, HTTP 500 on release downloads, cancelled jobs)"
+  "note": "R29: lua5.4 headers first + host -I subdirs to overlay, side modules link deps archives, numpy longdouble, kiwisolver setup.py, m4 stub config.h"
 }

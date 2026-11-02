@@ -142,8 +142,11 @@ F+=(-fPIC); [ -n "\${WALI_SIDE:-}" ] && F+=(-fvisibility=default)
 A=()
 for a in "\$@"; do case "\$a" in
   -rdynamic|-static|-s|-fPIC|-fpic|-fPIE|-fpie|-pie|-flto|-flto=*|-ffat-lto-objects|-fuse-linker-plugin|-fstack-protector*|-fstack-clash-protection) ;;   # (host perl Config ldflags in Makefile.PL probes)
-  # the build host's headers and libraries (Pillow's setup.py adds /usr/include and /usr/lib)
-  -I/usr/include|-I/usr/include/*|-I/usr/local/include|-I/usr/local/include/*|-L/usr/lib|-L/usr/lib/*|-L/usr/local/lib|-L/usr/local/lib/*|-L/lib|-L/lib/*|-L/lib64) ;;
+  # the build host's headers and libraries (Pillow's setup.py adds /usr/include and /usr/lib):
+  # a subdirectory means the overlay's copy (lpeg's -I/usr/include/lua5.4), the rest is dropped
+  -I/usr/include/*|-I/usr/local/include/*|-L/usr/lib/*|-L/usr/local/lib/*)
+    p=\${a:2}; [ -n "\${WALI_OVERLAY:-}" ] && [ -d "\$WALI_OVERLAY\$p" ] && A+=("\${a:0:2}\$WALI_OVERLAY\$p");;
+  -I/usr/include|-I/usr/local/include|-L/usr/lib|-L/usr/local/lib|-L/lib|-L/lib/*|-L/lib64) ;;
   -Wl,*)
     # ELF-linker options wasm-ld rejects, filtered token by token: one -Wl, can carry several
     # (-Wl,-Map=x.map,--cref). -z/-soname/-rpath/... take the next token as their value.
@@ -161,7 +164,11 @@ for a in "\$@"; do case "\$a" in
 if [ \$link = 1 ] && [ \$shared = 1 ] && [ -n "\${WALI_SIDE:-}" ]; then
   # libc, libm and the runtime's own library come from the runtime (its exports), not a copy.
   S2=(); for a in "\${A[@]}"; do case "\$a" in -lc|-lm|-ldl|-lpthread|-lrt|-llua*|-lperl) ;; *) S2+=("\$a");; esac; done
-  exec $L/clang "\${F[@]}" "\${S2[@]}" -nostdlib -Wl,--no-entry,--experimental-pic,--shared-memory,--allow-undefined-file=\$WALI_SIDE $SIDEOBJ
+  D2=(); for a in \${WALI_OVERLAY_LIBS:-}; do case "\$a" in */liblua*.a|*/libperl.a|*/libpython*.a) ;; *) D2+=("\$a");; esac; done
+  # then the deps' archives: a static library carries no record of its own deps (Pillow's
+  # -lwebp needs libsharpyuv, -lfreetype libpng; only members something needs are pulled),
+  # never an interpreter library the runtime exports
+  exec $L/clang "\${F[@]}" "\${S2[@]}" "\${D2[@]}" -nostdlib -Wl,--no-entry,--experimental-pic,--shared-memory,--allow-undefined-file=\$WALI_SIDE $SIDEOBJ
 fi
 if [ \$link = 1 ] && [ \$shared = 1 ]; then
   objs=()
@@ -375,6 +382,8 @@ cpu = 'wasm32'
 endian = 'little'
 [properties]
 needs_exe_wrapper = true
+# (numpy: clang's wasm32 long double is IEEE binary128)
+longdouble_format = 'IEEE_QUAD_LE'
 EOF
 cat > bin/abuild-meson <<EOF
 #!/bin/bash
