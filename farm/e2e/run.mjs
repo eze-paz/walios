@@ -104,7 +104,13 @@ function judge(c, r) {
   if (/\[host\] trap|RuntimeError|unreachable|memory access out of bounds/.test(out)) return ['trap', (out.match(/\[host\] trap[^\n]*/) || [out.slice(-300)])[0]];
   if (c.kind === 'exe') {
     const body = out.replace(/^[\s\S]*?__rc=\d+\n?/, '').replace(/\[host\][^\n]*\n?/g, '');
-    if (!c.expect || norm(body).includes(norm(c.expect).slice(0, 60))) return ['pass', ''];
+    // The program's own name is not the output: the Node host ran it as argv0 = the package
+    // name ("expat using expat_2.9.0"), walios as the real binary ("xmlwf using ..."). Drop the
+    // first word and every word naming the program, then compare what follows.
+    const words = (s) => norm(s).split(' ').filter((w, i) => { const b = w.replace(/[:,.'"]+$/, '').replace(/^['"]/, '');
+      return i > 0 && !b.includes('/bin/') && b !== c.pkg && b !== c.prog; }).join(' ');
+    const want = words(c.expect).slice(0, 60);
+    if (!c.expect || (want ? words(body).includes(want) : norm(body).includes(norm(c.expect)))) return ['pass', ''];
     return ['differs', norm(body).slice(0, 200) + '  [node host: ' + norm(c.expect).slice(0, 120) + ']'];
   }
   if (c.kind === 'py') {

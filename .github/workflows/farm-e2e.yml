@@ -51,7 +51,7 @@ jobs:
         with: { node-version: 22 }
       - name: Playwright
         run: |
-          cd farm/e2e && npm init -y >/dev/null && npm i --no-save playwright@1.49.1 >/dev/null
+          cd farm/e2e && npm init -y >/dev/null && npm i --no-save playwright@1.63.0 >/dev/null
           npx playwright install --with-deps chromium >/dev/null
       - name: Inputs
         run: |
