@@ -82,7 +82,23 @@ set_v() { local k="$1" v="$2"; sed -i "s|^# ${k} is not set|${k}=${v}|; s|^${k}=
 
 # (the farm toolchain's PATH makes `cc`/`gcc` the wasm compiler: kconfig gets the real one)
 export HOSTCC=/usr/bin/gcc
-make HOSTCC=$HOSTCC allnoconfig >"$R/allnoconfig.log" 2>&1
+# Start from upstream's DEFAULT config, then switch off every applet not in applets.txt.
+# This used to start from allnoconfig, which also turned off every applet's optional
+# features -- and the .config the box's binary was really built from (edited in place in a
+# WSL tree, never committed) had them on. A rebuild from allnoconfig silently lost, among
+# others, nearly all of find (-type -exec -mtime -size -newer -maxdepth -delete -regex ...),
+# sort -t/-k (FEATURE_SORT_BIG) and hush's loops/trap/wait. Each applet's config symbol is
+# read from its //applet:IF_<SYM>(...APPLET...(name ...)) line (wrappers like
+# IF_NOT_MODPROBE_SMALL( allowed), so a symbol stays on only if one of its applets is wanted.
+# The switch-off runs LAST, just before oldconfig, so the set_y lists below cannot bring an
+# unwanted applet back (PING6 is in one; under allnoconfig it only vanished because IPv6 was off).
+make HOSTCC=$HOSTCC defconfig >"$R/defconfig.log" 2>&1
+grep -rhoE '^//applet:IF_[A-Z0-9_]+\( *(IF_[A-Z0-9_]+\( *)*APPLET[A-Z_]*\( *[^, ]+' --include=*.c . \
+  | sed -E 's|^//applet:IF_([A-Z0-9_]+)\( *(IF_[A-Z0-9_]+\( *)*APPLET[A-Z_]*\( *|\1 |' > "$R/applet-syms.txt"
+unwanted_applets_off() {
+  awk 'NR==FNR { want[$1] = 1; next } { sym[$1] = sym[$1] || ($2 in want) } END { for (s in sym) if (!sym[s]) print s }' \
+    "$HERE/applets.txt" "$R/applet-syms.txt" | while read -r s; do set_n "CONFIG_$s"; done
+}
 while read -r a; do set_y "CONFIG_$(echo "$a" | tr 'a-z-' 'A-Z_')"; done < "$HERE/applets.txt"
 set_n CONFIG_NOMMU                 # we have real fork() now (Asyncify substrate)
 set_y CONFIG_LFS                   # off_t is 64-bit on every walios ABI (allnoconfig turns it off)
@@ -165,14 +181,49 @@ for a in CONFIG_REV CONFIG_TR CONFIG_ID CONFIG_LESS CONFIG_VI CONFIG_CLEAR CONFI
 # fallback whenever the helper is missing. Off = loud failure.
 set_y CONFIG_FEATURE_WGET_OPENSSL
 set_n CONFIG_FEATURE_WGET_HTTPS; set_n CONFIG_TLS; set_n CONFIG_SSL_CLIENT
+# defconfig differences from the binary the box served (its strings): nslookup is the small
+# one that asks libc's resolver (the guest's DNS goes through the WISP relay; the BIG one
+# speaks raw UDP to a nameserver), and hush keeps its bash extensions (${x:1:2} and friends).
+set_n CONFIG_FEATURE_NSLOOKUP_BIG
+set_y CONFIG_HUSH_BASH_COMPAT
+# cp/tar/cat copy with sendfile(2) under this; the kernel has no sendfile, so every copy printed
+# "unimplemented syscall SYS_sendfile" before falling back to read/write (the served binary had it off).
+set_n CONFIG_FEATURE_USE_SENDFILE
 
+unwanted_applets_off
 { yes "" || true; } | make HOSTCC=$HOSTCC oldconfig >"$R/oldcfg.log" 2>&1
 for k in ASH SH_IS_ASH FEATURE_EDITING FEATURE_LS_COLOR BASE64; do grep -q "^CONFIG_$k=y" .config || { echo "busybox .config: CONFIG_$k is off" >&2; exit 1; }; done
 ! grep -q '^CONFIG_NOMMU=y' .config || { echo "busybox .config: CONFIG_NOMMU is on" >&2; exit 1; }
 make HOSTCC=$HOSTCC clean >/dev/null 2>&1   # a new libc.a must reach every object: no stale .o from the old link
 make CC="$CC" LD="$LD" HOSTCC=$HOSTCC LDFLAGS="" SKIP_STRIP=y -j"$(nproc)" busybox >"$R/make.log" 2>&1 ||
   { grep -iE "error:|undefined symbol" "$R/make.log" | tail -6 >&2; exit 1; }
-"$WO" --asyncify --pass-arg=asyncify-imports@wali.SYS_fork busybox -o "$R/busybox.wasm"
+# Asyncify only what can be on the stack at fork(). By default Asyncify assumes any indirect
+# call may unwind, which instruments most of busybox and slows every applet (measured in the
+# browser, this config: sort -n of 200k shuffled lines 6.9/6.4s -> 3.5/4.6s, sort 1.6/1.3s ->
+# 0.9/0.9s; binary 2.05MB -> 0.87MB). ignore-indirect drops that assumption, so each place that
+# calls a fork-capable function THROUGH A POINTER must be named (propagate-addlist then covers
+# its callers):
+#   main (from _start), run_applet_no_and_exit / run_applet_main   the applet table (<x>_main)
+#   evaltree (evalfn), evalbltin (builtins)                        ash: eval*, dotcmd, commandcmd...
+#   run_pipe, exec_builtin*                                        hush: builtin_eval/source/read/wait/exit
+#   recursive_action*, fileAction*, exec_actions                   find: the walker and -exec
+#   get_header_tar                                                 tar --to-command (data_extract_to_command)
+#   xargs_main, child                                              their own callbacks, kept to be safe
+# Left out on purpose: xfunc_die (calling it from every die path instrumented nearly
+# everything again, 1.56MB). It only reaches fork through hush's restore_ttypgrp_and__exit,
+# which sets G.exiting first so the EXIT trap -- the part that could fork -- never runs.
+# fork-entries.txt is the list of fork-capable pointer targets this was checked against;
+# the build stops if it changes. A frame missed anyway does not misbehave quietly: the unwind
+# traps "unreachable" -- tests/walios/e2e-busybox-fork-paths.mjs walks the fork paths.
+"$R/binaryen-version_$BINARYEN_VER/bin/wasm-dis" busybox -o "$R/busybox.wat"
+node "$HERE/fork-entries.mjs" "$R/busybox.wat" > "$R/fork-entries.txt"
+diff "$HERE/fork-entries.txt" "$R/fork-entries.txt" >&2 ||
+  { echo "busybox: the functions reachable through a pointer that can fork() changed (< expected, > now):" \
+         "give each new one's indirect caller to asyncify-addlist below, then update fork-entries.txt" >&2; exit 1; }
+"$WO" --asyncify --pass-arg=asyncify-imports@wali.SYS_fork --pass-arg=asyncify-ignore-indirect \
+  --pass-arg=asyncify-propagate-addlist \
+  '--pass-arg=asyncify-addlist@main,run_applet_no_and_exit,run_applet_main,evaltree,evalbltin,run_pipe,exec_builtin*,recursive_action*,fileAction*,exec_actions,get_header_tar,xargs_main,child' \
+  busybox -o "$R/busybox.wasm"
 
 # The applet LINK LIST. Real busybox is installed with `busybox --install -s`, which drops a
 # symlink per applet into /bin and /usr/bin. walios never did that, so /bin/sed and friends
