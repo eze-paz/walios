@@ -56,6 +56,13 @@ sed -E -i '/CASE_SYSCALL \((poll|ppoll),/ s/va_arg\(ap, unsigned long long\)/va_
 sed -i '/printf("Invalid syscall var call -- NR/d' "$A/syscall_var.h"
 grep -q 'Invalid syscall var call' "$A/syscall_var.h" && { echo "sysroot32: the syscall_var.h printf is still there" >&2; exit 1; }
 mkdir -p "$M/src/unistd/wasm32"; cp "$HERE/src/lseek.c" "$M/src/unistd/wasm32/lseek.c"
+# _start ends in exit(), not __wali_proc_exit(<main's status>). WALI's crt1-command.c never
+# called exit(), so atexit handlers never ran and stdio was never flushed: a program that
+# returns from main with stdout on a pipe or a file lost everything still buffered (GNU tree:
+# `tree d | wc -l` -> 1, only the line before its first fflush). __wali_cleanup is
+# __wali_deinit, which the walios kernel answers with 0, so nothing else is skipped.
+sed -i -e '1i #include <stdlib.h>' -e 's/^  __wali_proc_exit(r);$/  exit(r);/' "$M/crt/crt1-command.c"
+grep -q '^  exit(r);$' "$M/crt/crt1-command.c" || { echo "sysroot32: crt1-command.c _start still skips exit()" >&2; exit 1; }
 # The ABI marker: a `wali.abi` custom section the kernel reads to pick struct layouts. In the
 # start files (clang's WALI driver links crt1-command.o) and in the startup code every program
 # runs (__main_void, __libc_start_main), for programs with their own start files. Only
