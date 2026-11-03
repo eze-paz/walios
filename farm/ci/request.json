@@ -3,5 +3,5 @@
   "max": 80,
   "chunk": 3,
   "publish": false,
-  "note": "branch: rsync (+xxhash scalar, zstd) on toolchain-2026-11-03-r"
+  "note": "branch: rsync (+xxhash, zstd) on toolchain-2026-11-03-r; no arm_*.h, PGO flags dropped"
 }
