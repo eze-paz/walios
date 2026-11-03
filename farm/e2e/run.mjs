@@ -152,6 +152,26 @@ const SYSCFG = '_sysconfigdata__linux_x86_64-linux-gnu.py';
 
 let pkgs = Object.keys(P).filter((k) => ['exe', 'mod'].includes(P[k].kind) && (!CATALOG || CATALOG.has(k)) && (!ONLY || ONLY.has(k))).sort();
 pkgs = pkgs.filter((_, i) => i % NSHARD === SHARD);
+// --fetch <base url>: download only this shard's files (and its modules' deps) from the
+// release's public download URLs -- the Releases API rate-limits a dozen shards pulling ~700 assets.
+const FETCH = arg('fetch');
+if (FETCH) {
+  const need = new Set();
+  for (const k of pkgs) for (const d of [k, ...(P[k].kind === 'mod' ? modDeps(k) : [])]) if (P[d].file) need.add(P[d].file);
+  const todo = [...need].filter((f) => !fs.existsSync(path.join(FARM, f)));
+  let n = 0;
+  await Promise.all(Array.from({ length: 8 }, async () => {
+    while (todo.length) {
+      const f = todo.pop();
+      for (let t = 0; t < 5; t++) {
+        try { const r = await fetch(FETCH.replace(/\/?$/, '/') + f); if (!r.ok) throw new Error('HTTP ' + r.status);
+          fs.writeFileSync(path.join(FARM, f), Buffer.from(await r.arrayBuffer())); n++; break; }
+        catch (e) { if (t === 4) console.log('fetch failed', f, e.message); else await new Promise((r) => setTimeout(r, 3000 * (t + 1))); }
+      }
+    }
+  }));
+  console.log(`fetched ${n}/${need.size} files for ${pkgs.length} packages`);
+}
 const cases = pkgs.map(buildCase).filter(Boolean);
 const require = createRequire(import.meta.url);
 let chromium;

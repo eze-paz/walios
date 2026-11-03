@@ -56,12 +56,15 @@ jobs:
       - name: Inputs
         run: |
           T() { node -e "console.log(JSON.parse(process.env.REQ)['$1'])"; }
-          get() { for t in 1 2 3 4 5; do gh release download "$@" --clobber && return 0; sleep 20; done; return 1; }
+          # public download URLs, not the Releases API (a dozen shards hit its rate limit);
+          # the farm files themselves are fetched by run.mjs --fetch, only the shard's own
+          get() { tag=$1 dir=$2; shift 2; for f in "$@"; do
+            curl -fsSL --retry 5 --retry-delay 5 -o "$dir/$f" "https://github.com/${{ github.repository }}/releases/download/$tag/$f" || return 1; done; }
           mkdir -p dl/farm dl/rt dl/kernel
-          get "$(T tag)" -D dl/farm -p index.json -p '*.wasm' -p '*.mod.tar.gz'
-          get "$(T busybox)" -D dl/rt -p busybox.wasm -p busybox.links
-          get "$(T python)" -D dl/rt -p python_cxx.wasm -p python-ext.tar.gz -p '_sysconfigdata__linux_x86_64-linux-gnu.py'
-          get "$(T perl_lua)" -D dl/rt -p perl.wasm -p perllib.tar.gz -p lua.wasm
+          get "$(T tag)" dl/farm index.json
+          get "$(T busybox)" dl/rt busybox.wasm busybox.links
+          get "$(T python)" dl/rt python_cxx.wasm python-ext.tar.gz _sysconfigdata__linux_x86_64-linux-gnu.py
+          get "$(T perl_lua)" dl/rt perl.wasm perllib.tar.gz lua.wasm
           cp browser/rootfs.tar.gz browser/pylib.tar.gz dl/rt/
           cp farm/e2e/kernel/*.js dl/kernel/
           ls -la dl/rt dl/kernel; ls dl/farm | wc -l
@@ -69,7 +72,8 @@ jobs:
         run: |
           N=$(node -e "console.log(JSON.parse(process.env.REQ).shards || 8)")
           node farm/e2e/run.mjs --farm dl/farm --rt dl/rt --kernel dl/kernel --catalog farm/ci/catalog.txt \
-            --shard ${{ matrix.shard }}/$N --out e2e-${{ matrix.shard }}.json
+            --shard ${{ matrix.shard }}/$N --out e2e-${{ matrix.shard }}.json \
+            --fetch "https://github.com/${{ github.repository }}/releases/download/$(node -e "console.log(JSON.parse(process.env.REQ).tag)")"
       - uses: actions/upload-artifact@v4
         if: always()
         with: { name: 'e2e-${{ matrix.shard }}', path: 'e2e-${{ matrix.shard }}.json', if-no-files-found: ignore, retention-days: 14 }
