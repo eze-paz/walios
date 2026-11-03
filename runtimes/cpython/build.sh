@@ -55,6 +55,11 @@ WFLAGS="$TF --sysroot=$SYSROOT -nostdlibinc -isystem $SYSROOT/include -D_GNU_SOU
 
 # ---- sources ----
 [ -d Python-$PY_VER ] || { curl -sSL https://www.python.org/ftp/python/$PY_VER/Python-$PY_VER.tar.xz | tar xJ; }
+# The call trampoline (wali_trampoline.c) in front of CPython's Emscripten-only one.
+TH=Python-$PY_VER/Include/internal/pycore_emscripten_trampoline.h
+cp "$HERE/wali_trampoline.h" Python-$PY_VER/Include/internal/
+grep -q wali_trampoline.h $TH || sed -i 's|^#if defined(__EMSCRIPTEN__) && defined(PY_CALL_TRAMPOLINE)$|#if defined(__wali__)\n#include "wali_trampoline.h"\n#elif defined(__EMSCRIPTEN__) \&\& defined(PY_CALL_TRAMPOLINE)|' $TH
+grep -q wali_trampoline.h $TH || { echo "build.sh: could not patch $TH" >&2; exit 1; }
 [ -d zlib-$ZLIB_VER ] || { curl -sSL https://zlib.net/fossils/zlib-$ZLIB_VER.tar.gz | tar xz; }
 if [ ! -d llvm-src ]; then
   git clone -q --depth 1 --branch llvmorg-$LLVM_VER --filter=blob:none --sparse https://github.com/llvm/llvm-project.git llvm-src
@@ -110,6 +115,8 @@ rm -f libz-wali.a && $L/llvm-ar rcs libz-wali.a zobj/*.o
 
 # ---- walios glue ----
 for c in wali_dlfcn wali_start wali_nofork wali_spawn; do $L/clang $WFLAGS -c "$HERE/$c.c" -o $c.o; done
+# (ref.test on a table entry: needs wasm GC, which every engine with JSPI has)
+$L/clang $WFLAGS -mreference-types -mgc -c "$HERE/wali_trampoline.c" -o wali_trampoline.o
 $L/clang $TF -matomics -mbulk-memory -mexception-handling -c "$HERE/cpp_exc.s" -o cpp_exc.o
 sed 's/^/--export-if-defined=/' "$HERE/main-exports.txt" > exports.rsp
 # libc: every symbol of the sysroot's libc.a that can link into a walios program
@@ -134,7 +141,7 @@ PKG_CONFIG_LIBDIR=/nonexistent PKG_CONFIG_PATH= CONFIG_SITE="$HERE/config.site" 
   ../Python-$PY_VER/configure --host=wasm32-unknown-linux-musl --build=x86_64-pc-linux-gnu \
     --with-build-python=$R/host-prefix/bin/python3.14 --prefix=/py --disable-shared --without-ensurepip \
     --with-computed-gotos=no >../cross-cfg.log 2>&1
-LF="-Wl,--export-dynamic -Wl,@$R/exports.rsp -Wl,@$R/libc-link.rsp -Wl,--export=__wali_fork_begin -Wl,--wrap=__main_void -Wl,--whole-archive $R/libcxx-prefix/lib/libc++.a $R/libcxx-prefix/lib/libc++abi.a $R/libcxx-prefix/lib/libunwind.a $R/cpp_exc.o $R/wali_dlfcn.o $R/wali_start.o $R/wali_nofork.o $R/wali_spawn.o $R/libc-ldfix.a $R/libz-wali.a -Wl,--no-whole-archive"
+LF="-Wl,--export-dynamic -Wl,@$R/exports.rsp -Wl,@$R/libc-link.rsp -Wl,--export=__wali_fork_begin -Wl,--wrap=__main_void -Wl,--whole-archive $R/libcxx-prefix/lib/libc++.a $R/libcxx-prefix/lib/libc++abi.a $R/libcxx-prefix/lib/libunwind.a $R/cpp_exc.o $R/wali_dlfcn.o $R/wali_start.o $R/wali_nofork.o $R/wali_spawn.o $R/wali_trampoline.o $R/libc-ldfix.a $R/libz-wali.a -Wl,--no-whole-archive"
 sed -i -e "s/^SOABI=.*/SOABI=\t\tcpython-314-x86_64-linux-gnu/" \
        -e "s/^EXT_SUFFIX=.*/EXT_SUFFIX=\t.cpython-314-x86_64-linux-gnu.so/" \
        -e "s/^MULTIARCH=.*/MULTIARCH=\tx86_64-linux-gnu/" \
