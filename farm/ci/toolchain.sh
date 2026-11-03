@@ -16,6 +16,9 @@ HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)   # before any cd: the path m
 TC=$(realpath -m "${1:?usage: toolchain.sh <dir> [pkgs-tag] [toolchain-tag]}")
 TAG=${2:-pkgs-2026-10-31}
 XTAG=${3:-toolchain-2026-10-31}
+# the ILP32 sysroot: toolchain-2026-10-31's with OpenSSL rebuilt position-independent
+# (runtimes.yml openssl job, sandpie walios/build/sysroot32 OPENSSL_ONLY)
+S32TAG=${WALI_SYSROOT32_TAG:-runtimes-ilp32-2026-11-03-9}
 ABI=${WALI_ABI:-ilp32}
 TGT=--target=wasm32-unknown-linux-muslwali
 [ "$ABI" = ilp32 ] && TGT="$TGT -Xclang -triple -Xclang wasm32-unknown-linux-musl -fno-pic"
@@ -34,7 +37,7 @@ if [ ! -x $P/bin/clang ]; then
 fi
 if [ ! -f sysroot/lib/libc.a ]; then
   mkdir -p sysroot
-  if [ "$ABI" = ilp32 ]; then fetch $REL/$XTAG/wali32-sysroot.tar.gz sr.tgz   # musl, libc++, openssl, builtins
+  if [ "$ABI" = ilp32 ]; then fetch $REL/$S32TAG/wali32-sysroot.tar.gz sr.tgz   # musl, libc++, openssl, builtins
   else fetch $REL/$TAG/wali-sysroot.tar.gz sr.tgz; fi
   tar xzf sr.tgz -C sysroot && rm sr.tgz
 fi
