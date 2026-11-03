@@ -1,6 +1,7 @@
 {
-  "all": true,
-  "max": 3000,
+  "pkgs": "perl-cgi-fast perl-class-load perl-compress-raw-bzip2 perl-compress-raw-zlib perl-convert-tnef perl-crypt-eksblowfish perl-crypt-openssl-bignum perl-crypt-openssl-random perl-crypt-openssl-rsa perl-crypt-ssleay perl-data-guid perl-data-optlist perl-data-page perl-datetime perl-datetime-format-mail perl-datetime-format-w3cdtf perl-dbd-mysql perl-dbd-odbc perl-dbd-pg perl-dbd-sqlite perl-dbix-searchbuilder perl-devel-checklib perl-fcgi perl-file-rsync perl-gd perl-gdgraph perl-gdtextutil perl-html-formatter perl-html-formattext-withlinks-andtables perl-html-mason perl-io-socket-ssl perl-io-tty perl-list-allutils perl-list-moreutils-xs perl-list-someutils-xs perl-lwp-protocol-https perl-mail-spf perl-meta perl-mixin-linewise perl-net-dns perl-net-dns-resolver-mock perl-net-dns-resolver-programmable perl-net-libidn perl-net-rblclient perl-net-smtp-ssl perl-net-smtp-tls-butmaintained perl-net-ssleay perl-package-deprecationmanager perl-params-classify perl-params-util perl-params-validate perl-pod-coverage-trustpod perl-pod-eventual perl-socket6 perl-sub-exporter perl-syntax-keyword-try perl-term-readkey perl-text-vfile-asdata perl-tk perl-x10 perl-xml-parser perl-xml-xpath perl-xs-parse-keyword perl-yaml-syck",
+  "max": 600,
+  "chunk": 3,
   "publish": true,
-  "note": "R34: full catalog, ILP32 + side TLS + simd128 + xsimd emulated + python packages in overlays (numpy headers for pandas)"
+  "note": "R35: perl XS -- host perl CORE headers remapped, side links get the library search path"
 }

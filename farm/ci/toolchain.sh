@@ -153,6 +153,10 @@ for a in "\$@"; do case "\$a" in
   -I/usr/include/*|-I/usr/local/include/*|-L/usr/lib/*|-L/usr/local/lib/*)
     p=\${a:2}; [ -n "\${WALI_OVERLAY:-}" ] && [ -d "\$WALI_OVERLAY\$p" ] && A+=("\${a:0:2}\$WALI_OVERLAY\$p");;
   -I/usr/include|-I/usr/local/include|-L/usr/lib|-L/usr/local/lib|-L/lib|-L/lib/*|-L/lib64) ;;
+  # the build host perl's C headers (ExtUtils::CBuilder and Module::Build read the host Config:
+  # Params::Util's "can I use the Perl API" probe, Params::Validate, YAML::Syck): walios perl's
+  -I/usr/lib/*/perl/*/CORE|-I/usr/lib/perl5/*/CORE|-I/usr/lib/*/perl5/*/CORE|-I/usr/local/lib/*/perl/*/CORE)
+    A+=(-I$TC/perl-core/5.44.0/wasm32-linux/CORE);;
   -Wl,*)
     # ELF-linker options wasm-ld rejects, filtered token by token: one -Wl, can carry several
     # (-Wl,-Map=x.map,--cref). -z/-soname/-rpath/... take the next token as their value.
@@ -171,11 +175,14 @@ if [ \$link = 1 ] && [ \$shared = 1 ] && [ -n "\${WALI_SIDE:-}" ]; then
   # libc, libm and the runtime's own library come from the runtime (its exports), not a copy.
   S2=(); for a in "\${A[@]}"; do case "\$a" in -lc|-lm|-ldl|-lpthread|-lrt|-llua*|-lperl) ;; *) S2+=("\$a");; esac; done
   D2=(); for a in \${WALI_OVERLAY_LIBS:-}; do case "\$a" in */liblua*.a|*/libperl.a|*/libpython*.a) ;; *) D2+=("\$a");; esac; done
+  # the library search path a program link gets (sysroot: openssl; the overlay: deps' libz,
+  # libbz2...), so a module's own -lssl / -lz resolves (Net::SSLeay, Compress::Raw::Zlib)
+  LP=(-L$S/lib); for a in \${WALI_EXTRA_LDFLAGS:-}; do case "\$a" in -L*) LP+=("\$a");; esac; done
   # then the deps' archives: a static library carries no record of its own deps (Pillow's
   # -lwebp needs libsharpyuv, -lfreetype libpng; only members something needs are pulled),
   # never an interpreter library the runtime exports. A module with thread-locals gets its own
   # __tls_base, 0 until the loader runs __wasm_init_tls on a block (wasm-ld makes it hidden).
-  exec $L/clang "\${F[@]}" "\${S2[@]}" "\${D2[@]}" $S/lib/libwali-sideunwind.a -nostdlib -Wl,--no-entry,--experimental-pic,--shared-memory,--allow-undefined-file=\$WALI_SIDE,--export-if-defined=__wasm_init_tls,--export-if-defined=__tls_size,--export-if-defined=__tls_align $SIDEOBJ
+  exec $L/clang "\${F[@]}" "\${LP[@]}" "\${S2[@]}" "\${D2[@]}" $S/lib/libwali-sideunwind.a -nostdlib -Wl,--no-entry,--experimental-pic,--shared-memory,--allow-undefined-file=\$WALI_SIDE,--export-if-defined=__wasm_init_tls,--export-if-defined=__tls_size,--export-if-defined=__tls_align $SIDEOBJ
 fi
 if [ \$link = 1 ] && [ \$shared = 1 ]; then
   objs=()
