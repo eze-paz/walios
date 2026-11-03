@@ -128,9 +128,11 @@ done
 # _MPFR_PREC_FORMAT=2: MPFR's precision type follows GMP's mp_size_t (long), but a precision
 # in bytes must fit size_t, which is 32-bit here (MPFR's own static assertion); int is the
 # setting MPFR provides for that. Global, so every program including mpfr.h sees the same ABI.
-# -msimd128: the baseline vector unit, as SSE2 is on x86-64 (every engine with JSPI or COI has it);
-# without one xsimd defines no arch at all and pandas' scalar kernels don't compile.
-F=($TGT --sysroot=$S -nostdlibinc $cxx -isystem $S/include -D_GNU_SOURCE
+# -msimd128: the baseline vector unit, as SSE2 is on x86-64 (every engine with JSPI or COI has it).
+# XSIMD_WITH_EMULATED=1: xsimd only takes its wasm backend under Emscripten, and with no
+# architecture it declares no API at all (pandas' scalar kernels use it); this is its own
+# switch for the portable one.
+F=($TGT --sysroot=$S -nostdlibinc $cxx -isystem $S/include -D_GNU_SOURCE -DXSIMD_WITH_EMULATED=1
    -D__STDC_ISO_10646__=201206L -O2 -mllvm -wasm-enable-sjlj -fwasm-exceptions -matomics -mbulk-memory -mexception-handling -msimd128 -pthread
    -Wno-implicit-function-declaration -Wno-int-conversion -Wno-incompatible-pointer-types
    -Wno-incompatible-function-pointer-types -Wno-unused-command-line-argument -Wno-ignored-optimization-argument
