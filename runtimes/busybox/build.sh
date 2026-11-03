@@ -181,6 +181,11 @@ for a in CONFIG_REV CONFIG_TR CONFIG_ID CONFIG_LESS CONFIG_VI CONFIG_CLEAR CONFI
 # fallback whenever the helper is missing. Off = loud failure.
 set_y CONFIG_FEATURE_WGET_OPENSSL
 set_n CONFIG_FEATURE_WGET_HTTPS; set_n CONFIG_TLS; set_n CONFIG_SSL_CLIENT
+# defconfig differences from the binary the box served (its strings): nslookup is the small
+# one that asks libc's resolver (the guest's DNS goes through the WISP relay; the BIG one
+# speaks raw UDP to a nameserver), and hush keeps its bash extensions (${x:1:2} and friends).
+set_n CONFIG_FEATURE_NSLOOKUP_BIG
+set_y CONFIG_HUSH_BASH_COMPAT
 
 unwanted_applets_off
 { yes "" || true; } | make HOSTCC=$HOSTCC oldconfig >"$R/oldcfg.log" 2>&1
@@ -189,7 +194,18 @@ for k in ASH SH_IS_ASH FEATURE_EDITING FEATURE_LS_COLOR BASE64; do grep -q "^CON
 make HOSTCC=$HOSTCC clean >/dev/null 2>&1   # a new libc.a must reach every object: no stale .o from the old link
 make CC="$CC" LD="$LD" HOSTCC=$HOSTCC LDFLAGS="" SKIP_STRIP=y -j"$(nproc)" busybox >"$R/make.log" 2>&1 ||
   { grep -iE "error:|undefined symbol" "$R/make.log" | tail -6 >&2; exit 1; }
-"$WO" --asyncify --pass-arg=asyncify-imports@wali.SYS_fork busybox -o "$R/busybox.wasm"
+# Asyncify only what can be on the stack at fork(). By default Asyncify assumes any indirect
+# call may unwind, which instruments most of busybox and slows every applet (measured in the
+# browser: sort -n of 200k lines 4.4s -> 2.2s, awk printing 50k lines 690 -> 445ms, a shell
+# loop 222 -> 152ms, binary 1.73MB -> 0.67MB). ignore-indirect drops that assumption, so the
+# frames ABOVE fork that are entered through a function pointer must be named: main (from
+# _start), run_applet_no_and_exit (the applet table), ash's evaltree (evalfn) and evalbltin
+# (builtins: eval / . that fork); propagate-addlist instruments their callers too. A frame
+# missed here does not misbehave quietly: the unwind hits it and the guest traps
+# "unreachable" -- tests/walios/e2e-busybox-fork-paths.mjs walks every fork path.
+"$WO" --asyncify --pass-arg=asyncify-imports@wali.SYS_fork --pass-arg=asyncify-ignore-indirect \
+  --pass-arg=asyncify-propagate-addlist --pass-arg=asyncify-addlist@main,run_applet_no_and_exit,evaltree,evalbltin \
+  busybox -o "$R/busybox.wasm"
 
 # The applet LINK LIST. Real busybox is installed with `busybox --install -s`, which drops a
 # symlink per applet into /bin and /usr/bin. walios never did that, so /bin/sed and friends
