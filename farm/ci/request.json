@@ -1,7 +1,7 @@
 {
-  "pkgs": "perl-crypt-openssl-bignum perl-crypt-openssl-random perl-crypt-openssl-rsa perl-net-ssleay perl-fcgi perl-io-socket-ssl perl-lwp-protocol-https perl-net-smtp-ssl perl-net-smtp-tls-butmaintained perl-cgi-fast perl-crypt-ssleay py3-pillow py3-lxml py3-kiwisolver perl-json-xs lua-lpeg perl-compress-raw-zlib",
-  "max": 600,
+  "pkgs": "rsync file xz tree",
+  "max": 80,
   "chunk": 3,
-  "publish": true,
-  "note": "R36: PIC openssl (sysroot runtimes-ilp32-2026-11-03-9) + builtins in side links; canaries pillow lxml kiwisolver json-xs lpeg"
+  "publish": false,
+  "note": "branch: rsync/file/xz/tree on toolchain-2026-11-03-r (ILP32 sysroot: quiet syscall(), _start calls exit())"
 }

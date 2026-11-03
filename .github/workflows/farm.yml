@@ -7,7 +7,7 @@ on:
   # A commit that changes farm/ci/request.json runs the farm with the inputs in it (same
   # keys as below), so a run can be asked for without Actions API rights.
   push:
-    branches: [main]
+    branches: [claude/flush-build]
     paths: ['farm/ci/request.json']
   workflow_dispatch:
     inputs:
@@ -24,12 +24,13 @@ permissions:
 # A newer request replaces a run still in progress (the token that triggers runs cannot
 # cancel them through the API).
 concurrency:
-  group: farm
+  group: farm-claude-flush-build
   cancel-in-progress: true
 
 env:
   TC: ${{ github.workspace }}/../wali-tc
-  TC_KEY: wali-tc-llvm22.1.3-pkgs-2026-10-31-x1-v30-ilp32
+  TC_KEY: wali-tc-llvm22.1.3-pkgs-2026-10-31-x1-v30-ilp32-r
+  WALI_SYSROOT32_TAG: toolchain-2026-11-03-r
 
 jobs:
   plan:
