@@ -95,7 +95,9 @@ PYPKG=""; grep -qE 'gpep517|python3 -m (build|installer)|python3 setup\.py' "$bd
   # (setuptools/meson take these over the compiler recorded in the host Python's sysconfig)
   export LDSHARED="$CC -shared" LDCXXSHARED="$CXX -shared"
   # (meson-python runs $MESON, not the first meson on PATH: the runner's pip one, a native build)
-  export MESON="$WALI_TC/bin/meson"; }
+  export MESON="$WALI_TC/bin/meson"
+  # (a release tarball has no git metadata for setuptools-scm; Alpine's builds set the same)
+  export SETUPTOOLS_SCM_PRETEND_VERSION="$pkgver"; }
 # Its build-time Python deps (makedepends py3-foo, mostly PyPI's foo: build backends,
 # expandvars, cython...) run on the HOST Python: installed from PyPI, wheels only -- an sdist
 # would compile with `gcc`, which here is the wasm compiler.

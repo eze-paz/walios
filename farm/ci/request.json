@@ -3,5 +3,5 @@
   "max": 600,
   "chunk": 3,
   "publish": true,
-  "note": "R31b: unwind-side.c comment closed early"
+  "note": "R32: simd128 baseline, SETUPTOOLS_SCM_PRETEND_VERSION, side TLS exports"
 }
