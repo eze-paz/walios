@@ -11,6 +11,14 @@ W=${1:-$HOME/wali32}; mkdir -p "$W"; W=$(cd "$W" && pwd)
 LLVM=${LLVM:-$HOME/wali-rebuild/LLVM-22.1.3-Linux-X64}; L=$LLVM/bin
 OLD_SYSROOT=${OLD_SYSROOT:-$HOME/wali-rebuild/sysroot}
 S=$W/sysroot M=$W/musl
+TGT=wasm32-unknown-linux-musl
+WFLAGS="--target=$TGT -fno-pic --sysroot=$S -nostdlibinc -isystem $S/include -D_GNU_SOURCE -O2 -mllvm -wasm-enable-sjlj -fwasm-exceptions -matomics -mbulk-memory -mexception-handling"
+
+# OPENSSL_ONLY=<wali32-sysroot.tar.gz>: rebuild only OpenSSL on top of that published sysroot
+# (musl and libc++ stay byte-identical) -- for a change to OpenSSL's flags alone.
+if [ -n "${OPENSSL_ONLY:-}" ]; then
+  rm -rf "$S" && mkdir -p "$S" && tar xzf "$OPENSSL_ONLY" -C "$S"
+else
 
 # --- musl source, pinned
 if [ ! -d "$M/.git" ]; then
@@ -41,6 +49,12 @@ cp "$M/arch/aarch64/bits/float.h" "$A/bits/float.h"
 sed -E -i 's/\blong long\b/@LL@/g; s/\blong\b/long long/g; s/@LL@/long long/g' "$A/syscall_arch.h"
 # syscall() varargs read what an ILP32 caller passes: nfds_t is unsigned long (32-bit now).
 sed -E -i '/CASE_SYSCALL \((poll|ppoll),/ s/va_arg\(ap, unsigned long long\)/va_arg(ap, unsigned long)/' "$A/syscall_var.h"
+# syscall(n, ...) for an n this dispatcher does not map: ENOSYS, SILENTLY, as on Linux. It
+# printf()'d "Invalid syscall var call -- NR <n>" to STDOUT first, so a program probing an
+# optional syscall (xz and file try landlock, NR 444) wrote that line into its output --
+# `x=$(file -b f)` captured it and `xz -dc` would have prefixed the decompressed data.
+sed -i '/printf("Invalid syscall var call -- NR/d' "$A/syscall_var.h"
+grep -q 'Invalid syscall var call' "$A/syscall_var.h" && { echo "sysroot32: the syscall_var.h printf is still there" >&2; exit 1; }
 mkdir -p "$M/src/unistd/wasm32"; cp "$HERE/src/lseek.c" "$M/src/unistd/wasm32/lseek.c"
 # The ABI marker: a `wali.abi` custom section the kernel reads to pick struct layouts. In the
 # start files (clang's WALI driver links crt1-command.o) and in the startup code every program
@@ -97,8 +111,6 @@ EOF
 $L/clang --target=wasm32-unknown-linux-musl -fno-pic --sysroot="$S" -nostdlibinc -isystem "$S/include" -fsyntax-only "$W/abicheck.c"
 
 # --- libc++ / libc++abi / libunwind (the CPython recipe's, for the ILP32 target)
-TGT=wasm32-unknown-linux-musl
-WFLAGS="--target=$TGT -fno-pic --sysroot=$S -nostdlibinc -isystem $S/include -D_GNU_SOURCE -O2 -mllvm -wasm-enable-sjlj -fwasm-exceptions -matomics -mbulk-memory -mexception-handling"
 LLVM_SRC=${LLVM_SRC:-$W/llvm-src}
 if [ ! -d "$LLVM_SRC/libcxx" ]; then
   git clone -q --depth 1 --branch llvmorg-22.1.3 --filter=blob:none --sparse https://github.com/llvm/llvm-project.git "$LLVM_SRC"
@@ -120,14 +132,19 @@ cmake -G Ninja -S "$LLVM_SRC/runtimes" -B "$W/build-libcxx" \
 # The two .S files go through the HOST assembler (x86 ELF); empty on wasm, and wasm-ld
 # rejects the archive with them in it.
 $L/llvm-ar d "$S/lib/libunwind.a" UnwindRegistersRestore.S.o UnwindRegistersSave.S.o
+fi
 
 # --- OpenSSL (the version WALI's sysroot carries); its bignum word is a long. Without
 # _GNU_SOURCE (it would pick glibc's char*-returning strerror_r; musl's returns int), and
 # without the secure heap (mlock + <linux/mman.h>, which this sysroot does not carry).
+# Position-independent: a C module (Net::SSLeay, Crypt::OpenSSL::*, an _ssl-using Python
+# extension) links it into a wasm side module, which rejects non-PIC objects; wasm-ld links
+# PIC objects into a static program too.
 OSSL=3.0.16
+OCFLAGS=${WFLAGS/ -D_GNU_SOURCE/}; OCFLAGS=${OCFLAGS/ -fno-pic/ -fPIC}
 [ -d "$W/openssl-$OSSL" ] || curl -sSfL https://github.com/openssl/openssl/releases/download/openssl-$OSSL/openssl-$OSSL.tar.gz | tar xz -C "$W"
 ( cd "$W/openssl-$OSSL" && { make distclean >/dev/null 2>&1 || true; } &&
-  CC="$L/clang" AR="$L/llvm-ar" RANLIB="$L/llvm-ranlib" CFLAGS="${WFLAGS/ -D_GNU_SOURCE/}" \
+  CC="$L/clang" AR="$L/llvm-ar" RANLIB="$L/llvm-ranlib" CFLAGS="$OCFLAGS" \
   ./Configure linux-generic32 no-asm no-shared no-dso no-async no-engine no-afalgeng no-tests no-ui-console no-secure-memory \
     --prefix="$S" --libdir=lib --openssldir=/etc/ssl >"$W/openssl.log" 2>&1 &&
   make -j"$(nproc)" build_libs >>"$W/openssl.log" 2>&1 && make install_dev >>"$W/openssl.log" 2>&1 ) \
