@@ -16,7 +16,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     env:
-      W: ${{ runner.temp }}/w32
+      W: /home/runner/w32
       OLD: toolchain-2026-10-31
       NEW: toolchain-2026-11-03-r
     steps:
