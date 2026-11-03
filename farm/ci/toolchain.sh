@@ -135,7 +135,10 @@ done
 # XSIMD_WITH_EMULATED=1: xsimd only takes its wasm backend under Emscripten, and with no
 # architecture it declares no API at all (pandas' scalar kernels use it); this is its own
 # switch for the portable one.
-F=($TGT --sysroot=$S -nostdlibinc $cxx -isystem $S/include -D_GNU_SOURCE -DXSIMD_WITH_EMULATED=1
+# XXH_VECTOR=0 (XXH_SCALAR): xxhash takes its NEON path whenever __wasm_simd128__ is set,
+# through an <arm_neon.h> only Emscripten ships -- the compile failed and the farm installed an
+# EMPTY libxxhash.a, so rsync could not find XXH64_createState. Same kind of switch as xsimd's.
+F=($TGT --sysroot=$S -nostdlibinc $cxx -isystem $S/include -D_GNU_SOURCE -DXSIMD_WITH_EMULATED=1 -DXXH_VECTOR=0
    -D__STDC_ISO_10646__=201206L -O2 -mllvm -wasm-enable-sjlj -fwasm-exceptions -matomics -mbulk-memory -mexception-handling -msimd128 -pthread
    -Wno-implicit-function-declaration -Wno-int-conversion -Wno-incompatible-pointer-types
    -Wno-incompatible-function-pointer-types -Wno-unused-command-line-argument -Wno-ignored-optimization-argument

@@ -1,7 +1,7 @@
 {
-  "pkgs": "file",
+  "pkgs": "xxhash zstd rsync",
   "max": 80,
   "chunk": 3,
   "publish": false,
-  "note": "branch: file on toolchain-2026-11-03-r (rerun: the first run died in the runner apt step)"
+  "note": "branch: rsync (+xxhash scalar, zstd) on toolchain-2026-11-03-r"
 }
