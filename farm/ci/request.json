@@ -3,5 +3,5 @@
   "max": 600,
   "chunk": 3,
   "publish": true,
-  "note": "R31: numpy vendored meson, side modules carry their own wasm landing-pad context (C++ exceptions)"
+  "note": "R31b: unwind-side.c comment closed early"
 }

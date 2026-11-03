@@ -5,7 +5,8 @@
  * personality on it. In a PIC side module that TLS variable cannot be the program's
  * (wasm-ld: R_WASM_MEMORY_ADDR_TLS_SLEB against an undefined symbol), so each side module
  * defines its own, together with the one function that reads it; the personality and the
- * _Unwind_Get*/Set* it calls take the context by pointer and stay the program's. Linked into
+ * _Unwind_GetLanguageSpecificData/_Unwind_SetGR/... it calls take the context by pointer and
+ * stay the program's. Linked into
  * side modules (wali-cc with $WALI_SIDE) only when something references them. */
 #include <stdint.h>
 #include <unwind.h>
