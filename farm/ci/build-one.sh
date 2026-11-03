@@ -274,14 +274,18 @@ done
 rmdir -p "$pkgdir/usr/lib/x86_64-linux-gnu/perl5" "$pkgdir/usr/lib/x86_64-linux-gnu/perl" 2>/dev/null
 # Some recipes install libraries under /lib (zlib, ncurses' terminfo libs), not /usr/lib.
 ovdirs=$(cd "$pkgdir" && ls -d usr lib 2>/dev/null)
-[ -n "$ovdirs" ] && tar czf "$OUT/$pkg.overlay.tar.gz" -C "$pkgdir" $ovdirs
+# Wherever the build host's Python installed it: Debian's is usr/local/lib/python3.X/
+# dist-packages, a venv's is under the venv path, Alpine's is usr/lib/python3.X/site-packages.
+pyd=$(cd "$pkgdir" && find . -type d \( -name site-packages -o -name dist-packages \) 2>/dev/null | head -1 | sed 's|^\./||')
+# A Python package reaches later waves too, at Alpine's path: a package built against numpy
+# takes walios numpy's C headers from there (the runner's Python prefix is no overlay dir,
+# so pandas compiled against x86-64 numpy's, where npy_int64 is a long -- 4 bytes here).
+pyov=; [ -n "$pyd" ] && [ -n "$PYPKG" ] && case "$pyd" in usr/*) ;; *) pyov=$pyd;; esac
+[ -n "$ovdirs$pyov" ] && tar czf "$OUT/$pkg.overlay.tar.gz" -C "$pkgdir" ${pyov:+--transform "s|^$pyov|usr/lib/python3/site-packages|"} $ovdirs $pyov
 # A pure-Perl or pure-Lua module (noarch, installs into Alpine's module paths) is a package in
 # its own right on walios: those files, as a tarball `apk add` mounts at /.
 # Python: site-packages built with the runner's Python goes to walios Python's /site-packages
 # (on its PYTHONPATH), C extensions included when every one is a wasm side module.
-# Wherever the build host's Python installed it: Debian's is usr/local/lib/python3.X/
-# dist-packages, a venv's is under the venv path, Alpine's is usr/lib/python3.X/site-packages.
-pyd=$(cd "$pkgdir" && find . -type d \( -name site-packages -o -name dist-packages \) 2>/dev/null | head -1 | sed 's|^\./||')
 if [ -n "$pyd" ] && { [ -n "$PYPKG" ] || [ -n "$NOARCH" ]; }; then   # not a C library's bindings
   for so in $(cd "$pkgdir/$pyd" && find . -name '*.so' -o -name '*.pyd'); do
     node -e "process.exit(WebAssembly.Module.customSections(new WebAssembly.Module(require('fs').readFileSync(process.argv[1])),'dylink.0').length?0:1)" "$pkgdir/$pyd/$so" 2>/dev/null ||

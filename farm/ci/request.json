@@ -1,7 +1,6 @@
 {
-  "pkgs": "py3-pandas",
-  "max": 600,
-  "chunk": 3,
+  "all": true,
+  "max": 3000,
   "publish": true,
-  "note": "R33: pandas with XSIMD_WITH_EMULATED"
+  "note": "R34: full catalog, ILP32 + side TLS + simd128 + xsimd emulated + python packages in overlays (numpy headers for pandas)"
 }
