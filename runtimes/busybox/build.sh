@@ -82,7 +82,19 @@ set_v() { local k="$1" v="$2"; sed -i "s|^# ${k} is not set|${k}=${v}|; s|^${k}=
 
 # (the farm toolchain's PATH makes `cc`/`gcc` the wasm compiler: kconfig gets the real one)
 export HOSTCC=/usr/bin/gcc
-make HOSTCC=$HOSTCC allnoconfig >"$R/allnoconfig.log" 2>&1
+# Start from upstream's DEFAULT config, then switch off every applet not in applets.txt.
+# This used to start from allnoconfig, which also turned off every applet's optional
+# features -- and the .config the box's binary was really built from (edited in place in a
+# WSL tree, never committed) had them on. A rebuild from allnoconfig silently lost, among
+# others, nearly all of find (-type -exec -mtime -size -newer -maxdepth -delete -regex ...),
+# sort -t/-k (FEATURE_SORT_BIG) and hush's loops/trap/wait. Each applet's config symbol is
+# read from its //applet:IF_<SYM>(APPLET...(name ...)) line, so a symbol stays on only if one
+# of its applets is wanted.
+make HOSTCC=$HOSTCC defconfig >"$R/defconfig.log" 2>&1
+grep -rhoE '^//applet:IF_[A-Z0-9_]+\( *APPLET[A-Z_]*\( *[^, ]+' --include=*.c . \
+  | sed -E 's|^//applet:IF_([A-Z0-9_]+)\( *APPLET[A-Z_]*\( *|\1 |' > "$R/applet-syms.txt"
+awk 'NR==FNR { want[$1] = 1; next } { sym[$1] = sym[$1] || ($2 in want) } END { for (s in sym) if (!sym[s]) print s }' \
+  "$HERE/applets.txt" "$R/applet-syms.txt" | while read -r s; do set_n "CONFIG_$s"; done
 while read -r a; do set_y "CONFIG_$(echo "$a" | tr 'a-z-' 'A-Z_')"; done < "$HERE/applets.txt"
 set_n CONFIG_NOMMU                 # we have real fork() now (Asyncify substrate)
 set_y CONFIG_LFS                   # off_t is 64-bit on every walios ABI (allnoconfig turns it off)
