@@ -1,7 +1,7 @@
 {
-  "pkgs": "rsync file xz tree",
+  "pkgs": "file",
   "max": 80,
   "chunk": 3,
   "publish": false,
-  "note": "branch: rsync/file/xz/tree on toolchain-2026-11-03-r (ILP32 sysroot: quiet syscall(), _start calls exit())"
+  "note": "branch: file on toolchain-2026-11-03-r (rerun: the first run died in the runner apt step)"
 }
