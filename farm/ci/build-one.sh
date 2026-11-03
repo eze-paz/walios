@@ -93,7 +93,9 @@ X=""; [ "${WALI_ABI:-ilp32}" = ilp32 ] && X=32
 # exports (python-exports.txt = sandpie walios/build/cpython/main-exports.txt).
 PYPKG=""; grep -qE 'gpep517|python3 -m (build|installer)|python3 setup\.py' "$bdir/APKBUILD" && { PYPKG=1; export WALI_SIDE="$HERE/python-exports$X.txt"
   # (setuptools/meson take these over the compiler recorded in the host Python's sysconfig)
-  export LDSHARED="$CC -shared" LDCXXSHARED="$CXX -shared"; }
+  export LDSHARED="$CC -shared" LDCXXSHARED="$CXX -shared"
+  # (meson-python runs $MESON, not the first meson on PATH: the runner's pip one, a native build)
+  export MESON="$WALI_TC/bin/meson"; }
 # Its build-time Python deps (makedepends py3-foo, mostly PyPI's foo: build backends,
 # expandvars, cython...) run on the HOST Python: installed from PyPI, wheels only -- an sdist
 # would compile with `gcc`, which here is the wasm compiler.
@@ -182,9 +184,9 @@ for f in $(find "$SRC" -name config.guess 2>/dev/null); do chmod u+w "$f"; cp /u
 # source: gnulib's own stdint.h/sys/types.h replacements insist on it.) Its __linux__ checks fire for our
 # -linux-muslwali triple, so give c-stack/sigsegv their no-op paths (what stackvma-none.c is).
 for sv in $(find "$SRC" -name stackvma.c 2>/dev/null); do
-  printf '#include "stackvma.h"\nint sigsegv_get_vma (uintptr_t address, struct vma_struct *vma) { (void)address; (void)vma; return -1; }\n' > "$sv"; done
+  printf '#include <config.h>\n#include "stackvma.h"\nint sigsegv_get_vma (uintptr_t address, struct vma_struct *vma) { (void)address; (void)vma; return -1; }\n' > "$sv"; done
 for vi in $(find "$SRC" -path "*/lib/vma-iter.c" 2>/dev/null); do
-  printf '#include "vma-iter.h"\nint vma_iterate (vma_iterate_callback_fn callback, void *data) { (void)callback; (void)data; return -1; }\n' > "$vi"; done
+  printf '#include <config.h>\n#include "vma-iter.h"\nint vma_iterate (vma_iterate_callback_fn callback, void *data) { (void)callback; (void)data; return -1; }\n' > "$vi"; done
 for f in $(find "$SRC" -name sigsegv.in.h 2>/dev/null); do
   sed -i 's|#endif /\* _SIGSEGV_H \*/|#if defined __wasm__\n# undef HAVE_SIGSEGV_RECOVERY\n# define HAVE_SIGSEGV_RECOVERY 0\n# undef HAVE_STACK_OVERFLOW_RECOVERY\n# define HAVE_STACK_OVERFLOW_RECOVERY 0\n#endif\n#endif /* _SIGSEGV_H */|' "$f"; done
 

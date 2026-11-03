@@ -111,7 +111,9 @@ for d in cc c++; do
   drv=clang; cxx=""; cxxlibs="-lc++ -lc++abi -lunwind -lwali-cppexc"; cxxdefs=""
   [ $d = c++ ] && { drv=clang++; cxx="-isystem $S/include/c++/v1"; cxxlibs="-lc++ -lc++abi -lunwind -lwali-cppexc"
     # pre-C++17 code still uses std::unary_function/binary_function (removed in C++17).
-    cxxdefs="-D_LIBCPP_ENABLE_CXX17_REMOVED_UNARY_BINARY_FUNCTION"; }
+    # -Wno-c++11-narrowing: GCC only warns on a non-constant narrowing in braces, clang errors,
+    # and with 32-bit long more of them narrow (matplotlib: unsigned int -> long).
+    cxxdefs="-D_LIBCPP_ENABLE_CXX17_REMOVED_UNARY_BINARY_FUNCTION -Wno-c++11-narrowing"; }
   cat > bin/wali-$d <<EOF
 #!/bin/bash
 link=1 shared=0 out=a.out
