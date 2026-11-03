@@ -1,1 +1,1 @@
-{ "abi": "ilp32", "only": "busybox", "try": 7 }
+{ "abi": "ilp32", "only": "perl", "try": 8 }

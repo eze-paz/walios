@@ -4,7 +4,8 @@
 name: farm-e2e
 on:
   # A commit that changes farm/e2e/request.json runs this with the inputs in it:
-  #   { "tag": "farm-...", "busybox": "runtimes-...", "python": "runtimes-...", "perl_lua": "runtimes-...", "shards": 8 }
+  #   { "tag": "farm-...", "busybox": "runtimes-...", "python": "runtimes-...", "perl": "runtimes-...", "lua": "runtimes-...", "shards": 8 }
+  # (each runtime release holds only what that run rebuilt, so each runtime names its own)
   push:
     branches: [main]
     paths: ['farm/e2e/request.json']
@@ -29,7 +30,7 @@ jobs:
         run: |
           node -e '
             const r = require("./farm/e2e/request.json"), n = r.shards || 8;
-            for (const k of ["tag", "busybox", "python", "perl_lua"]) if (!r[k]) throw new Error("request.json: " + k);
+            for (const k of ["tag", "busybox", "python", "perl", "lua"]) if (!r[k]) throw new Error("request.json: " + k);
             const fs = require("fs");
             fs.appendFileSync(process.env.GITHUB_OUTPUT, `req=${JSON.stringify(r)}\nshards=${JSON.stringify([...Array(n).keys()])}\n`);
             console.log(r);'
@@ -64,7 +65,8 @@ jobs:
           get "$(T tag)" dl/farm index.json
           get "$(T busybox)" dl/rt busybox.wasm busybox.links
           get "$(T python)" dl/rt python_cxx.wasm python-ext.tar.gz _sysconfigdata__linux_x86_64-linux-gnu.py
-          get "$(T perl_lua)" dl/rt perl.wasm perllib.tar.gz lua.wasm
+          get "$(T perl)" dl/rt perl.wasm perllib.tar.gz
+          get "$(T lua)" dl/rt lua.wasm
           cp browser/rootfs.tar.gz browser/pylib.tar.gz dl/rt/
           cp farm/e2e/kernel/*.js dl/kernel/
           ls -la dl/rt dl/kernel; ls dl/farm | wc -l

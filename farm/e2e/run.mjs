@@ -101,7 +101,7 @@ function buildCase(pkg) {
 function judge(c, r) {
   const out = r.out || '';
   if (r.timeout) return ['timeout', out.slice(-400)];
-  if (/\[host\] trap|RuntimeError|unreachable|memory access out of bounds/.test(out)) return ['trap', (out.match(/\[host\] trap[^\n]*/) || [out.slice(-300)])[0]];
+  if (/\[host\] trap|RuntimeError|unreachable|memory access out of bounds/.test(out)) return ['trap', (out.match(/\[host\] trap[^\n]*/) || [out.slice(0, 300)])[0]];
   if (c.kind === 'exe') {
     const body = out.replace(/^[\s\S]*?__rc=\d+\n?/, '').replace(/\[host\][^\n]*\n?/g, '');
     // The program's own name is not the output: the Node host ran it as argv0 = the package
@@ -116,9 +116,9 @@ function judge(c, r) {
   if (c.kind === 'py') {
     const m = /__imported (\d+) of (\d+)/.exec(out);
     if (m && m[1] === m[2]) return ['pass', ''];
-    return ['fail', (out.match(/IMPORT-FAIL[^\n]*/g) || [out.slice(-300)]).slice(0, 3).join(' | ')];
+    return ['fail', (out.match(/IMPORT-FAIL[^\n]*/g) || [out.slice(0, 300)]).slice(0, 3).join(' | ')];
   }
-  return /__ok /.test(out) ? ['pass', ''] : ['fail', norm(out.replace(/\[host\][^\n]*\n?/g, '')).slice(-300)];
+  return /__ok /.test(out) ? ['pass', ''] : ['fail', norm(out.replace(/\[host\][^\n]*\n?/g, '')).slice(0, 300)];
 }
 
 // ---- server: harness + kernel at /, runtimes at /rt/, farm files at /f/ ----

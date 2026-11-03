@@ -37,6 +37,9 @@ cd src
 # File::Spec, Cwd, IO... compiled into perl but their .pm files never reached lib/.
 sed -i 's/^\t$(MAKE) -C $(dir $@) PERL_CORE=1 LIBPERL=$(LIBPERL) LINKTYPE=static static$/& pm_to_blib/' Makefile
 grep -q 'LINKTYPE=static static pm_to_blib$' Makefile || { echo "perl-cross Makefile patch did not apply" >&2; exit 1; }
+# The compiled-in core XS modules yield to the same module installed again as a .so (a newer
+# dual-life version in vendor_perl), as on a dynamic perl: see patch-xsloader.js.
+node "$HERE/patch-xsloader.js" dist/XSLoader/XSLoader_pm.PL
 
 # ---- fork: the vfork protocol ----
 # The sysroot's fork() is a MACRO (unistd.h): the child branch runs in the parent, against a
