@@ -182,7 +182,9 @@ if [ \$link = 1 ] && [ \$shared = 1 ] && [ -n "\${WALI_SIDE:-}" ]; then
   # -lwebp needs libsharpyuv, -lfreetype libpng; only members something needs are pulled),
   # never an interpreter library the runtime exports. A module with thread-locals gets its own
   # __tls_base, 0 until the loader runs __wasm_init_tls on a block (wasm-ld makes it hidden).
-  exec $L/clang "\${F[@]}" "\${LP[@]}" "\${S2[@]}" "\${D2[@]}" $S/lib/libwali-sideunwind.a -nostdlib -Wl,--no-entry,--experimental-pic,--shared-memory,--allow-undefined-file=\$WALI_SIDE,--export-if-defined=__wasm_init_tls,--export-if-defined=__tls_size,--export-if-defined=__tls_align $SIDEOBJ
+  # Last, compiler-rt's builtins, as a program link has them: the long-double (IEEE quad)
+  # helpers clang calls (__trunctfdf2, __multf3... FCGI) are not among the runtimes' exports.
+  exec $L/clang "\${F[@]}" "\${LP[@]}" "\${S2[@]}" "\${D2[@]}" $S/lib/libwali-sideunwind.a $S/lib/libclang_rt.builtins.a -nostdlib -Wl,--no-entry,--experimental-pic,--shared-memory,--allow-undefined-file=\$WALI_SIDE,--export-if-defined=__wasm_init_tls,--export-if-defined=__tls_size,--export-if-defined=__tls_align $SIDEOBJ
 fi
 if [ \$link = 1 ] && [ \$shared = 1 ]; then
   objs=()
