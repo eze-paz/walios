@@ -186,6 +186,9 @@ set_n CONFIG_FEATURE_WGET_HTTPS; set_n CONFIG_TLS; set_n CONFIG_SSL_CLIENT
 # speaks raw UDP to a nameserver), and hush keeps its bash extensions (${x:1:2} and friends).
 set_n CONFIG_FEATURE_NSLOOKUP_BIG
 set_y CONFIG_HUSH_BASH_COMPAT
+# cp/tar/cat copy with sendfile(2) under this; the kernel has no sendfile, so every copy printed
+# "unimplemented syscall SYS_sendfile" before falling back to read/write (the served binary had it off).
+set_n CONFIG_FEATURE_USE_SENDFILE
 
 unwanted_applets_off
 { yes "" || true; } | make HOSTCC=$HOSTCC oldconfig >"$R/oldcfg.log" 2>&1
@@ -196,15 +199,30 @@ make CC="$CC" LD="$LD" HOSTCC=$HOSTCC LDFLAGS="" SKIP_STRIP=y -j"$(nproc)" busyb
   { grep -iE "error:|undefined symbol" "$R/make.log" | tail -6 >&2; exit 1; }
 # Asyncify only what can be on the stack at fork(). By default Asyncify assumes any indirect
 # call may unwind, which instruments most of busybox and slows every applet (measured in the
-# browser: sort -n of 200k lines 4.4s -> 2.2s, awk printing 50k lines 690 -> 445ms, a shell
-# loop 222 -> 152ms, binary 1.73MB -> 0.67MB). ignore-indirect drops that assumption, so the
-# frames ABOVE fork that are entered through a function pointer must be named: main (from
-# _start), run_applet_no_and_exit (the applet table), ash's evaltree (evalfn) and evalbltin
-# (builtins: eval / . that fork); propagate-addlist instruments their callers too. A frame
-# missed here does not misbehave quietly: the unwind hits it and the guest traps
-# "unreachable" -- tests/walios/e2e-busybox-fork-paths.mjs walks every fork path.
+# browser, this config: sort -n of 200k shuffled lines 6.9/6.4s -> 3.5/4.6s, sort 1.6/1.3s ->
+# 0.9/0.9s; binary 2.05MB -> 0.87MB). ignore-indirect drops that assumption, so each place that
+# calls a fork-capable function THROUGH A POINTER must be named (propagate-addlist then covers
+# its callers):
+#   main (from _start), run_applet_no_and_exit / run_applet_main   the applet table (<x>_main)
+#   evaltree (evalfn), evalbltin (builtins)                        ash: eval*, dotcmd, commandcmd...
+#   run_pipe, exec_builtin*                                        hush: builtin_eval/source/read/wait/exit
+#   recursive_action*, fileAction*, exec_actions                   find: the walker and -exec
+#   get_header_tar                                                 tar --to-command (data_extract_to_command)
+#   xargs_main, child                                              their own callbacks, kept to be safe
+# Left out on purpose: xfunc_die (calling it from every die path instrumented nearly
+# everything again, 1.56MB). It only reaches fork through hush's restore_ttypgrp_and__exit,
+# which sets G.exiting first so the EXIT trap -- the part that could fork -- never runs.
+# fork-entries.txt is the list of fork-capable pointer targets this was checked against;
+# the build stops if it changes. A frame missed anyway does not misbehave quietly: the unwind
+# traps "unreachable" -- tests/walios/e2e-busybox-fork-paths.mjs walks the fork paths.
+"$R/binaryen-version_$BINARYEN_VER/bin/wasm-dis" busybox -o "$R/busybox.wat"
+node "$HERE/fork-entries.mjs" "$R/busybox.wat" > "$R/fork-entries.txt"
+diff "$HERE/fork-entries.txt" "$R/fork-entries.txt" >&2 ||
+  { echo "busybox: the functions reachable through a pointer that can fork() changed (< expected, > now):" \
+         "give each new one's indirect caller to asyncify-addlist below, then update fork-entries.txt" >&2; exit 1; }
 "$WO" --asyncify --pass-arg=asyncify-imports@wali.SYS_fork --pass-arg=asyncify-ignore-indirect \
-  --pass-arg=asyncify-propagate-addlist --pass-arg=asyncify-addlist@main,run_applet_no_and_exit,evaltree,evalbltin \
+  --pass-arg=asyncify-propagate-addlist \
+  '--pass-arg=asyncify-addlist@main,run_applet_no_and_exit,run_applet_main,evaltree,evalbltin,run_pipe,exec_builtin*,recursive_action*,fileAction*,exec_actions,get_header_tar,xargs_main,child' \
   busybox -o "$R/busybox.wasm"
 
 # The applet LINK LIST. Real busybox is installed with `busybox --install -s`, which drops a
