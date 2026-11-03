@@ -18,6 +18,14 @@ window.walEngine = coi ? 'coi' : 'nocoi';
 // msg.blobUrls {guestPath: url}: files fetched here and seeded into the guest as msg.blobs
 const blobCache = {};
 window.walRun = async (msg, ms = 30000) => {
+  // msg.appletLinks [paths]: busybox's applet links, as every sandpie host seeds them
+  // (walios-backend.js toolBlobs: a marker file per path, exec falls through to busybox)
+  if (msg.appletLinks) {
+    msg.blobs = msg.blobs || {};
+    const marker = new TextEncoder().encode('#!busybox applet\n').buffer;
+    for (const p of msg.appletLinks) if (!msg.blobs[p]) msg.blobs[p] = marker.slice(0);
+    delete msg.appletLinks;
+  }
   if (msg.blobUrls) {
     msg.blobs = msg.blobs || {};
     for (const [p, u] of Object.entries(msg.blobUrls)) {

@@ -282,6 +282,23 @@ pyd=$(cd "$pkgdir" && find . -type d \( -name site-packages -o -name dist-packag
 # so pandas compiled against x86-64 numpy's, where npy_int64 is a long -- 4 bytes here).
 pyov=; [ -n "$pyd" ] && [ -n "$PYPKG" ] && case "$pyd" in usr/*) ;; *) pyov=$pyd;; esac
 [ -n "$ovdirs$pyov" ] && tar czf "$OUT/$pkg.overlay.tar.gz" -C "$pkgdir" ${pyov:+--transform "s|^$pyov|usr/lib/python3/site-packages|"} $ovdirs $pyov
+# Scripts the build host's pip/setuptools installed start with ITS interpreter
+# (#!/opt/hostedtoolcache/Python/3.14.9/x64/bin/python3.14): Alpine's say /usr/bin/python3.
+fix_shebangs() {
+  for f in $(cd "$pkgdir" && find usr/bin bin usr/sbin sbin -type f 2>/dev/null); do
+    head -c2 "$pkgdir/$f" 2>/dev/null | grep -q '#!' || continue
+    sed -i -E '1s|^#![^ ]*/python[0-9.]*( .*)?$|#!/usr/bin/python3\1|' "$pkgdir/$f"
+  done
+}
+# noarch_files <reason>: the whole of what package() installed, docs aside, as a mod.
+noarch_files() {
+  local top; top=$(cd "$pkgdir" && find . -mindepth 1 -maxdepth 1 | sed 's|^\./||' | sort)
+  [ -n "$top" ] || return 0
+  (cd "$pkgdir" && find $top -type f ! -path 'usr/share/man/*' ! -path 'usr/share/doc/*' ! -path 'usr/share/info/*' | grep -q .) || return 0
+  fix_shebangs
+  tar czf "$OUT/$pkg.mod.tar.gz" -C "$pkgdir" --exclude=usr/share/man --exclude=usr/share/doc --exclude=usr/share/info --exclude=__pycache__ $top
+  emit pass "$1" mod "$(cd "$pkgdir" && find usr/bin bin usr/sbin sbin -maxdepth 1 -type f 2>/dev/null | head -3 | tr '\n' ' ')"
+}
 # A pure-Perl or pure-Lua module (noarch, installs into Alpine's module paths) is a package in
 # its own right on walios: those files, as a tarball `apk add` mounts at /.
 # Python: site-packages built with the runner's Python goes to walios Python's /site-packages
@@ -292,8 +309,11 @@ if [ -n "$pyd" ] && { [ -n "$PYPKG" ] || [ -n "$NOARCH" ]; }; then   # not a C l
       emit fail "python-c-extension:$(basename "$so") is not a wasm side module"
   done
   if (cd "$pkgdir/$pyd" && find . -name '*.py' | grep -q .); then
-    # (no __pycache__: compiled for the build host's Python, not walios')
-    tar czf "$OUT/$pkg.mod.tar.gz" -C "$pkgdir" --exclude=__pycache__ --transform "s|^$pyd|site-packages|" "$pyd"; emit pass module mod
+    # (no __pycache__: compiled for the build host's Python, not walios'), with the package's
+    # commands (meson, scons, cython... are Python programs as much as modules)
+    fix_shebangs
+    bins=$(cd "$pkgdir" && ls -d usr/bin bin usr/sbin sbin 2>/dev/null)
+    tar czf "$OUT/$pkg.mod.tar.gz" -C "$pkgdir" --exclude=__pycache__ --transform "s|^$pyd|site-packages|" "$pyd" $bins; emit pass module mod
   fi
 fi
 if [ -n "$LUAMOD" ]; then
@@ -321,7 +341,11 @@ if [ -n "$NOARCH" ]; then
   if [ -n "$mdirs" ] && (cd "$pkgdir" && find $mdirs -type f \( -name '*.pm' -o -name '*.pl' -o -name '*.lua' \)) | grep -q .; then
     tar czf "$OUT/$pkg.mod.tar.gz" -C "$pkgdir" $mdirs; emit pass module mod
   fi
-  emit skip noarch
+  # Anything else architecture-independent (scripts, data, fonts, web apps) is the same files on
+  # walios as on any Linux: what package() installed, as a tarball `apk add` mounts at /. The
+  # docs stay out (Alpine splits them into -doc subpackages).
+  noarch_files files
+  emit skip noarch-empty
 fi
 
 # The package's program: what it INSTALLS -- usr/bin/<pkg> first, then its other bin dirs.

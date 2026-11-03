@@ -31,7 +31,8 @@ const ONLY = arg('only') ? new Set(arg('only').split(',')) : null;
 const CATALOG = arg('catalog') ? new Set(fs.readFileSync(arg('catalog'), 'utf8').split(/\s+/).filter(Boolean)) : null;
 const OUT = arg('out', 'e2e-results.json');
 // busybox.links in --rt (the runtime release ships it): applet names a bare command resolves to
-const APPLETS = new Set(fs.existsSync(path.join(RT, 'busybox.links')) ? fs.readFileSync(path.join(RT, 'busybox.links'), 'utf8').split(/\s+/).filter(Boolean).map((l) => path.posix.basename(l)) : []);
+const LINKS = fs.existsSync(path.join(RT, 'busybox.links')) ? fs.readFileSync(path.join(RT, 'busybox.links'), 'utf8').split(/\s+/).filter((l) => l.startsWith('/')) : [];
+const APPLETS = new Set(LINKS.map((l) => path.posix.basename(l)));
 const index = JSON.parse(fs.readFileSync(path.join(FARM, 'index.json'), 'utf8'));
 const P = index.packages;
 
@@ -69,34 +70,48 @@ function buildCase(pkg) {
   if (r.kind !== 'mod') return null;
   const tars = [pkg, ...modDeps(pkg)].filter((d) => P[d].file).map((d) => ['/f/' + P[d].file, '/']);
   const names = tarNames(path.join(FARM, r.file));
-  if (pkg.startsWith('py3-')) {
-    const tops = new Set();
-    for (const n of names) {
-      const m = /^site-packages\/([A-Za-z_][\w]*)(\/__init__\.py|\.py|\.[^/]*\.so|\.so)$/.exec(n);
-      if (m && !/^(_|tests?$|test_|conftest)/.test(m[1])) tops.add(m[1]);
-    }
-    if (!tops.size) return { pkg, kind: 'mod', skip: 'no importable top-level module' };
+  // The language comes from what the package installs, not its name (meson, scons and cython
+  // are Python; acf-* are Lua web apps; fonts are just files).
+  const tops = new Set();
+  for (const n of names) {
+    const m = /^site-packages\/([A-Za-z_][\w]*)(\/__init__\.py|\.py|\.[^/]*\.so|\.so)$/.exec(n);
+    if (m && !/^(_|tests?$|test_|conftest)/.test(m[1])) tops.add(m[1]);
+  }
+  const pms = names.map((n) => /(?:^|\/)perl5\/(?:vendor_perl\/|site_perl\/)?(?:[\d.]+\/)?(.+)\.pm$/.exec(n)).filter(Boolean).map((m) => m[1].replace(/^(?:x86_64[^/]*|wasm32[^/]*)\//, ''));
+  const luas = names.map((n) => /^usr\/(?:share|lib)\/lua\/(?:5\.4|common)\/(.+?)(?:\/init)?\.(?:lua|so)$/.exec(n)).filter(Boolean).map((m) => m[1].replace(/\//g, '.'));
+  if (tops.size) {
     const list = JSON.stringify([...tops]);
     return { pkg, kind: 'py', tars, tops: [...tops],
       cmd: `python3 -c 'import importlib, json\nok = []\nfor n in ${list}:\n    try:\n        importlib.import_module(n); ok.append(n)\n    except BaseException as e:\n        print("IMPORT-FAIL", n, type(e).__name__, str(e)[:300])\nprint("__imported", len(ok), "of", len(${list}))'` };
   }
-  if (pkg.startsWith('perl-')) {
-    const pms = names.map((n) => /(?:^|\/)perl5\/(?:vendor_perl\/|site_perl\/)?(?:[\d.]+\/)?(.+)\.pm$/.exec(n)).filter(Boolean).map((m) => m[1].replace(/^(?:x86_64[^/]*|wasm32[^/]*)\//, ''));
-    if (!pms.length) return { pkg, kind: 'mod', skip: 'no .pm' };
-    const want = pkg.slice(5).toLowerCase().replace(/-/g, '/');
+  if (pms.length) {
+    const want = pkg.replace(/^perl-/, '').toLowerCase().replace(/-/g, '/');
     const main = pms.find((p) => p.toLowerCase() === want) || pms.sort((a, b) => a.split('/').length - b.split('/').length || a.length - b.length)[0];
     const mod = main.replace(/\//g, '::');
     return { pkg, kind: 'perl', tars, mod, cmd: `perl -e 'require ${mod}; print "__ok ${mod}\\n"' 2>&1` };
   }
-  if (pkg.startsWith('lua-')) {
-    const mods = names.map((n) => /^usr\/(?:share|lib)\/lua\/(?:5\.4|common)\/(.+?)(?:\/init)?\.(?:lua|so)$/.exec(n)).filter(Boolean).map((m) => m[1].replace(/\//g, '.'));
-    if (!mods.length) return { pkg, kind: 'mod', skip: 'no lua module' };
-    const want = pkg.slice(4).toLowerCase();
-    const main = mods.find((m) => m.toLowerCase() === want) || mods.sort((a, b) => a.length - b.length)[0];
+  if (luas.length) {
+    const want = pkg.replace(/^lua-/, '').toLowerCase();
+    const main = luas.find((m) => m.toLowerCase() === want) || luas.sort((a, b) => a.length - b.length)[0];
     return { pkg, kind: 'lua', tars, mod: main, cmd: `lua -e 'require("${main}") print("__ok ${main}")' 2>&1` };
   }
-  return { pkg, kind: 'mod', skip: 'module of an unknown language' };
+  // Any other package of files (an architecture-independent one: scripts, data, fonts). One
+  // that installs a command: it must start -- its interpreter found, its own imports resolved;
+  // --version is a request, a usage message is fine. One without: its files must be there
+  // after the mount `apk add` does.
+  const files = names.filter((n) => !n.endsWith('/'));
+  if (!files.length) return { pkg, kind: 'mod', skip: 'empty package' };
+  const bins = files.filter((n) => /^(usr\/)?s?bin\/[^/]+$/.test(n));
+  if (bins.length) {
+    const bin = bins.find((b) => path.posix.basename(b) === pkg) || bins[0];
+    return { pkg, kind: 'files-bin', tars, bin,
+      cmd: `/${bin} --version >/tmp/o 2>&1 </dev/null; echo "__rc=$?"; head -c 600 /tmp/o` };
+  }
+  const probe = [files[0], files[Math.floor(files.length / 2)], files[files.length - 1]];
+  return { pkg, kind: 'files-data', tars, cmd: probe.map((f) => `test -e '/${f}' || echo "MISSING /${f}"`).join('; ') + `; echo __checked` };
 }
+// A script that could not start: its interpreter or one of its own modules is missing.
+const NOSTART = /not found|No such file or directory|can't open|Can't locate|ModuleNotFoundError|ImportError|SyntaxError|syntax error|Traceback \(most recent|Exec format error|Permission denied|applet not found|bad interpreter|cannot execute/i;
 
 function judge(c, r) {
   const out = r.out || '';
@@ -113,6 +128,13 @@ function judge(c, r) {
     if (!c.expect || (want ? words(body).includes(want) : norm(body).includes(norm(c.expect)))) return ['pass', ''];
     return ['differs', norm(body).slice(0, 200) + '  [node host: ' + norm(c.expect).slice(0, 120) + ']'];
   }
+  if (c.kind === 'files-bin') {
+    const rc = Number((/__rc=(\d+)/.exec(out) || [])[1]);
+    const body = out.replace(/^[\s\S]*?__rc=\d+\n?/, '').replace(/\[host\][^\n]*\n?/g, '');
+    if (rc === 126 || rc === 127 || NOSTART.test(body)) return ['fail', `rc=${rc} ` + norm(body).slice(0, 250)];
+    return ['pass', ''];
+  }
+  if (c.kind === 'files-data') return /__checked/.test(out) && !/MISSING/.test(out) ? ['pass', ''] : ['fail', norm(out).slice(0, 250)];
   if (c.kind === 'py') {
     const m = /__imported (\d+) of (\d+)/.exec(out);
     if (m && m[1] === m[2]) return ['pass', ''];
@@ -144,7 +166,7 @@ const runMsg = (c) => ({
   tars: [['/rt/rootfs.tar.gz', '/'], ...c.tars],
   lazyTars: { '/rt/python_cxx.wasm': [['/rt/pylib.tar.gz', '/py'], ['/rt/python-ext.tar.gz', '/ext']],
               '/rt/perl.wasm': [['/rt/perllib.tar.gz', '/usr/lib/perl5']] },
-  env: ENV, cwd: '/', argv: ['busybox', 'hush', '-c', c.cmd],
+  env: ENV, cwd: '/', argv: ['busybox', 'hush', '-c', c.cmd], appletLinks: LINKS,
   // the ILP32 python's sysconfig data ships beside it, not in pylib (sysconfig/hypothesis need it)
   ...(fs.existsSync(path.join(RT, SYSCFG)) ? { blobUrls: { ['/py/Lib/' + SYSCFG]: '/rt/' + SYSCFG } } : {}),
 });
@@ -189,6 +211,7 @@ for (const eng of ENGINES) {
   for (const c of cases) {
     const row = (results[c.pkg] = results[c.pkg] || { kind: P[c.pkg].kind });
     if (c.prog && APPLETS.has(c.prog)) row.shadowed = c.prog;
+    row.case = c.kind;
     if (c.skip) { row[eng] = ['skip', c.skip]; continue; }
     const t = Date.now();
     const r = await page.evaluate(([m]) => window.walRun(m, 45000), [runMsg(c)]);
