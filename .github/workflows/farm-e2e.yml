@@ -93,7 +93,8 @@ jobs:
       - name: Merge + publish
         run: |
           TAG=$(node -e "console.log(JSON.parse(process.env.REQ).tag)")
-          gh release download "$TAG" -p index.json -D .
+          curl -fsSL --retry 5 --retry-delay 5 -o index.json "https://github.com/${{ github.repository }}/releases/download/$TAG/index.json"
           node farm/e2e/merge.mjs res index.json farm/ci/catalog.txt e2e.json | tee summary.txt
           { echo '```'; cat summary.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
-          for t in 1 2 3 4 5; do gh release upload "$TAG" --clobber e2e.json && break; sleep 30; done
+          # (the upload is one API call; when the hour's API quota is spent, retry for up to 10 min)
+          for t in $(seq 1 20); do gh release upload "$TAG" --clobber e2e.json && break; sleep 30; done
