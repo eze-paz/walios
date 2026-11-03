@@ -58,7 +58,7 @@ WFLAGS="$TF --sysroot=$SYSROOT -nostdlibinc -isystem $SYSROOT/include -D_GNU_SOU
 # The call trampoline (wali_trampoline.c) in front of CPython's Emscripten-only one.
 TH=Python-$PY_VER/Include/internal/pycore_emscripten_trampoline.h
 cp "$HERE/wali_trampoline.h" Python-$PY_VER/Include/internal/
-grep -q wali_trampoline.h $TH || sed -i 's|^#if defined(__EMSCRIPTEN__) && defined(PY_CALL_TRAMPOLINE)$|#if defined(__wali__)\n#include "wali_trampoline.h"\n#elif defined(__EMSCRIPTEN__) \&\& defined(PY_CALL_TRAMPOLINE)|' $TH
+grep -q wali_trampoline.h $TH || sed -i 's|^#if defined(__EMSCRIPTEN__) && defined(PY_CALL_TRAMPOLINE)$|#if defined(__wasm__) \&\& !defined(__EMSCRIPTEN__)\n#include "wali_trampoline.h"\n#elif defined(__EMSCRIPTEN__) \&\& defined(PY_CALL_TRAMPOLINE)|' $TH
 grep -q wali_trampoline.h $TH || { echo "build.sh: could not patch $TH" >&2; exit 1; }
 [ -d zlib-$ZLIB_VER ] || { curl -sSL https://zlib.net/fossils/zlib-$ZLIB_VER.tar.gz | tar xz; }
 if [ ! -d llvm-src ]; then

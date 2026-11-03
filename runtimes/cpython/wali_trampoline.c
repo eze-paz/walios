@@ -1,5 +1,5 @@
 /* CPython's call trampoline for walios (Include/internal/pycore_emscripten_trampoline.h,
- * patched by build.sh to use it under __wali__).
+ * patched by build.sh to use it on non-Emscripten wasm).
  *
  * C extensions routinely register a METH_NOARGS method as `f(PyObject *self)` or a getter
  * as `get(PyObject *self)` and let CPython call it with one more argument. Every native
