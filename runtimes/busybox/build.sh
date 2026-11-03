@@ -88,13 +88,17 @@ export HOSTCC=/usr/bin/gcc
 # WSL tree, never committed) had them on. A rebuild from allnoconfig silently lost, among
 # others, nearly all of find (-type -exec -mtime -size -newer -maxdepth -delete -regex ...),
 # sort -t/-k (FEATURE_SORT_BIG) and hush's loops/trap/wait. Each applet's config symbol is
-# read from its //applet:IF_<SYM>(APPLET...(name ...)) line, so a symbol stays on only if one
-# of its applets is wanted.
+# read from its //applet:IF_<SYM>(...APPLET...(name ...)) line (wrappers like
+# IF_NOT_MODPROBE_SMALL( allowed), so a symbol stays on only if one of its applets is wanted.
+# The switch-off runs LAST, just before oldconfig, so the set_y lists below cannot bring an
+# unwanted applet back (PING6 is in one; under allnoconfig it only vanished because IPv6 was off).
 make HOSTCC=$HOSTCC defconfig >"$R/defconfig.log" 2>&1
-grep -rhoE '^//applet:IF_[A-Z0-9_]+\( *APPLET[A-Z_]*\( *[^, ]+' --include=*.c . \
-  | sed -E 's|^//applet:IF_([A-Z0-9_]+)\( *APPLET[A-Z_]*\( *|\1 |' > "$R/applet-syms.txt"
-awk 'NR==FNR { want[$1] = 1; next } { sym[$1] = sym[$1] || ($2 in want) } END { for (s in sym) if (!sym[s]) print s }' \
-  "$HERE/applets.txt" "$R/applet-syms.txt" | while read -r s; do set_n "CONFIG_$s"; done
+grep -rhoE '^//applet:IF_[A-Z0-9_]+\( *(IF_[A-Z0-9_]+\( *)*APPLET[A-Z_]*\( *[^, ]+' --include=*.c . \
+  | sed -E 's|^//applet:IF_([A-Z0-9_]+)\( *(IF_[A-Z0-9_]+\( *)*APPLET[A-Z_]*\( *|\1 |' > "$R/applet-syms.txt"
+unwanted_applets_off() {
+  awk 'NR==FNR { want[$1] = 1; next } { sym[$1] = sym[$1] || ($2 in want) } END { for (s in sym) if (!sym[s]) print s }' \
+    "$HERE/applets.txt" "$R/applet-syms.txt" | while read -r s; do set_n "CONFIG_$s"; done
+}
 while read -r a; do set_y "CONFIG_$(echo "$a" | tr 'a-z-' 'A-Z_')"; done < "$HERE/applets.txt"
 set_n CONFIG_NOMMU                 # we have real fork() now (Asyncify substrate)
 set_y CONFIG_LFS                   # off_t is 64-bit on every walios ABI (allnoconfig turns it off)
@@ -178,6 +182,7 @@ for a in CONFIG_REV CONFIG_TR CONFIG_ID CONFIG_LESS CONFIG_VI CONFIG_CLEAR CONFI
 set_y CONFIG_FEATURE_WGET_OPENSSL
 set_n CONFIG_FEATURE_WGET_HTTPS; set_n CONFIG_TLS; set_n CONFIG_SSL_CLIENT
 
+unwanted_applets_off
 { yes "" || true; } | make HOSTCC=$HOSTCC oldconfig >"$R/oldcfg.log" 2>&1
 for k in ASH SH_IS_ASH FEATURE_EDITING FEATURE_LS_COLOR BASE64; do grep -q "^CONFIG_$k=y" .config || { echo "busybox .config: CONFIG_$k is off" >&2; exit 1; }; done
 ! grep -q '^CONFIG_NOMMU=y' .config || { echo "busybox .config: CONFIG_NOMMU is on" >&2; exit 1; }
