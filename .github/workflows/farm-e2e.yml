@@ -60,7 +60,7 @@ jobs:
           mkdir -p dl/farm dl/rt dl/kernel
           get "$(T tag)" -D dl/farm -p index.json -p '*.wasm' -p '*.mod.tar.gz'
           get "$(T busybox)" -D dl/rt -p busybox.wasm -p busybox.links
-          get "$(T python)" -D dl/rt -p python_cxx.wasm -p python-ext.tar.gz
+          get "$(T python)" -D dl/rt -p python_cxx.wasm -p python-ext.tar.gz -p '_sysconfigdata__linux_x86_64-linux-gnu.py'
           get "$(T perl_lua)" -D dl/rt -p perl.wasm -p perllib.tar.gz -p lua.wasm
           cp browser/rootfs.tar.gz browser/pylib.tar.gz dl/rt/
           cp farm/e2e/kernel/*.js dl/kernel/

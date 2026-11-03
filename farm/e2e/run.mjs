@@ -145,7 +145,10 @@ const runMsg = (c) => ({
   lazyTars: { '/rt/python_cxx.wasm': [['/rt/pylib.tar.gz', '/py'], ['/rt/python-ext.tar.gz', '/ext']],
               '/rt/perl.wasm': [['/rt/perllib.tar.gz', '/usr/lib/perl5']] },
   env: ENV, cwd: '/', argv: ['busybox', 'hush', '-c', c.cmd],
+  // the ILP32 python's sysconfig data ships beside it, not in pylib (sysconfig/hypothesis need it)
+  ...(fs.existsSync(path.join(RT, SYSCFG)) ? { blobUrls: { ['/py/Lib/' + SYSCFG]: '/rt/' + SYSCFG } } : {}),
 });
+const SYSCFG = '_sysconfigdata__linux_x86_64-linux-gnu.py';
 
 let pkgs = Object.keys(P).filter((k) => ['exe', 'mod'].includes(P[k].kind) && (!CATALOG || CATALOG.has(k)) && (!ONLY || ONLY.has(k))).sort();
 pkgs = pkgs.filter((_, i) => i % NSHARD === SHARD);

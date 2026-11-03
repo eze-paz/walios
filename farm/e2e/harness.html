@@ -15,7 +15,20 @@ if (coi) {
   new Worker('opfs-worker.js').postMessage({ t: 'sab', sab: opfsSab });
 }
 window.walEngine = coi ? 'coi' : 'nocoi';
-window.walRun = (msg, ms = 30000) => new Promise((resolve) => {
+// msg.blobUrls {guestPath: url}: files fetched here and seeded into the guest as msg.blobs
+const blobCache = {};
+window.walRun = async (msg, ms = 30000) => {
+  if (msg.blobUrls) {
+    msg.blobs = msg.blobs || {};
+    for (const [p, u] of Object.entries(msg.blobUrls)) {
+      if (!blobCache[u]) blobCache[u] = await (await fetch(u)).arrayBuffer();
+      msg.blobs[p] = blobCache[u].slice(0);
+    }
+    delete msg.blobUrls;
+  }
+  return walRun1(msg, ms);
+};
+const walRun1 = (msg, ms) => new Promise((resolve) => {
   const w = new Worker('wali-worker.js');
   let out = '';
   const timer = setTimeout(() => { w.terminate(); resolve({ out, code: -1, timeout: true }); }, ms);
