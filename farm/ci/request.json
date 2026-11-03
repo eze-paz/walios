@@ -3,5 +3,5 @@
   "max": 600,
   "chunk": 3,
   "publish": true,
-  "note": "R30: MESON for meson-python (numpy cross), m4 stub config.h, -Wno-c++11-narrowing, release upload retries"
+  "note": "R31: numpy vendored meson, side modules carry their own wasm landing-pad context (C++ exceptions)"
 }

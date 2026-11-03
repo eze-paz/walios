@@ -170,7 +170,7 @@ if [ \$link = 1 ] && [ \$shared = 1 ] && [ -n "\${WALI_SIDE:-}" ]; then
   # then the deps' archives: a static library carries no record of its own deps (Pillow's
   # -lwebp needs libsharpyuv, -lfreetype libpng; only members something needs are pulled),
   # never an interpreter library the runtime exports
-  exec $L/clang "\${F[@]}" "\${S2[@]}" "\${D2[@]}" -nostdlib -Wl,--no-entry,--experimental-pic,--shared-memory,--allow-undefined-file=\$WALI_SIDE $SIDEOBJ
+  exec $L/clang "\${F[@]}" "\${S2[@]}" "\${D2[@]}" $S/lib/libwali-sideunwind.a -nostdlib -Wl,--no-entry,--experimental-pic,--shared-memory,--allow-undefined-file=\$WALI_SIDE $SIDEOBJ
 fi
 if [ \$link = 1 ] && [ \$shared = 1 ]; then
   objs=()
@@ -319,6 +319,13 @@ if [ ! -f $S/lib/libwali-farm.a ]; then
   done
   $L/llvm-ar rcs $S/lib/libwali-farm.a $S/lib/farm-*.o
 fi
+# libwali-sideunwind.a: a side module's own landing-pad context (farm/ci/shim-side/unwind-side.c),
+# for C++ exceptions caught inside a C module; PIC like every side-module object.
+if [ ! -f $S/lib/libwali-sideunwind.a ]; then
+  $L/clang $TGT --sysroot=$S -nostdlibinc -isystem $S/include -O2 -fPIC -fwasm-exceptions -matomics -mbulk-memory -mexception-handling -pthread \
+    -c "$HERE"/shim-side/unwind-side.c -o $S/lib/unwind-side.o
+  $L/llvm-ar rcs $S/lib/libwali-sideunwind.a $S/lib/unwind-side.o
+fi
 [ -f $S/include/error.h ] || cat > $S/include/error.h <<'EOF'
 /* glibc <error.h>, implemented by libwali-farm.a (farm/ci/shim/error.c). */
 #ifndef _ERROR_H
@@ -413,11 +420,16 @@ cat > bin/meson <<EOF
 real=""; IFS=:
 for d in \$PATH; do [ "\$d" = "$TC/bin" ] && continue; [ -x "\$d/meson" ] && { real="\$d/meson"; break; }; done
 unset IFS
+# a package that brings its own meson (numpy's vendored-meson, with its "features" module)
+# keeps it: meson-python passes the source dir to setup and runs later steps in a build dir
+# inside it
+for d in "\$@" "\$PWD" "\$(dirname "\$PWD")"; do
+  [ -f "\$d/vendored-meson/meson/meson.py" ] && { real="python3 \$d/vendored-meson/meson/meson.py"; break; }; done
 [ -n "\$real" ] || { echo "meson: not installed" >&2; exit 127; }
 if [ "\$1" = setup ]; then
-  case " \$* " in *" --cross-file"*) ;; *) shift; exec "\$real" setup --cross-file $TC/wali.meson "\$@";; esac
+  case " \$* " in *" --cross-file"*) ;; *) shift; exec \$real setup --cross-file $TC/wali.meson "\$@";; esac
 fi
-exec "\$real" "\$@"
+exec \$real "\$@"
 EOF
 chmod +x bin/meson
 # cmake: CMAKE_TOOLCHAIN_FILE (env) is honoured by cmake >= 3.21.
