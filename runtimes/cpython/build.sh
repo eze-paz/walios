@@ -60,6 +60,11 @@ TH=Python-$PY_VER/Include/internal/pycore_emscripten_trampoline.h
 cp "$HERE/wali_trampoline.h" Python-$PY_VER/Include/internal/
 grep -q wali_trampoline.h $TH || sed -i 's|^#if defined(__EMSCRIPTEN__) && defined(PY_CALL_TRAMPOLINE)$|#if defined(__wasm__) \&\& !defined(__EMSCRIPTEN__)\n#include "wali_trampoline.h"\n#elif defined(__EMSCRIPTEN__) \&\& defined(PY_CALL_TRAMPOLINE)|' $TH
 grep -q wali_trampoline.h $TH || { echo "build.sh: could not patch $TH" >&2; exit 1; }
+# pycore_object.h defines the plain macros too, outside Emscripten, and it is included after
+# the trampoline header (descrobject.c), so its definitions would win: same exclusion there.
+OH=Python-$PY_VER/Include/internal/pycore_object.h
+sed -i 's|^#if !(defined(__EMSCRIPTEN__) && defined(PY_CALL_TRAMPOLINE))$|#if !(defined(__EMSCRIPTEN__) \&\& defined(PY_CALL_TRAMPOLINE)) \&\& !(defined(__wasm__) \&\& !defined(__EMSCRIPTEN__))|' $OH
+grep -q '!(defined(__wasm__) && !defined(__EMSCRIPTEN__))' $OH || { echo "build.sh: could not patch $OH" >&2; exit 1; }
 [ -d zlib-$ZLIB_VER ] || { curl -sSL https://zlib.net/fossils/zlib-$ZLIB_VER.tar.gz | tar xz; }
 if [ ! -d llvm-src ]; then
   git clone -q --depth 1 --branch llvmorg-$LLVM_VER --filter=blob:none --sparse https://github.com/llvm/llvm-project.git llvm-src
