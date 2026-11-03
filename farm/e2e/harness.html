@@ -1,0 +1,31 @@
+<!doctype html>
+<!-- farm e2e harness: runs one command line in the real walios kernel (wali-worker.js, served
+     next to this page) and hands back what it printed. run.mjs drives it through Playwright:
+     window.walRun(msg) posts a run message (the same shape the sandpie hosts build) to a fresh
+     kernel worker and resolves { out, code, timeout }. Served with COOP/COEP this is the
+     per-process engine; without them there is no SharedArrayBuffer and the kernel runs every
+     process in-process (JSPI). -->
+<html><head><meta charset="utf-8"><title>walios farm e2e</title></head><body>
+<script>
+'use strict';
+const coi = typeof SharedArrayBuffer === 'function';
+let opfsSab = null;
+if (coi) {
+  opfsSab = new SharedArrayBuffer(32 + (1 << 20));
+  new Worker('opfs-worker.js').postMessage({ t: 'sab', sab: opfsSab });
+}
+window.walEngine = coi ? 'coi' : 'nocoi';
+window.walRun = (msg, ms = 30000) => new Promise((resolve) => {
+  const w = new Worker('wali-worker.js');
+  let out = '';
+  const timer = setTimeout(() => { w.terminate(); resolve({ out, code: -1, timeout: true }); }, ms);
+  w.onmessage = (ev) => {
+    const m = ev.data;
+    if (m.t === 'out') out += m.s;
+    else if (m.t === 'exit') { clearTimeout(timer); w.terminate(); resolve({ out, code: m.code }); }
+  };
+  w.onerror = (e) => { clearTimeout(timer); w.terminate(); resolve({ out: out + '\n[harness] worker error: ' + (e.message || e), code: -2 }); };
+  if (opfsSab) w.postMessage({ t: 'opfs-sab', sab: opfsSab });
+  w.postMessage(msg);
+});
+</script></body></html>
