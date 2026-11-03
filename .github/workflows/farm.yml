@@ -7,7 +7,7 @@ on:
   # A commit that changes farm/ci/request.json runs the farm with the inputs in it (same
   # keys as below), so a run can be asked for without Actions API rights.
   push:
-    branches: [main]
+    branches: [claude/rsync-build]
     paths: ['farm/ci/request.json']
   workflow_dispatch:
     inputs:
@@ -24,7 +24,7 @@ permissions:
 # A newer request replaces a run still in progress (the token that triggers runs cannot
 # cancel them through the API).
 concurrency:
-  group: farm
+  group: farm-claude-rsync-build
   cancel-in-progress: true
 
 env:
