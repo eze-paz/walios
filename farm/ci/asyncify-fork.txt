@@ -1,0 +1,5 @@
+# Programs whose fork() child runs on WITHOUT exec, so the default fork() -- a macro that runs
+# the child branch inside the parent until execve/_exit -- never lets the parent resume.
+# Each is built with -D__WALI_ASYNCIFY_FORK (musl's real fork, sysroot32) and run through
+# wasm-opt --asyncify; the kernel's SYS_fork then unwinds, copies and rewinds the process.
+rsync

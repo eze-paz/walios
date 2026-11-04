@@ -243,6 +243,11 @@ fi
 ABIFLAGS=""
 [ "${WALI_ABI:-ilp32}" = wali ] && ABIFLAGS=$(awk -v p="$pkg" '$1 == p { $1 = ""; print substr($0, 2) }' "$HERE/abi-flags.txt")
 [ -n "$ABIFLAGS" ] && echo "farm: ABI flags: $ABIFLAGS" >> "$log"
+# Real fork (farm/ci/asyncify-fork.txt): the define rides in ABIFLAGS into every compile.
+ASYNCFORK=""
+if grep -qx "$pkg" "$HERE/asyncify-fork.txt" 2>/dev/null; then
+  ASYNCFORK=1; ABIFLAGS="${ABIFLAGS:+$ABIFLAGS }-D__WALI_ASYNCIFY_FORK"; echo "farm: real fork() (asyncify)" >> "$log"
+fi
 _t0=$(date +%s)
 # stdin is /dev/null and the perl/test knobs say "no questions": a Makefile.PL prompt used to
 # hang a job until its timeout.
@@ -335,6 +340,9 @@ for f in "$pkgdir/usr/bin/$pkg" "$pkgdir/bin/$pkg" "$pkgdir/usr/sbin/$pkg" "$pkg
 done
 if [ -n "$exe" ]; then
   cp "$exe" "$OUT/$pkg.wasm"
+  if [ -n "$ASYNCFORK" ]; then
+    "${TC:?}/binaryen/bin/wasm-opt" --asyncify --pass-arg=asyncify-imports@wali.SYS_fork -O2 \n      "$OUT/$pkg.wasm" -o "$OUT/$pkg.async.wasm" >> "$log" 2>&1 && mv "$OUT/$pkg.async.wasm" "$OUT/$pkg.wasm" \n      || { rm -f "$OUT/$pkg.wasm" "$OUT/$pkg.async.wasm"; emit fail asyncify-failed exe ""; }
+  fi
   st=$(cd /tmp && timeout 60 $HOST "$OUT/$pkg.wasm" --version </dev/null 2>&1)
   smoke="$(basename "$exe"): $(printf '%s\n' "$st" | grep -vE 'wali-host\]|ENOSYS|stub' | head -1)"
   if printf '%s' "$st" | grep -qE 'trap in pid|LinkError|CompileError|RuntimeError'; then rm -f "$OUT/$pkg.wasm"; emit fail smoke-trap exe "$smoke"

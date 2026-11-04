@@ -1,7 +1,7 @@
 {
-  "pkgs": "xxhash zstd rsync",
+  "pkgs": "rsync",
   "max": 80,
   "chunk": 3,
   "publish": false,
-  "note": "branch: rsync (+xxhash, zstd) on toolchain-2026-11-03-r; no arm_*.h, PGO flags dropped"
+  "note": "branch: rsync with a real fork (asyncify) on toolchain-2026-11-04-s"
 }

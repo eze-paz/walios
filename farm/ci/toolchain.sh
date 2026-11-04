@@ -40,6 +40,13 @@ fi
 # whenever __wasm_simd128__ is set, expecting Emscripten's SIMDe shim). A Linux x86 toolchain has
 # no arm_*.h, so neither does this one.
 rm -f $P/lib/clang/*/include/arm_*.h
+# binaryen: wasm-opt --asyncify for the farm/ci/asyncify-fork.txt programs (132 understands
+# wasm exceptions, as runtimes/busybox needs too).
+BINARYEN_VER=132
+if [ ! -x binaryen/bin/wasm-opt ]; then
+  fetch https://github.com/WebAssembly/binaryen/releases/download/version_$BINARYEN_VER/binaryen-version_$BINARYEN_VER-x86_64-linux.tar.gz bn.tgz
+  mkdir -p binaryen && tar xzf bn.tgz -C binaryen --strip-components=1 && rm bn.tgz
+fi
 if [ ! -f sysroot/lib/libc.a ]; then
   mkdir -p sysroot
   if [ "$ABI" = ilp32 ]; then fetch $REL/$S32TAG/wali32-sysroot.tar.gz sr.tgz   # musl, libc++, openssl, builtins
