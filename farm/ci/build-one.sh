@@ -341,7 +341,9 @@ done
 if [ -n "$exe" ]; then
   cp "$exe" "$OUT/$pkg.wasm"
   if [ -n "$ASYNCFORK" ]; then
-    "${TC:?}/binaryen/bin/wasm-opt" --asyncify --pass-arg=asyncify-imports@wali.SYS_fork -O2 \n      "$OUT/$pkg.wasm" -o "$OUT/$pkg.async.wasm" >> "$log" 2>&1 && mv "$OUT/$pkg.async.wasm" "$OUT/$pkg.wasm" \n      || { rm -f "$OUT/$pkg.wasm" "$OUT/$pkg.async.wasm"; emit fail asyncify-failed exe ""; }
+    "${TC:?}/binaryen/bin/wasm-opt" --asyncify --pass-arg=asyncify-imports@wali.SYS_fork -O2 \
+      "$OUT/$pkg.wasm" -o "$OUT/$pkg.async.wasm" >> "$log" 2>&1 && mv "$OUT/$pkg.async.wasm" "$OUT/$pkg.wasm" \
+      || { rm -f "$OUT/$pkg.wasm" "$OUT/$pkg.async.wasm"; emit fail asyncify-failed exe ""; }
   fi
   st=$(cd /tmp && timeout 60 $HOST "$OUT/$pkg.wasm" --version </dev/null 2>&1)
   smoke="$(basename "$exe"): $(printf '%s\n' "$st" | grep -vE 'wali-host\]|ENOSYS|stub' | head -1)"
