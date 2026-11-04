@@ -52,6 +52,10 @@ function tarNames(file) {
 }
 
 const norm = (s) => String(s || '').replace(/\s+/g, ' ').trim();
+// An index entry's file is a URL relative to the index: usually a name in the same release,
+// sometimes another one's ("../farm-2026-11-04-42-b/tree.wasm", a re-built package patched
+// in). Its local copy is that URL flattened into one name.
+const loc = (f) => f.replace(/[\/\\]/g, '__');
 const modDeps = (pkg, seen = new Set()) => {
   for (const d of (P[pkg] && P[pkg].deps) || []) if (P[d] && P[d].kind === 'mod' && !seen.has(d)) { seen.add(d); modDeps(d, seen); }
   return seen;
@@ -64,12 +68,12 @@ function buildCase(pkg) {
     const prog = m ? m[1] : pkg, expect = m ? m[2] : '';
     // By path: a bare name that is also a busybox applet runs the applet (hush prefers its
     // own), which is reported separately as `shadowed`, not as the package failing.
-    return { pkg, kind: 'exe', manifest: { [prog]: '/f/' + r.file }, tars: [], expect, prog,
+    return { pkg, kind: 'exe', manifest: { [prog]: '/f/' + loc(r.file) }, tars: [], expect, prog,
       cmd: `/bin/${prog} --version >/tmp/o 2>&1 </dev/null; echo "__rc=$?"; head -c 600 /tmp/o` };
   }
   if (r.kind !== 'mod') return null;
-  const tars = [pkg, ...modDeps(pkg)].filter((d) => P[d].file).map((d) => ['/f/' + P[d].file, '/']);
-  const names = tarNames(path.join(FARM, r.file));
+  const tars = [pkg, ...modDeps(pkg)].filter((d) => P[d].file).map((d) => ['/f/' + loc(P[d].file), '/']);
+  const names = tarNames(path.join(FARM, loc(r.file)));
   // The language comes from what the package installs, not its name (meson, scons and cython
   // are Python; acf-* are Lua web apps; fonts are just files).
   const tops = new Set();
@@ -180,14 +184,14 @@ const FETCH = arg('fetch');
 if (FETCH) {
   const need = new Set();
   for (const k of pkgs) for (const d of [k, ...(P[k].kind === 'mod' ? modDeps(k) : [])]) if (P[d].file) need.add(P[d].file);
-  const todo = [...need].filter((f) => !fs.existsSync(path.join(FARM, f)));
+  const todo = [...need].filter((f) => !fs.existsSync(path.join(FARM, loc(f))));
   let n = 0;
   await Promise.all(Array.from({ length: 8 }, async () => {
     while (todo.length) {
       const f = todo.pop();
       for (let t = 0; t < 5; t++) {
-        try { const r = await fetch(FETCH.replace(/\/?$/, '/') + f); if (!r.ok) throw new Error('HTTP ' + r.status);
-          fs.writeFileSync(path.join(FARM, f), Buffer.from(await r.arrayBuffer())); n++; break; }
+        try { const r = await fetch(new URL(f, FETCH.replace(/\/?$/, '/')).href); if (!r.ok) throw new Error('HTTP ' + r.status);
+          fs.writeFileSync(path.join(FARM, loc(f)), Buffer.from(await r.arrayBuffer())); n++; break; }
         catch (e) { if (t === 4) console.log('fetch failed', f, e.message); else await new Promise((r) => setTimeout(r, 3000 * (t + 1))); }
       }
     }

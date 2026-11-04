@@ -5,5 +5,5 @@
   "perl": "runtimes-ilp32-2026-11-03-8",
   "lua": "runtimes-ilp32-2026-11-02-3",
   "shards": 12,
-  "note": "R39 full catalog (toolchain-2026-11-04-s)"
+  "note": "R39 full catalog, again: index entries pointing into another release (../farm-...-b/) resolve as URLs"
 }
