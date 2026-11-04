@@ -56,6 +56,14 @@ sed -E -i '/CASE_SYSCALL \((poll|ppoll),/ s/va_arg\(ap, unsigned long long\)/va_
 sed -i '/printf("Invalid syscall var call -- NR/d' "$A/syscall_var.h"
 grep -q 'Invalid syscall var call' "$A/syscall_var.h" && { echo "sysroot32: the syscall_var.h printf is still there" >&2; exit 1; }
 mkdir -p "$M/src/unistd/wasm32"; cp "$HERE/src/lseek.c" "$M/src/unistd/wasm32/lseek.c"
+# -D__WALI_ASYNCIFY_FORK: the opt-out walios musl-patches/asyncify-fork.md describes. Such a
+# program gets musl's real fork() (_Fork -> SYS_fork, returning twice once the binary is run
+# through wasm-opt --asyncify), and vfork() is that fork. For programs whose child runs on
+# without exec (rsync's local receiver): the default fork() macro runs the child branch inside
+# the parent until execve/_exit, so such a parent never resumes.
+sed -i -e 's|^#ifndef __WALI_LIBC_INTERNAL$|#if !defined(__WALI_LIBC_INTERNAL) \&\& !defined(__WALI_ASYNCIFY_FORK)|' \
+  -e 's|^#endif /\* !__WALI_LIBC_INTERNAL \*/$|#elif defined(__WALI_ASYNCIFY_FORK)\n#define vfork() fork()\n#endif|' "$M/include/unistd.h"
+grep -q '^#elif defined(__WALI_ASYNCIFY_FORK)$' "$M/include/unistd.h" || { echo "sysroot32: unistd.h has no __WALI_ASYNCIFY_FORK gate" >&2; exit 1; }
 # _start ends in exit(), not __wali_proc_exit(<main's status>). WALI's crt1-command.c never
 # called exit(), so atexit handlers never ran and stdio was never flushed: a program that
 # returns from main with stdout on a pipe or a file lost everything still buffered (GNU tree:

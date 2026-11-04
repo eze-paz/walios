@@ -1,6 +1,6 @@
 # Branch-only: build the ILP32 sysroot (runtimes/sysroot32/build.sh, mirrored from sandpie
 # walios/build/sysroot32) with syscall() returning ENOSYS quietly and _start ending in exit() (stdio flushed), and publish it as a
-# SEPARATE prerelease toolchain-2026-11-03-r = toolchain-2026-10-31's assets with only
+# SEPARATE prerelease toolchain-2026-11-04-s = toolchain-2026-10-31's assets with only
 # wali32-sysroot.tar.gz replaced. The main farm keeps using toolchain-2026-10-31.
 name: sysroot32-quiet
 on:
@@ -18,7 +18,7 @@ jobs:
     env:
       W: /home/runner/w32
       OLD: toolchain-2026-10-31
-      NEW: toolchain-2026-11-03-r
+      NEW: toolchain-2026-11-04-s
     steps:
       - uses: actions/checkout@v4
       - name: Free disk (a run died with No space left on device in the LLVM step)
@@ -38,13 +38,15 @@ jobs:
         run: |
           ! grep -a -c 'Invalid syscall var call' "$W"/sysroot/lib/libc.a && echo "libc.a: no 'Invalid syscall var call'"
           ls -la "$W/wali32-sysroot.tar.gz"
+      - name: unistd.h has the __WALI_ASYNCIFY_FORK gate
+        run: grep -n "__WALI_ASYNCIFY_FORK" "$W/sysroot/include/unistd.h"
       - name: _start calls exit()
         run: |
           o=$(find "$W/sysroot" -name 'crt1-command.o' | head -1); echo "$o"
           $GITHUB_WORKSPACE/../wr/LLVM-22.1.3-Linux-X64/bin/llvm-nm "$o" | grep -E ' U exit$'
       - uses: actions/upload-artifact@v4
         with: { name: wali32-sysroot, path: '${{ env.W }}/wali32-sysroot.tar.gz', retention-days: 14 }
-      - name: Publish toolchain-2026-11-03-r (old assets + this sysroot)
+      - name: Publish toolchain-2026-11-04-s (old assets + this sysroot)
         env: { GH_TOKEN: '${{ github.token }}' }
         run: |
           mkdir -p ../rel && cd ../rel
@@ -53,17 +55,5 @@ jobs:
           ls -la
           gh release delete "$NEW" -R "$GITHUB_REPOSITORY" -y 2>/dev/null || true
           gh release create "$NEW" -R "$GITHUB_REPOSITORY" --prerelease --target "$GITHUB_SHA" \
-            --title "$NEW" --notes "toolchain-2026-10-31 with the ILP32 sysroot's syscall() returning ENOSYS quietly (no 'Invalid syscall var call' on stdout) and _start calling exit() (stdout flushed when main returns). Branch builds only." ./*
+            --title "$NEW" --notes "toolchain-2026-10-31 with the ILP32 sysroot's syscall() returning ENOSYS quietly (no 'Invalid syscall var call' on stdout) and _start calling exit() (stdout flushed when main returns), and -D__WALI_ASYNCIFY_FORK for a real fork() (rsync). Branch builds only." ./*
 
-      - uses: actions/upload-artifact@v4
-        with: { name: wali32-sysroot, path: '${{ env.W }}/wali32-sysroot.tar.gz', retention-days: 14 }
-      - name: Publish toolchain-2026-11-03-r (old assets + this sysroot)
-        env: { GH_TOKEN: '${{ github.token }}' }
-        run: |
-          mkdir -p ../rel && cd ../rel
-          gh release download "$OLD" -R "$GITHUB_REPOSITORY" -D .
-          cp -f "$W/wali32-sysroot.tar.gz" ./wali32-sysroot.tar.gz
-          ls -la
-          gh release delete "$NEW" -R "$GITHUB_REPOSITORY" -y 2>/dev/null || true
-          gh release create "$NEW" -R "$GITHUB_REPOSITORY" --prerelease --target "$GITHUB_SHA" \
-            --title "$NEW" --notes "toolchain-2026-10-31 with the ILP32 sysroot's syscall() returning ENOSYS quietly (no 'Invalid syscall var call' on stdout) and _start calling exit() (stdout flushed when main returns). Branch builds only." ./*
