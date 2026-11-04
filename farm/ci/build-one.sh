@@ -156,11 +156,23 @@ if [ -n "$srcs" ]; then
   # which only failed later at extraction: an HTML body counts as a failed download.
   dl() { curl -sSfL --retry 2 --connect-timeout 30 --max-time 300 -A "Mozilla/5.0 (walios farm)" "$1" -o "$bdir/$src_name" 2>>"$log" &&
          ! head -c 512 "$bdir/$src_name" | grep -qiE '<!doctype html|<html'; }
+  # Last, distribution mirrors that redistribute the same release file -- Gentoo's distfiles
+  # (distfiles/<first byte of blake2b-512(name)>/<name>) and Fedora's lookaside cache (keyed by
+  # the sha512) -- accepted only when the file's sha512 is the one the recipe lists. Upstream
+  # hosts that turn the runners away (SourceForge answers them with an HTML page; git.kernel.org,
+  # salsa.debian.org, gitlab.freedesktop.org a bot check) were most of the dl-failed (52 in R39).
+  mirror() { local sha h u; sha=$(apk sha512sums | awk -v n="$src_name" '$2 == n { print $1 }'); [ -n "$sha" ] || return 1
+    h=$(printf '%s' "$src_name" | b2sum | cut -c1-2)
+    for u in "https://distfiles.gentoo.org/distfiles/$h/$src_name" \
+             "https://src.fedoraproject.org/repo/pkgs/$pkg/$src_name/sha512/$sha/$src_name" \
+             "https://src.fedoraproject.org/repo/pkgs/${src_name%%[-_]*}/$src_name/sha512/$sha/$src_name"; do
+      dl "$u" && [ "$(sha512sum "$bdir/$src_name" | cut -d' ' -f1)" = "$sha" ] && { echo "farm: $src_name from $u (sha512 checked)" >> "$log"; return 0; }
+    done; return 1; }
   SRC=""
   for src_entry in $srcs; do
     src_name="${src_entry%%::*}"; src_url="${src_entry##*::}"
     [ "$src_name" = "$src_url" ] && src_name="$(basename "$src_url")"
-    dl "$src_url" || dl "https://distfiles.alpinelinux.org/distfiles/edge/$src_name"     || dl "https://distfiles.alpinelinux.org/distfiles/v3.22/$src_name" || emit fail dl-failed
+    dl "$src_url" || dl "https://distfiles.alpinelinux.org/distfiles/edge/$src_name"     || dl "https://distfiles.alpinelinux.org/distfiles/v3.22/$src_name" || mirror || emit fail dl-failed
     # tar first; bsdtar for what GNU tar cannot open (.zip, .tar.lz, .7z...)
     before=$(ls "$bdir")
     case "$src_name" in *.tar*|*.tgz|*.tbz*|*.txz|*.zip|*.7z|*.lz|*.zst)

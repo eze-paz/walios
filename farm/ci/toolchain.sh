@@ -208,14 +208,22 @@ if [ \$link = 1 ] && [ \$shared = 1 ] && [ -n "\${WALI_SIDE:-}" ]; then
   exec $L/clang "\${F[@]}" "\${LP[@]}" "\${S2[@]}" "\${D2[@]}" $S/lib/libwali-sideunwind.a $S/lib/libclang_rt.builtins.a -nostdlib -Wl,--no-entry,--experimental-pic,--shared-memory,--allow-undefined-file=\$WALI_SIDE,--export-if-defined=__wasm_init_tls,--export-if-defined=__tls_size,--export-if-defined=__tls_align $SIDEOBJ
 fi
 if [ \$link = 1 ] && [ \$shared = 1 ]; then
-  objs=()
+  # The objects, and the members of the build's OWN static libraries on the line: a shared
+  # library contains those (meson's link_whole: glib's libcharset.a and gnulib's printf, which
+  # libglib-2.0's dependents then lacked -- _g_locale_get_charset_aliases undefined). A
+  # dependency's archive by absolute path (overlay, sysroot) stays out: it is linked on its own.
+  objs=(); ars=()
   for a in "\${A[@]}"; do
     case "\$a" in
       *.o|*.lo|*.obj) objs+=("\$a");;
-      @*) [ -f "\${a#@}" ] && for x in \$(cat "\${a#@}"); do case "\$x" in *.o|*.lo|*.obj) objs+=("\$x");; esac; done;;   # cmake/ninja response files
+      /*.a) ;;
+      *.a) [ -f "\$a" ] && ars+=("\$a");;
+      @*) [ -f "\${a#@}" ] && for x in \$(cat "\${a#@}"); do case "\$x" in *.o|*.lo|*.obj) objs+=("\$x");; /*.a) ;; *.a) [ -f "\$x" ] && ars+=("\$x");; esac; done;;   # cmake/ninja response files
     esac
   done
   rm -f "\$out"; $L/llvm-ar rcs "\$out" "\${objs[@]}" || exit 1
+  for x in "\${ars[@]}"; do $L/llvm-ar qL "\$out" "\$x" || exit 1; done
+  [ \${#ars[@]} -gt 0 ] && $L/llvm-ranlib "\$out"
   # -lfoo only searches lib*.a here (no dynamic linking), so give the archive that name too.
   case "\$out" in *lib*.so*) cp -f "\$out" "\${out%%.so*}.a";; esac
   exit 0
