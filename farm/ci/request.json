@@ -1,7 +1,6 @@
 {
-  "pkgs": "perl-crypt-openssl-bignum perl-crypt-openssl-random perl-crypt-openssl-rsa perl-net-ssleay perl-fcgi perl-io-socket-ssl perl-lwp-protocol-https perl-net-smtp-ssl perl-net-smtp-tls-butmaintained perl-cgi-fast perl-crypt-ssleay py3-pillow py3-lxml py3-kiwisolver perl-json-xs lua-lpeg perl-compress-raw-zlib",
-  "max": 600,
-  "chunk": 3,
+  "all": true,
+  "max": 3000,
   "publish": true,
-  "note": "R38 = R36 again (cancelled by another branch run): PIC openssl + builtins, sysroot toolchain-2026-11-04-s"
+  "note": "R39: full catalog on main -- toolchain-2026-11-04-s (_start calls exit(): stdio flushed), PIC openssl, builtins, noarch file packages"
 }
