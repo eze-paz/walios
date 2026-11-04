@@ -1,5 +1,5 @@
 {
-  "pkgs": "rsync",
+  "pkgs": "zstd rsync",
   "max": 80,
   "chunk": 3,
   "publish": false,
