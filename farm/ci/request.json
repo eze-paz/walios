@@ -3,5 +3,5 @@
   "max": 80,
   "chunk": 3,
   "publish": false,
-  "note": "branch: rsync with a real fork (asyncify) on toolchain-2026-11-04-s"
+  "note": "branch: zstd + rsync with a real fork (asyncify) on toolchain-2026-11-04-s, asyncify step fixed"
 }
