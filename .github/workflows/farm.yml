@@ -24,7 +24,8 @@ permissions:
 # A newer request replaces a run still in progress (the token that triggers runs cannot
 # cancel them through the API).
 concurrency:
-  group: farm
+  # per branch: a run asked for on another branch (a parallel session's) must not cancel this one
+  group: farm-${{ github.ref }}
   cancel-in-progress: true
 
 env:
