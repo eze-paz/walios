@@ -16,9 +16,12 @@ HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)   # before any cd: the path m
 TC=$(realpath -m "${1:?usage: toolchain.sh <dir> [pkgs-tag] [toolchain-tag]}")
 TAG=${2:-pkgs-2026-10-31}
 XTAG=${3:-toolchain-2026-10-31}
-# the ILP32 sysroot: toolchain-2026-10-31's with OpenSSL rebuilt position-independent
-# (runtimes.yml openssl job, sandpie walios/build/sysroot32 OPENSSL_ONLY)
-S32TAG=${WALI_SYSROOT32_TAG:-runtimes-ilp32-2026-11-03-9}
+# the ILP32 sysroot (sandpie walios/build/sysroot32, built by the claude/sysroot32-quiet
+# workflow): runtimes-ilp32-2026-11-03-9's, position-independent OpenSSL included, plus
+#  - _start ends in exit(): stdio is flushed when main returns (piped output was lost)
+#  - syscall() answers ENOSYS without printing "Invalid syscall var call" to stdout
+#  - -D__WALI_ASYNCIFY_FORK gives musl's real fork() (farm/ci/asyncify-fork.txt)
+S32TAG=${WALI_SYSROOT32_TAG:-toolchain-2026-11-04-s}
 ABI=${WALI_ABI:-ilp32}
 TGT=--target=wasm32-unknown-linux-muslwali
 [ "$ABI" = ilp32 ] && TGT="$TGT -Xclang -triple -Xclang wasm32-unknown-linux-musl -fno-pic"
@@ -34,6 +37,18 @@ if [ ! -x $P/bin/clang ]; then
   tar xJf llvm.tar.xz --wildcards "$P/bin/clang" "$P/bin/clang-22" "$P/bin/clang++" "$P/bin/lld" "$P/bin/wasm-ld" \
       "$P/bin/llvm-ar" "$P/bin/llvm-ranlib" "$P/bin/llvm-nm" "$P/bin/llvm-strip" "$P/bin/llvm-objcopy" "$P/lib/clang/*"
   rm -f llvm.tar.xz
+fi
+# clang's resource dir carries the ARM intrinsic headers for every target; on wasm they only
+# #error. Code that probes __has_include(<arm_neon.h>) then takes a NEON path (xxhash 0.8.3 does
+# whenever __wasm_simd128__ is set, expecting Emscripten's SIMDe shim). A Linux x86 toolchain has
+# no arm_*.h, so neither does this one.
+rm -f $P/lib/clang/*/include/arm_*.h
+# binaryen: wasm-opt --asyncify for the farm/ci/asyncify-fork.txt programs (132 understands
+# wasm exceptions, as runtimes/busybox needs too).
+BINARYEN_VER=132
+if [ ! -x binaryen/bin/wasm-opt ]; then
+  fetch https://github.com/WebAssembly/binaryen/releases/download/version_$BINARYEN_VER/binaryen-version_$BINARYEN_VER-x86_64-linux.tar.gz bn.tgz
+  mkdir -p binaryen && tar xzf bn.tgz -C binaryen --strip-components=1 && rm bn.tgz
 fi
 if [ ! -f sysroot/lib/libc.a ]; then
   mkdir -p sysroot
@@ -102,6 +117,9 @@ EOF
 # -fno-builtin-lrint/lround: LLVM's wasm32 backend lowers them as returning i32, but long is
 # 64-bit on WALI, so calls disagree with libm's definitions ("function signature mismatch:
 # lround") and the module fails to load (found building Perl: walios/build/perl in sandpie).
+# PGO flags are dropped: there is no profile runtime (libclang_rt.profile.a) for wasm, so
+# Alpine's profile-guided builds (zstd) failed to link and installed half a package. Without
+# them the build is the same program, unprofiled.
 # -flto is dropped: setjmp/longjmp lowering (-wasm-enable-sjlj) is a compile-time pass, and
 # LTO objects reach the linker with it undone ("undefined symbol: longjmp").
 # Both that and _MPFR_PREC_FORMAT (below) exist only because of WALI's 64-bit long; the
@@ -150,7 +168,7 @@ F=($TGT --sysroot=$S -nostdlibinc $cxx -isystem $S/include -D_GNU_SOURCE -DXSIMD
 F+=(-fPIC); [ -n "\${WALI_SIDE:-}" ] && F+=(-fvisibility=default)
 A=()
 for a in "\$@"; do case "\$a" in
-  -rdynamic|-static|-s|-fPIC|-fpic|-fPIE|-fpie|-pie|-flto|-flto=*|-ffat-lto-objects|-fuse-linker-plugin|-fstack-protector*|-fstack-clash-protection) ;;   # (host perl Config ldflags in Makefile.PL probes)
+  -rdynamic|-static|-s|-fPIC|-fpic|-fPIE|-fpie|-pie|-flto|-flto=*|-fprofile-generate|-fprofile-generate=*|-fprofile-use|-fprofile-use=*|-fprofile-instr-generate*|-fprofile-instr-use*|-ffat-lto-objects|-fuse-linker-plugin|-fstack-protector*|-fstack-clash-protection) ;;   # (host perl Config ldflags in Makefile.PL probes)
   # the build host's headers and libraries (Pillow's setup.py adds /usr/include and /usr/lib):
   # a subdirectory means the overlay's copy (lpeg's -I/usr/include/lua5.4), the rest is dropped
   -I/usr/include/*|-I/usr/local/include/*|-L/usr/lib/*|-L/usr/local/lib/*)
