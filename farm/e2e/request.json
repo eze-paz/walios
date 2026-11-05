@@ -1,9 +1,9 @@
 {
-  "tag": "farm-2026-11-04-42",
+  "tag": "farm-2026-11-05-43",
   "busybox": "runtimes-ilp32-2026-11-03-7",
   "python": "runtimes-ilp32-2026-11-03-6",
   "perl": "runtimes-ilp32-2026-11-03-8",
   "lua": "runtimes-ilp32-2026-11-02-3",
-  "shards": 12,
-  "note": "R39 full catalog, again: index entries pointing into another release (../farm-...-b/) resolve as URLs"
+  "shards": 6,
+  "note": "R40 (farm-2026-11-05-43: source mirrors, glib's link_whole archives, missing-dep packages)"
 }

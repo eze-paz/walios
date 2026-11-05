@@ -1,7 +1,6 @@
 {
-  "pkgs": "acf-snort apache-mod-auth-kerb apcupsd apk-tools apr-util argtable2 at-spi2-core atop avahi bacula bcache-tools bluez busybox cairo clucene conntrack-tools dbus-glib debootstrap dmvpn docbook2x edbrowse efibootmgr efitools ell espeak eventlog expect f2fs-tools freeswitch gcompat git glib glu gnutls gobject-introspection gptfdisk gst-plugins-base gstreamer guile harfbuzz haserl hostapd iaxmodem irqbalance kea keyutils lcms2 lftp libbpf libnvme libsecret libtraceevent liburing libva libwebsockets libxaw libxft libxkbcommon libxmu libxt lighttpd lttng-ust lua-augeas lua-evdev lua-sql lvm2 net-snmp netcat-openbsd netcf newt nfs-utils nodejs nss nvme-cli open-iscsi open-lldp openjade opennhrp opensp openssh ortp pahole pam-pgsql pango perl-io-socket-ssl postfix privoxy protobuf-c py3-cairo py3-dbus py3-gobject3 rhash rp-pppoe rpcbind rrdtool rtapd run-parts sbsigntool sfic shared-mime-info spice sqsh sshfs sshguard syslog-ng systemd-boot tcl tcl9 tk unfs3 unionfs-fuse util-linux vala wayland wipe wpa_supplicant xtables-addons xtables-addons-lts xtables-addons-rpi",
-  "max": 1200,
-  "chunk": 3,
+  "all": true,
+  "max": 3000,
   "publish": true,
-  "note": "R40: source mirrors (Gentoo distfiles, Fedora lookaside; sha512-checked) + -shared archives keep the build own static libs (glib libcharset/gnulib)"
+  "note": "R41: full catalog on TC v33 -- triage batch 1 (overlay headers after the package's own, strip no-op, -fcommon/GNU ld flags dropped, closefrom declared, weak BSD shims, host doc tools, apt mirror fallback)"
 }
