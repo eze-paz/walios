@@ -1,0 +1,80 @@
+# PDF tools for walios (poppler-utils with Splash, mupdf-tools, qpdf), from upstream sources
+# with runtimes/pdftools/build.sh (mirrored from sandpie walios/build/pdftools) on the farm
+# toolchain, smoke-tested on the node WALI host, published as a prerelease whose
+# <name>.pkg.tar.gz files `apk add` mounts (kind 'pkg' in a farm index).
+name: pdftools
+on:
+  push:
+    branches: [claude/pdftools]
+    paths: ['runtimes/pdftools/**', '.github/workflows/pdftools.yml']
+
+permissions:
+  contents: write
+
+concurrency:
+  group: pdftools
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { c: poppler, pkg: poppler-utils }
+          - { c: mupdf, pkg: mupdf-tools }
+          - { c: qpdf, pkg: qpdf }
+    steps:
+      - uses: actions/checkout@v4
+      - name: Host tools
+        run: |
+          for t in 1 2 3; do sudo timeout 300 apt-get update -qq && break; done
+          sudo apt-get install -y -qq libbsd-dev libxml2 ninja-build cmake pkgconf autotools-dev >/dev/null
+          python3 -m pip install -q --user --break-system-packages reportlab pillow
+          printf '#!/bin/sh\nexec timeout -k 5 300 node %s "$@"\n' "$PWD/host/host.js" | sudo tee /usr/local/bin/wali-run >/dev/null
+          sudo chmod +x /usr/local/bin/wali-run
+          [ -e /proc/sys/fs/binfmt_misc/register ] || sudo mount -t binfmt_misc binfmt_misc /proc/sys/fs/binfmt_misc
+          echo ':wasm:M::\x00asm::/usr/local/bin/wali-run:' | sudo tee /proc/sys/fs/binfmt_misc/register >/dev/null || true
+          node --version
+      - uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/tc
+          key: pdftools-tc-${{ hashFiles('farm/ci/toolchain.sh') }}
+      - name: Toolchain
+        run: bash farm/ci/toolchain.sh "$RUNNER_TEMP/tc"
+      - name: Build ${{ matrix.c }}
+        run: WALI_TC="$RUNNER_TEMP/tc" bash runtimes/pdftools/build.sh "$RUNNER_TEMP/w" ${{ matrix.c }}
+      - name: Smoke ${{ matrix.pkg }}
+        run: |
+          P="$RUNNER_TEMP/w/pkg"
+          [ -d "$P/${{ matrix.pkg }}/usr/share" ] && sudo cp -r "$P/${{ matrix.pkg }}/usr/share/." /usr/share/
+          mkdir -p dist
+          bash runtimes/pdftools/smoke.sh "$P" ${{ matrix.pkg }} 2>&1 | tee dist/smoke-${{ matrix.pkg }}.txt
+          exit ${PIPESTATUS[0]}
+      - name: Collect
+        if: always()
+        run: |
+          mkdir -p dist
+          cp "$RUNNER_TEMP"/w/pkg/*.pkg.tar.gz dist/ 2>/dev/null || true
+          for f in "$RUNNER_TEMP"/w/*.log; do [ -f "$f" ] && cp "$f" "dist/${{ matrix.c }}-$(basename "$f")"; done; ls -la dist
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: 'pdf-${{ matrix.c }}', path: dist/*, retention-days: 7 }
+
+  publish:
+    needs: build
+    if: always()
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { path: art, merge-multiple: true }
+      - name: Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ls -la art
+          tag=pdftools-$(date -u +%F)-${GITHUB_RUN_NUMBER}
+          gh release create "$tag" --repo "$GITHUB_REPOSITORY" --prerelease --target "$GITHUB_SHA" \
+            --title "$tag" --notes "PDF tools for walios (branch ${GITHUB_REF_NAME}, run ${GITHUB_RUN_ID}); smoke-*.txt = node-host test output" art/*
