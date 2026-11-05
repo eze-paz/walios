@@ -1,6 +1,7 @@
 {
-  "all": true,
-  "max": 3000,
+  "pkgs": "aspell augeas cdparanoia cgdb cpio db freetds gc groff libmicrohttpd libnl3 mpc1 mpg123 ngrep nsd perl-socket6 rtpproxy tcpflow ucarp unbound userspace-rcu bash bzip2 coreutils curl file gawk git jq json-c less libuv libxml2 m4 make nano ncurses pixman readline sed sqlite tree wget xz zstd",
+  "max": 600,
+  "chunk": 3,
   "publish": true,
-  "note": "R41: full catalog on TC v33 -- triage batch 1 (overlay headers after the package's own, strip no-op, -fcommon/GNU ld flags dropped, closefrom declared, weak BSD shims, host doc tools, apt mirror fallback)"
+  "note": "R42 canary: native-mode configure (cross_compiling=maybe; cmake CROSSCOMPILING_EMULATOR, meson exe_wrapper = binfmt wali-run), real failure reasons; 21 configure-blocked + 24 regression canaries"
 }

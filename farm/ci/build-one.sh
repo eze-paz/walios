@@ -46,6 +46,17 @@ fi
 log="$OUT/$pkg.log"; : > "$log"
 bdir=$(mktemp -d); trap 'rm -rf "$bdir"' EXIT
 pkgver="?"; BUILD_SECS=0; DEPS=""
+# why: the reason a failed build gives -- its first real error line. The first line merely
+# containing "error" was the farm's own note listing the deps' archives (libgpg-error.a: 166 of
+# R41's 430 failures) or a configure check (strerror_r); the farm's notes, configure's checks
+# and recipe progress lines are skipped, and with no error line the log's last line stands.
+why() {
+  local l
+  l=$(grep -v -E '^(farm: |checking |Checking |-- |>>> |  > |configure: WARNING)' "$log" |
+      grep -m1 -E '(fatal )?error:|Error:|ERROR[: ]|CMake Error|\*\*\* |undefined (symbol|reference)|[Nn]ot found|No such file|cannot |Unsupported|not supported')
+  [ -n "$l" ] || l=$(grep -v -E '^\s*$' "$log" | tail -1)
+  printf '%s' "$l" | tr -d '\000-\037"\\' | cut -c1-120
+}
 emit() {  # status reason kind smoke
   local row deps
   # Runtime depends, as plain package names (the index lets `apk add` pull a module's deps).
@@ -340,7 +351,7 @@ if [ -n "$LUAMOD" ]; then
   if [ -n "$sm" ]; then
     tar czf "$OUT/$pkg.mod.tar.gz" -C "$pkgdir" $(cd "$pkgdir" && ls -d usr/lib/lua/5.4 usr/share/lua/5.4 usr/share/lua/common 2>/dev/null); emit pass module mod
   fi
-  emit fail "lua-no-module:$(grep -m1 -E 'error|Error|ERROR' "$log" | tr -d '\000-\037"\\' | cut -c1-60)"
+  emit fail "lua-no-module:$(why)"
 fi
 if [ -n "$PERLXS" ]; then
   # auto/**/*.so side modules + the .pm files that bootstrap them, under walios' vendor dirs.
@@ -350,9 +361,9 @@ if [ -n "$PERLXS" ]; then
   if [ -n "$sm" ] || { ! find "$SRC" -name '*.xs' | grep -q . && (cd "$pkgdir" && find usr -name '*.pm' 2>/dev/null) | grep -q .; }; then
     tar czf "$OUT/$pkg.mod.tar.gz" -C "$pkgdir" $(cd "$pkgdir" && ls -d usr/lib/perl5 usr/share/perl5 2>/dev/null); emit pass module mod
   fi
-  emit fail "perl-no-xs-module:$(grep -m1 -E 'error|Error|ERROR' "$log" | tr -d '\000-\037"\\' | cut -c1-60)"
+  emit fail "perl-no-xs-module:$(why)"
 fi
-[ -n "$PYPKG" ] && emit fail "python-no-output:$(grep -m1 -E 'ERROR|Error|error' "$log" | tr -d '\000-\037"\\' | cut -c1-60)"
+[ -n "$PYPKG" ] && emit fail "python-no-output:$(why)"
 if [ -n "$NOARCH" ]; then
   mdirs=$(cd "$pkgdir" && ls -d usr/share/perl5 usr/lib/perl5 usr/share/lua 2>/dev/null)
   if [ -n "$mdirs" ] && (cd "$pkgdir" && find $mdirs -type f \( -name '*.pm' -o -name '*.pl' -o -name '*.lua' \)) | grep -q .; then
@@ -390,4 +401,4 @@ fi
 # A NON-EMPTY archive or shared object: a failed compile still leaves `ar` an empty libfoo.a
 # (8 bytes, xxhash), which used to count as built and broke every dependent's configure.
 if [ -f "$OUT/$pkg.overlay.tar.gz" ] && tar tzvf "$OUT/$pkg.overlay.tar.gz" | awk '$1 ~ /^-/ && $3 > 8 && $6 ~ /\.(a|so)$/' | grep -q .; then emit pass lib-built lib; fi
-emit fail "no-wasm-output:$(grep -m1 -E 'error|Error|ERROR' "$log" | tr -d '\000-\037"\\' | cut -c1-60)"
+emit fail "no-wasm-output:$(why)"

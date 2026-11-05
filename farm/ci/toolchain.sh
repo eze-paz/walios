@@ -445,6 +445,8 @@ ar = '$L/llvm-ar'
 strip = '$TC/bin/wali-strip'
 nm = '$L/llvm-nm'
 pkg-config = 'pkg-config'
+# (cc.run() checks, and the sanity check, run the wasm program on the build machine: farm-wave.yml)
+exe_wrapper = '/usr/local/bin/wali-run'
 [host_machine]
 system = 'linux'
 cpu_family = 'wasm32'
@@ -497,6 +499,9 @@ chmod +x bin/meson
 cat > wali.cmake <<EOF
 set(CMAKE_SYSTEM_NAME Linux)
 set(CMAKE_SYSTEM_PROCESSOR wasm32)
+# try_run() and check_c_source_runs() run the wasm program on the build machine (farm-wave.yml's
+# wali-run), instead of failing as an unanswered cross-compile run.
+set(CMAKE_CROSSCOMPILING_EMULATOR /usr/local/bin/wali-run)
 set(CMAKE_C_COMPILER $TC/bin/wali-cc)
 set(CMAKE_CXX_COMPILER $TC/bin/wali-c++)
 set(CMAKE_AR $L/llvm-ar CACHE FILEPATH "")
