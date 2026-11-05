@@ -211,7 +211,7 @@ pkgdir="$bdir/pkg"; mkdir -p "$pkgdir"
 cat > "$bdir/.farm-build.sh" <<'EOS'
 set +u
 # (Lua modules: 5.4's headers before /usr/include, which holds lua5.1's lua.h.)
-export WALI_EXTRA_CFLAGS="${LUAMOD:+-I$OVERLAY/usr/include/lua5.4 }-I$OVERLAY/usr/include${PERLXS:+ -fwrapv -fno-strict-aliasing}${ABIFLAGS:+ $ABIFLAGS}" WALI_EXTRA_LDFLAGS="-L$OVERLAY/usr/lib -L$OVERLAY/lib" WALI_OVERLAY="$OVERLAY"
+export WALI_EXTRA_CFLAGS="${LUAMOD:+-I$OVERLAY/usr/include/lua5.4 }${PERLXS:+-fwrapv -fno-strict-aliasing}${ABIFLAGS:+ $ABIFLAGS}" WALI_LATE_CFLAGS="-I$OVERLAY/usr/include" WALI_EXTRA_LDFLAGS="-L$OVERLAY/usr/lib -L$OVERLAY/lib" WALI_OVERLAY="$OVERLAY"
 # Deps' *-config scripts (gpgrt-config, pcre2-config, xml2-config...) are shell scripts the
 # recipes look up on PATH -- last, so host tools still win over the overlay's wasm binaries.
 # (No CMAKE_PREFIX_PATH: cmake searches PREFIX/bin for programs and took the overlay's wasm ninja.)

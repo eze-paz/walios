@@ -100,7 +100,7 @@ fi
 cat > env.sh <<EOF
 export WALI_TC=$TC WALI_LLVM=$L WALI_SYSROOT=$S WALI_ABI=$ABI WALI_TARGET="$TGT" WALI_SIDE_OBJ="$SIDEOBJ"
 export CC=$TC/bin/wali-cc CXX=$TC/bin/wali-c++ LD=$TC/bin/wali-ld
-export AR=$L/llvm-ar RANLIB=$L/llvm-ranlib NM=$L/llvm-nm STRIP=$L/llvm-strip OBJCOPY=$L/llvm-objcopy
+export AR=$L/llvm-ar RANLIB=$L/llvm-ranlib NM=$L/llvm-nm STRIP=$TC/bin/wali-strip OBJCOPY=$L/llvm-objcopy
 export CMAKE_TOOLCHAIN_FILE=$TC/wali.cmake
 export PATH=$TC/bin:\$PATH
 EOF
@@ -157,8 +157,11 @@ F=($TGT --sysroot=$S -nostdlibinc $cxx -isystem $S/include -D_GNU_SOURCE -DXSIMD
    -D__STDC_ISO_10646__=201206L -O2 -mllvm -wasm-enable-sjlj -fwasm-exceptions -matomics -mbulk-memory -mexception-handling -msimd128 -pthread
    -Wno-implicit-function-declaration -Wno-int-conversion -Wno-incompatible-pointer-types
    -Wno-incompatible-function-pointer-types -Wno-unused-command-line-argument -Wno-ignored-optimization-argument
-   -Wno-unknown-warning-option -Wno-long-long $cxxdefs $ABIDEFS
+   -Wno-unknown-warning-option -Wno-long-long -Wno-macro-redefined $cxxdefs $ABIDEFS
    \${WALI_EXTRA_CFLAGS:-})
+# \$WALI_LATE_CFLAGS go after the package's own flags: the overlay's include dir must not shadow
+# a package's bundled headers of the same name (git's, util-linux's, cmake's own copies).
+LATE=(\${WALI_LATE_CFLAGS:-})
 # \$WALI_SIDE = a runtime's export list (lua-exports.txt, perl-exports.txt): the package is a
 # C module that runtime dlopen()s, so objects are PIC with visible symbols and -shared links
 # a wasm side module that may import only what the runtime exports.
@@ -168,7 +171,7 @@ F=($TGT --sysroot=$S -nostdlibinc $cxx -isystem $S/include -D_GNU_SOURCE -DXSIMD
 F+=(-fPIC); [ -n "\${WALI_SIDE:-}" ] && F+=(-fvisibility=default)
 A=()
 for a in "\$@"; do case "\$a" in
-  -rdynamic|-static|-s|-fPIC|-fpic|-fPIE|-fpie|-pie|-flto|-flto=*|-fprofile-generate|-fprofile-generate=*|-fprofile-use|-fprofile-use=*|-fprofile-instr-generate*|-fprofile-instr-use*|-ffat-lto-objects|-fuse-linker-plugin|-fstack-protector*|-fstack-clash-protection) ;;   # (host perl Config ldflags in Makefile.PL probes)
+  -rdynamic|-static|-s|-fPIC|-fpic|-fPIE|-fpie|-pie|-flto|-flto=*|-fprofile-generate|-fprofile-generate=*|-fprofile-use|-fprofile-use=*|-fprofile-instr-generate*|-fprofile-instr-use*|-ffat-lto-objects|-fuse-linker-plugin|-fstack-protector*|-fstack-clash-protection|-fcommon) ;;   # -fcommon: wasm objects have no common symbols;   # (host perl Config ldflags in Makefile.PL probes)
   # the build host's headers and libraries (Pillow's setup.py adds /usr/include and /usr/lib):
   # a subdirectory means the overlay's copy (lpeg's -I/usr/include/lua5.4), the rest is dropped
   -I/usr/include/*|-I/usr/local/include/*|-L/usr/lib/*|-L/usr/local/lib/*)
@@ -186,7 +189,7 @@ for a in "\$@"; do case "\$a" in
       if [ \$skip = 1 ]; then skip=0; continue; fi
       case "\$x" in
         -z|-soname|-h|-rpath|-rpath-link|--version-script|-Map) skip=1;;
-        --start-group|--end-group|--as-needed|--no-as-needed|--gc-sections|--warn-common|--sort-common|-O1|-O2|--hash-style=*|-soname=*|--version-script=*|-Bsymbolic*|--cref|--no-undefined|--fatal-warnings|--enable-new-dtags|--disable-new-dtags|-rpath=*|-rpath-link=*|--build-id*|-Map=*|-E|--export-dynamic|--icf=*|-znoexecstack|-zrelro|-znow|-zdefs) ;;
+        --start-group|--end-group|--as-needed|--no-as-needed|--gc-sections|--warn-common|--sort-common|-O1|-O2|--hash-style=*|-soname=*|--version-script=*|-Bsymbolic*|--cref|--no-undefined|--fatal-warnings|--enable-new-dtags|--disable-new-dtags|-rpath=*|-rpath-link=*|--build-id*|-Map=*|-E|--export-dynamic|--icf=*|-znoexecstack|-zrelro|-znow|-zdefs|-warn-common|-stats|--stats|--no-copy-dt-needed-entries) ;;
         *) k+=("\$x");;
       esac
     done
@@ -205,7 +208,7 @@ if [ \$link = 1 ] && [ \$shared = 1 ] && [ -n "\${WALI_SIDE:-}" ]; then
   # __tls_base, 0 until the loader runs __wasm_init_tls on a block (wasm-ld makes it hidden).
   # Last, compiler-rt's builtins, as a program link has them: the long-double (IEEE quad)
   # helpers clang calls (__trunctfdf2, __multf3... FCGI) are not among the runtimes' exports.
-  exec $L/clang "\${F[@]}" "\${LP[@]}" "\${S2[@]}" "\${D2[@]}" $S/lib/libwali-sideunwind.a $S/lib/libclang_rt.builtins.a -nostdlib -Wl,--no-entry,--experimental-pic,--shared-memory,--allow-undefined-file=\$WALI_SIDE,--export-if-defined=__wasm_init_tls,--export-if-defined=__tls_size,--export-if-defined=__tls_align $SIDEOBJ
+  exec $L/clang "\${F[@]}" "\${LP[@]}" "\${S2[@]}" "\${LATE[@]}" "\${D2[@]}" $S/lib/libwali-sideunwind.a $S/lib/libclang_rt.builtins.a -nostdlib -Wl,--no-entry,--experimental-pic,--shared-memory,--allow-undefined-file=\$WALI_SIDE,--export-if-defined=__wasm_init_tls,--export-if-defined=__tls_size,--export-if-defined=__tls_align $SIDEOBJ
 fi
 if [ \$link = 1 ] && [ \$shared = 1 ]; then
   # The objects, and the members of the build's OWN static libraries on the line: a shared
@@ -249,13 +252,13 @@ if [ \$link = 1 ]; then
   if [ \${#G[@]} -gt 0 ]; then
     # With the overlay group first; if anything in it breaks the link, the same link without
     # it (and that attempt's own errors are what the caller sees).
-    $L/$drv "\${F[@]}" "\${A[@]}" "\${LINK[@]}" \${WALI_EXTRA_LIBS:-} "\${G[@]}" "\${TAIL[@]}" 2>/dev/null && exit 0
+    $L/$drv "\${F[@]}" "\${A[@]}" "\${LATE[@]}" "\${LINK[@]}" \${WALI_EXTRA_LIBS:-} "\${G[@]}" "\${TAIL[@]}" 2>/dev/null && exit 0
   fi
-  exec $L/$drv "\${F[@]}" "\${A[@]}" "\${LINK[@]}" \${WALI_EXTRA_LIBS:-} "\${TAIL[@]}"
+  exec $L/$drv "\${F[@]}" "\${A[@]}" "\${LATE[@]}" "\${LINK[@]}" \${WALI_EXTRA_LIBS:-} "\${TAIL[@]}"
 fi
 # A compile that fails in ELF-only inline assembly gets one retry without it (wali-noelfasm).
-e=\$(mktemp); $L/$drv "\${F[@]}" "\${A[@]}" 2>"\$e"; rc=\$?
-if [ \$rc != 0 ] && grep -q '<inline asm>' "\$e" && $TC/bin/wali-noelfasm $L/$drv "\${F[@]}" "\${A[@]}"; then rm -f "\$e"; exit 0; fi
+e=\$(mktemp); $L/$drv "\${F[@]}" "\${A[@]}" "\${LATE[@]}" 2>"\$e"; rc=\$?
+if [ \$rc != 0 ] && grep -q '<inline asm>' "\$e" && $TC/bin/wali-noelfasm $L/$drv "\${F[@]}" "\${A[@]}" "\${LATE[@]}"; then rm -f "\$e"; exit 0; fi
 cat "\$e" >&2; rm -f "\$e"; exit \$rc
 EOF
   chmod +x bin/wali-$d
@@ -369,6 +372,9 @@ if [ ! -f $S/lib/libwali-sideunwind.a ]; then
     -c "$HERE"/shim-side/unwind-side.c -o $S/lib/unwind-side.o
   $L/llvm-ar rcs $S/lib/libwali-sideunwind.a $S/lib/unwind-side.o
 fi
+# closefrom(), glibc 2.34+'s declaration (libwali-farm.a defines it): xapian-core calls it once
+# configure's link test finds it.
+grep -q closefrom $S/include/unistd.h || printf '\n#ifndef _WALI_CLOSEFROM\n#define _WALI_CLOSEFROM\n#ifdef __cplusplus\nextern "C"\n#endif\nvoid closefrom(int);\n#endif\n' >> $S/include/unistd.h
 [ -f $S/include/error.h ] || cat > $S/include/error.h <<'EOF'
 /* glibc <error.h>, implemented by libwali-farm.a (farm/ci/shim/error.c). */
 #ifndef _ERROR_H
@@ -416,7 +422,17 @@ cat >/dev/null
 printf '#!/bin/sh
 exit 0
 ' > bin/scanelf
-chmod +x bin/cmake3.5 bin/scdoc bin/scanelf
+# strip / install -s: a no-op that still honours -o. llvm-strip drops custom sections, the
+# wali.abi marker among them, and the kernel then runs an ILP32 program as the other ABI.
+cat > bin/wali-strip <<'EOF'
+#!/bin/sh
+o=""; f=""
+while [ $# -gt 0 ]; do case "$1" in -o) o=$2; shift;; -o*) o=${1#-o};; -*) ;; *) f=$1;; esac; shift; done
+[ -n "$o" ] && [ -n "$f" ] && [ "$o" != "$f" ] && cp -f "$f" "$o"
+exit 0
+EOF
+ln -sf wali-strip bin/strip
+chmod +x bin/cmake3.5 bin/scdoc bin/scanelf bin/wali-strip
 
 # meson: a cross file, and abuild-meson (Alpine's wrapper around `meson setup`).
 cat > wali.meson <<EOF
@@ -424,7 +440,7 @@ cat > wali.meson <<EOF
 c = '$TC/bin/wali-cc'
 cpp = '$TC/bin/wali-c++'
 ar = '$L/llvm-ar'
-strip = '$L/llvm-strip'
+strip = '$TC/bin/wali-strip'
 nm = '$L/llvm-nm'
 pkg-config = 'pkg-config'
 [host_machine]

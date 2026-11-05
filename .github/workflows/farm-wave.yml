@@ -9,7 +9,7 @@ on:
 
 env:
   TC: ${{ github.workspace }}/../wali-tc
-  TC_KEY: wali-tc-llvm22.1.3-pkgs-2026-10-31-x1-v32-ilp32
+  TC_KEY: wali-tc-llvm22.1.3-pkgs-2026-10-31-x1-v33-ilp32
 
 jobs:
   build:
@@ -36,8 +36,15 @@ jobs:
           # Ubuntu's mirror once held a job 84 minutes in apt: short timeouts, retries, and
           # the whole install retried rather than waited on.
           A="-o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30"
+          # R40 lost 17 jobs to a stalled Azure mirror (3 x 600 s): the third try uses archive.ubuntu.com.
+          mirror() { sudo sed -i 's|http://azure.archive.ubuntu.com|http://archive.ubuntu.com|g' /etc/apt/sources.list.d/*.sources /etc/apt/sources.list 2>/dev/null; sudo timeout 300 apt-get $A update -qq; }
           for t in 1 2 3; do sudo timeout 300 apt-get $A update -qq && break; done
-          for t in 1 2 3; do sudo timeout 600 apt-get $A install -y -qq autoconf automake libtool autopoint pkgconf bison flex gettext texinfo gperf help2man meson ninja-build cmake fakeroot autotools-dev autoconf-archive libarchive-tools lzip unzip xmlto asciidoc-base scons lua5.4 python3-docutils docbook-xsl xsltproc >/dev/null && break; [ $t = 3 ] && exit 1; done
+          for t in 1 2 3; do [ $t = 3 ] && mirror; sudo timeout 600 apt-get $A install -y -qq autoconf automake libtool autopoint pkgconf bison flex gettext texinfo gperf help2man meson ninja-build cmake fakeroot autotools-dev autoconf-archive libarchive-tools lzip unzip xmlto asciidoc-base scons lua5.4 python3-docutils docbook-xsl xsltproc >/dev/null && break; [ $t = 3 ] && exit 1; done
+          # Doc and code-generation tools some recipes run on the build host (the R39 triage: doxygen,
+          # po4a, sphinx-build, protoc, googletest sources, qjs, muon, docbook2x, a2x). Best effort,
+          # one by one: a name this Ubuntu lacks must not fail the job.
+          for p in doxygen po4a python3-sphinx protobuf-compiler googletest libgtest-dev quickjs muon-meson muon docbook2x asciidoc; do
+            sudo timeout 120 apt-get $A install -y -qq --no-install-recommends "$p" >/dev/null 2>&1 || echo "optional build tool not installed: $p"; done
           # Ubuntu's meson (1.3) is older than glib and friends require; pip's lands in
           # /usr/local/bin, ahead of /usr/bin on PATH.
           sudo pip3 install -q --break-system-packages --upgrade meson
