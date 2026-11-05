@@ -1,7 +1,6 @@
 {
-  "pkgs": "aspell augeas cdparanoia cgdb cpio db freetds gc groff libmicrohttpd libnl3 mpc1 mpg123 ngrep nsd perl-socket6 rtpproxy tcpflow ucarp unbound userspace-rcu bash bzip2 coreutils curl file gawk git jq json-c less libuv libxml2 m4 make nano ncurses pixman readline sed sqlite tree wget xz zstd",
-  "max": 600,
-  "chunk": 3,
+  "all": true,
+  "max": 3000,
   "publish": true,
-  "note": "R43 canary (R42 lost every job to unwedge under bash -e): native-mode configure (cross_compiling=maybe; cmake CROSSCOMPILING_EMULATOR, meson exe_wrapper = binfmt wali-run), real failure reasons; 21 configure-blocked + 24 regression canaries"
+  "note": "R44 full catalog: R43 canary results kept (cmake/meson emulators, real failure reasons, TC v35 batch) minus native autoconf (reverted); build tools installed offline from the plan job's debs"
 }

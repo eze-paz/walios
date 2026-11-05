@@ -4,13 +4,14 @@
 . "$FARM_CI_DIR/../config.site"
 enable_shared=no
 enable_static=yes
-# Native-mode configure: the build machines run wasm programs (binfmt_misc -> host/host.js,
-# farm-wave.yml), so configure RUNS its test programs against walios' libc instead of guessing
-# (AC_RUN_IFELSE, AC_COMPUTE_INT's sizes, "cannot run test program while cross compiling").
-# "maybe", not "no": autoconf runs its first program and, if that fails, falls back to a cross
-# build by itself. config.site is read after --build/--host set cross_compiling=yes, so this wins.
-# The cache answers above still stand (autoconf skips a test whose ac_cv_ value is set).
-cross_compiling=maybe
+# Always a cross build, even when a recipe runs ./configure without --host: otherwise
+# AC_PROG_CC tries to RUN a test program ("cannot run C compiled programs").
+# R43 tried native mode (cross_compiling=maybe, test programs run through binfmt wali-run):
+# +3 (cdparanoia, ucarp, perl-socket6) but -3 core ones with many dependents -- ncurses and flex
+# then build their host-side generators for wasm (gcc got clang's -Qunused-arguments; flex's
+# stage1flex ran under wali-run and crashed), pcre2's configure stopped. cmake's
+# CROSSCOMPILING_EMULATOR and meson's exe_wrapper stay: they keep the build a cross build.
+cross_compiling=yes
 # No JIT backend targets wasm (pcre2's sljit: "Unsupported architecture"); Alpine enables
 # it for every arch it knows. config.site is read after the command line, so this wins.
 enable_jit=no
