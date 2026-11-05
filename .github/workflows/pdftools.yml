@@ -26,6 +26,7 @@ jobs:
           - { c: poppler, pkg: poppler-utils }
           - { c: mupdf, pkg: mupdf-tools }
           - { c: qpdf, pkg: qpdf }
+          - { c: ghostscript, pkg: ghostscript }
     steps:
       - uses: actions/checkout@v4
       - name: Host tools
@@ -76,5 +77,20 @@ jobs:
         run: |
           ls -la art
           tag=pdftools-$(date -u +%F)-${GITHUB_RUN_NUMBER}
+          # index.json in the farm's shape: kind 'pkg' = a tarball of programs mounted at /
+          # (sandpie modules/walios-backend.js), under the Alpine names and their base names.
+          cd art && TAG=$tag node -e '
+            const fs = require("fs"), cp = require("child_process"), crypto = require("crypto");
+            const VER = { "poppler-utils": "24.08.0", "mupdf-tools": "1.24.10", qpdf: "11.9.1", ghostscript: "10.04.0" };
+            const ALIAS = { "poppler-utils": ["poppler"], "mupdf-tools": ["mupdf"], ghostscript: ["gs"] };
+            const packages = {};
+            for (const f of fs.readdirSync(".").filter((f) => f.endsWith(".pkg.tar.gz"))) {
+              const n = f.replace(/\.pkg\.tar\.gz$/, ""), b = fs.readFileSync(f);
+              const bins = cp.execSync("tar tzf " + f).toString().split("\n").filter((l) => /^usr\/bin\/[^/]+$/.test(l)).map((l) => l.slice(8));
+              const e = { ver: VER[n] || "", kind: "pkg", file: f, size: b.length, sha256: crypto.createHash("sha256").update(b).digest("hex"), bins };
+              packages[n] = e; for (const a of ALIAS[n] || []) packages[a] = e;
+            }
+            fs.writeFileSync("index.json", JSON.stringify({ tag: process.env.TAG, built: new Date().toISOString(), packages }, null, 1));
+            console.log(fs.readFileSync("index.json", "utf8"));' && cd ..
           gh release create "$tag" --repo "$GITHUB_REPOSITORY" --prerelease --target "$GITHUB_SHA" \
             --title "$tag" --notes "PDF tools for walios (branch ${GITHUB_REF_NAME}, run ${GITHUB_RUN_ID}); smoke-*.txt = node-host test output" art/*

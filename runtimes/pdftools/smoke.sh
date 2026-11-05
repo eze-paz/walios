@@ -55,6 +55,13 @@ case "$WHAT" in
     mkdir ex && cd ex && t $RUN $B/mutool extract ../ficha.pdf; ls -la; cd ..
     t $RUN $B/mutool merge -o merged.pdf ficha.pdf 1,3 && $RUN $B/mutool info merged.pdf | grep -i pages
     ;;
+  ghostscript)
+    t $RUN $B/gs --version
+    t $RUN $B/gs -q -dNOPAUSE -dBATCH -sDEVICE=png16m -r60 -sOutputFile=g-%d.png ficha.pdf; ls -la g-*; png g-*.png
+    [ "$(ls g-*.png | wc -l)" = 3 ] || { echo "CHECK: gs did not render 3 pages"; fail=1; }
+    t $RUN $B/gs -q -dNOPAUSE -dBATCH -sDEVICE=txtwrite -sOutputFile=- ficha.pdf
+    t $RUN $B/gs -q -dNOPAUSE -dBATCH -sDEVICE=pdfwrite -dFirstPage=2 -dLastPage=3 -sOutputFile=gs-part.pdf ficha.pdf && ls -la gs-part.pdf
+    ;;
   qpdf)
     t $RUN $B/qpdf --version
     t $RUN $B/qpdf --check ficha.pdf

@@ -35,6 +35,7 @@ LCMS_VER=2.16
 POPPLER_VER=24.08.0
 MUPDF_VER=1.24.10
 QPDF_VER=11.9.1
+GS_VER=10.04.0
 
 # Libraries install under $OV/usr (DESTDIR): the toolchain's cmake file adds $WALI_OVERLAY to
 # CMAKE_FIND_ROOT_PATH, and with it set every program link also gets the overlay's archives
@@ -129,13 +130,13 @@ mupdf() {
   fetch https://mupdf.com/downloads/archive/mupdf-$MUPDF_VER-source.tar.gz
   # Upstream's own switches: no X11/GL viewers, no curl, fonts embedded as generated C (not
   # objcopy'd ELF), the CJK fallback fonts left out (TOFU_CJK: 20 MB of the binary).
-  run mupdf make -C src/mupdf-$MUPDF_VER -j$J build=release OS=Linux shared=no verbose=yes \
+  run mupdf make -C src/mupdf-$MUPDF_VER-source -j$J build=release OS=Linux shared=no verbose=yes \
     HAVE_X11=no HAVE_GLUT=no HAVE_CURL=no HAVE_OBJCOPY=no HAVE_LEPTONICA=no HAVE_TESSERACT=no \
     CC="$CC" CXX="$CXX" AR="$AR" XCFLAGS="-DTOFU_CJK" tools
   local d=$R/pkg/mupdf-tools
   rm -rf "$d"
-  inst src/mupdf-$MUPDF_VER/build/release/mutool "$d/usr/bin/mutool"
-  [ -f src/mupdf-$MUPDF_VER/build/release/muraster ] && inst src/mupdf-$MUPDF_VER/build/release/muraster "$d/usr/bin/muraster"
+  inst src/mupdf-$MUPDF_VER-source/build/release/mutool "$d/usr/bin/mutool"
+  [ -f src/mupdf-$MUPDF_VER-source/build/release/muraster ] && inst src/mupdf-$MUPDF_VER-source/build/release/muraster "$d/usr/bin/muraster"
   pack mupdf-tools
 }
 
@@ -153,8 +154,26 @@ qpdf() {
   pack qpdf
 }
 
+ghostscript() {
+  fetch https://github.com/ArtifexSoftware/ghostpdl-downloads/releases/download/gs${GS_VER//./}/ghostscript-$GS_VER.tar.xz
+  local s=$R/src/ghostscript-$GS_VER
+  # arch.h describes the TARGET (sizes, alignment, endianness): genarch built for walios and
+  # run on the node host (binfmt wali-run), as ghostscript's cross-compile docs ask. Its other
+  # build tools are host programs (CCAUX).
+  run gs-arch bash -c "$CC -O1 -o $R/genarch.wasm $s/base/genarch.c && wali-run $R/genarch.wasm $R/gs-arch.h && cat $R/gs-arch.h"
+  run gs-configure bash -c "cd $s && ./configure --host=wasm32-unknown-linux-musl --build=x86_64-pc-linux-gnu CCAUX=gcc CFLAGSAUX=-O1 \
+    --with-arch_h=$R/gs-arch.h --without-x --disable-cups --disable-dbus --disable-gtk --disable-fontconfig --without-libidn \
+    --without-libpaper --without-tesseract --without-pdftoraster --without-ijs --without-urf --disable-threading"
+  run gs-build make -C "$s" -j$J
+  local d=$R/pkg/ghostscript
+  rm -rf "$d"
+  inst "$s/bin/gs" "$d/usr/bin/gs"
+  pack ghostscript
+}
+
 case "$WHAT" in
   deps) deps;;
+  ghostscript) ghostscript;;
   poppler) poppler;;
   mupdf) mupdf;;
   qpdf) qpdf;;
