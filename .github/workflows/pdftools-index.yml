@@ -1,0 +1,39 @@
+# One farm index with the PDF tools in it: a farm release's index.json plus a pdftools
+# release's packages (kind 'pkg'), every file rewritten relative to the new release, published
+# as <farm tag>-pdf. sandpie's FARM_INDEX points at it. Asked for by pdftools-index/merge.json.
+name: pdftools-index
+on:
+  push:
+    branches: [claude/pdftools]
+    paths: ['pdftools-index/merge.json']
+
+permissions:
+  contents: write
+
+jobs:
+  merge:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with: { sparse-checkout: pdftools-index }
+      - name: Merge and publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          eval "$(node -e 'const m=require("./pdftools-index/merge.json");console.log(`FARM=${m.farm} PDF=${m.pdftools} TAG=${m.tag}`)')"
+          REL=https://github.com/eze-paz/walios/releases/download
+          curl -sSfL --retry 8 -o farm.json $REL/$FARM/index.json
+          curl -sSfL --retry 8 -o pdf.json $REL/$PDF/index.json
+          mkdir out && FARM=$FARM PDF=$PDF TAG=$TAG node -e '
+            const f = require("./farm.json"), p = require("./pdf.json"), { FARM, PDF, TAG } = process.env;
+            const rel = (tag, file) => file.startsWith("../") ? file : "../" + tag + "/" + file;
+            for (const e of Object.values(f.packages)) if (e.file) e.file = rel(FARM, e.file);
+            let n = 0;
+            for (const [k, e] of Object.entries(p.packages)) { f.packages[k] = { ...e, file: rel(PDF, e.file) }; n++;
+              if (f.failed) delete f.failed[k]; if (f.skipped) delete f.skipped[k]; }
+            f.tag = TAG; f.merged = { farm: FARM, pdftools: PDF };
+            require("fs").writeFileSync("out/index.json", JSON.stringify(f));
+            console.log(TAG, Object.keys(f.packages).length, "packages,", n, "from", PDF);'
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --prerelease --target "$GITHUB_SHA" \
+            --title "$TAG" --notes "$FARM index + $PDF packages (kind pkg); files point into those releases" out/index.json
