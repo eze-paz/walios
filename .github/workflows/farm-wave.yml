@@ -38,7 +38,8 @@ jobs:
           A="-o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=300"
           # R41: a timeout that kills apt mid-install leaves dpkg locked and half-configured, and every
           # retry then fails on the lock. Before a retry: end what is left, finish dpkg's own work.
-          unwedge() { sudo pkill -9 -x apt-get 2>/dev/null; sudo pkill -9 -x dpkg 2>/dev/null; sudo dpkg --configure -a >/dev/null 2>&1 || true; }
+          # (|| true on each: the step runs under bash -e, and pkill finding nothing exits 1 -- R42 lost every job)
+          unwedge() { sudo pkill -9 -x apt-get 2>/dev/null || true; sudo pkill -9 -x dpkg 2>/dev/null || true; sudo dpkg --configure -a >/dev/null 2>&1 || true; }
           # R40 lost 17 jobs to a stalled Azure mirror (3 x 600 s): the third try uses archive.ubuntu.com.
           mirror() { sudo sed -i 's|http://azure.archive.ubuntu.com|http://archive.ubuntu.com|g' /etc/apt/sources.list.d/*.sources /etc/apt/sources.list 2>/dev/null; sudo timeout 300 apt-get $A update -qq; }
           for t in 1 2 3; do sudo timeout 300 apt-get $A update -qq && break; done

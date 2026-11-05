@@ -3,5 +3,5 @@
   "max": 600,
   "chunk": 3,
   "publish": true,
-  "note": "R42 canary: native-mode configure (cross_compiling=maybe; cmake CROSSCOMPILING_EMULATOR, meson exe_wrapper = binfmt wali-run), real failure reasons; 21 configure-blocked + 24 regression canaries"
+  "note": "R43 canary (R42 lost every job to unwedge under bash -e): native-mode configure (cross_compiling=maybe; cmake CROSSCOMPILING_EMULATOR, meson exe_wrapper = binfmt wali-run), real failure reasons; 21 configure-blocked + 24 regression canaries"
 }
