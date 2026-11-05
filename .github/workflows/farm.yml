@@ -30,7 +30,7 @@ concurrency:
 
 env:
   TC: ${{ github.workspace }}/../wali-tc
-  TC_KEY: wali-tc-llvm22.1.3-pkgs-2026-10-31-x1-v33-ilp32
+  TC_KEY: wali-tc-llvm22.1.3-pkgs-2026-10-31-x1-v34-ilp32
 
 jobs:
   plan:

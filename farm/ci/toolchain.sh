@@ -31,7 +31,8 @@ P=LLVM-$LLVM_VER-Linux-X64
 mkdir -p "$TC/bin" && cd "$TC"
 # Downloads go to a file with retries, then extract: a reset mid-stream (seen on a runner
 # after the cache was evicted) used to kill the job.
-fetch() { curl -sSfL --retry 6 --retry-all-errors --retry-delay 5 -o "$2" "$1"; }
+# GitHub's release CDN can answer 504 for minutes (R41 lost a job to 6 tries in 30 s).
+fetch() { curl -sSfL --retry 12 --retry-all-errors --retry-delay 20 -o "$2" "$1"; }
 if [ ! -x $P/bin/clang ]; then
   fetch https://github.com/llvm/llvm-project/releases/download/llvmorg-$LLVM_VER/$P.tar.xz llvm.tar.xz
   tar xJf llvm.tar.xz --wildcards "$P/bin/clang" "$P/bin/clang-22" "$P/bin/clang++" "$P/bin/lld" "$P/bin/wasm-ld" \
@@ -169,7 +170,7 @@ LATE=(\${WALI_LATE_CFLAGS:-})
 # libxml2/libxslt, Pillow libjpeg/libtiff), and wasm-ld links PIC objects into a static
 # program as well (GOT entries become internal globals).
 F+=(-fPIC); [ -n "\${WALI_SIDE:-}" ] && F+=(-fvisibility=default)
-A=()
+A=(); skip=0
 for a in "\$@"; do case "\$a" in
   -rdynamic|-static|-s|-fPIC|-fpic|-fPIE|-fpie|-pie|-flto|-flto=*|-fprofile-generate|-fprofile-generate=*|-fprofile-use|-fprofile-use=*|-fprofile-instr-generate*|-fprofile-instr-use*|-ffat-lto-objects|-fuse-linker-plugin|-fstack-protector*|-fstack-clash-protection|-fcommon) ;;   # -fcommon: wasm objects have no common symbols;   # (host perl Config ldflags in Makefile.PL probes)
   # the build host's headers and libraries (Pillow's setup.py adds /usr/include and /usr/lib):
@@ -184,7 +185,8 @@ for a in "\$@"; do case "\$a" in
   -Wl,*)
     # ELF-linker options wasm-ld rejects, filtered token by token: one -Wl, can carry several
     # (-Wl,-Map=x.map,--cref). -z/-soname/-rpath/... take the next token as their value.
-    IFS=, read -ra t <<< "\${a#-Wl,}"; k=(); skip=0
+    # The value may come in the next -Wl, argument (-Wl,-z -Wl,relro), so skip carries over.
+    IFS=, read -ra t <<< "\${a#-Wl,}"; k=()
     for x in "\${t[@]}"; do
       if [ \$skip = 1 ]; then skip=0; continue; fi
       case "\$x" in
