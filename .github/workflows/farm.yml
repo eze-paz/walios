@@ -104,6 +104,31 @@ jobs:
         with: { path: '${{ env.TC }}', key: '${{ env.TC_KEY }}' }
       - if: steps.tc.outputs.cache-hit != 'true'
         run: sudo apt-get install -y -qq libbsd-dev >/dev/null && bash farm/ci/toolchain.sh "$TC"
+      # The build tools' debs, downloaded once here; every build job installs them offline
+      # (farm/ci/apt-tools.sh). On a failed download nothing is cached and the jobs use the mirror.
+      - name: Build-tool debs (cached for every build job)
+        uses: actions/cache@v4
+        id: apt
+        with: { path: '~/aptc', key: "apt-${{ hashFiles('farm/ci/apt-tools.sh') }}-${{ github.run_id }}" }
+      - if: steps.apt.outputs.cache-hit != 'true'
+        run: |
+          . farm/ci/apt-tools.sh
+          A="-o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30"
+          D="-o Dir::Cache::archives=$HOME/aptc/archives --download-only"
+          mkdir -p ~/aptc/archives/partial ~/aptc/lists
+          ok=
+          for t in 1 2 3; do
+            [ $t = 3 ] && sudo sed -i 's|http://azure.archive.ubuntu.com|http://archive.ubuntu.com|g' /etc/apt/sources.list.d/*.sources /etc/apt/sources.list 2>/dev/null
+            sudo timeout 300 apt-get $A update -qq && sudo timeout 600 apt-get $A $D install -y -qq $APT_TOOLS >/dev/null && { ok=1; break; }
+          done
+          if [ -n "$ok" ]; then
+            for p in $APT_OPTIONAL; do sudo timeout 120 apt-get $A $D install -y -qq --no-install-recommends "$p" >/dev/null 2>&1 || echo "no deb: $p"; done
+            sudo cp -r /var/lib/apt/lists/. ~/aptc/lists/
+            sudo rm -rf ~/aptc/lists/partial ~/aptc/lists/lock ~/aptc/archives/partial ~/aptc/archives/lock
+            sudo chown -R "$USER" ~/aptc; du -sh ~/aptc; ls ~/aptc/archives | wc -l
+          else
+            sudo rm -rf ~/aptc; echo "deb download failed: build jobs install from the mirror"
+          fi
 
   wave0:
     needs: plan
