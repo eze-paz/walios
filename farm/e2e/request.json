@@ -1,9 +1,9 @@
 {
-  "tag": "farm-2026-11-05-44",
+  "tag": "farm-2026-11-06-47",
   "busybox": "runtimes-ilp32-2026-11-03-7",
   "python": "runtimes-ilp32-2026-11-03-6",
   "perl": "runtimes-ilp32-2026-11-03-8",
   "lua": "runtimes-ilp32-2026-11-02-3",
   "shards": 12,
-  "note": "R41 full catalog on TC v33 (triage batch 1)"
+  "note": "R44 full catalog on TC v35 (cmake/meson emulators, real failure reasons, offline build tools): 1159 built"
 }
