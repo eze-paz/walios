@@ -11,7 +11,8 @@ enable_static=yes
 # then build their host-side generators for wasm (gcc got clang's -Qunused-arguments; flex's
 # stage1flex ran under wali-run and crashed), pcre2's configure stopped. cmake's
 # CROSSCOMPILING_EMULATOR and meson's exe_wrapper stay: they keep the build a cross build.
-cross_compiling=yes
+# (build-one.sh's one retry after a check a cross build cannot answer sets FARM_CROSS=maybe)
+cross_compiling=${FARM_CROSS:-yes}
 # No JIT backend targets wasm (pcre2's sljit: "Unsupported architecture"); Alpine enables
 # it for every arch it knows. config.site is read after the command line, so this wins.
 enable_jit=no

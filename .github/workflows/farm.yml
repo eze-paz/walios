@@ -125,6 +125,19 @@ jobs:
             for p in $APT_OPTIONAL; do sudo timeout 120 apt-get $A $D install -y -qq --no-install-recommends "$p" >/dev/null 2>&1 || echo "no deb: $p"; done
             sudo cp -r /var/lib/apt/lists/. ~/aptc/lists/
             sudo rm -rf ~/aptc/lists/partial ~/aptc/lists/lock ~/aptc/archives/partial ~/aptc/archives/lock
+            # GNU libtool at Alpine's version (main/libtool), for recipes that autoreconf: Ubuntu's
+            # 2.4.7 libtoolize could not read libnl3's configure.ac and left the tarball's newer
+            # ltmain.sh beside its own older macros ("libtool: Version mismatch error"). The
+            # tarball is checked against Alpine's sha512. Build jobs install it under /usr/local.
+            LT=2.6.2 LTSHA=e4e4df9f191152241c813e3f79f6afdc4b8a0a6d9e94d76f2b9fbea6ab98a9f5280376ec34325b5a08bc93e5b702fb2e7183488294457ee8bed33e1ec8aa4a35
+            if sudo apt-get $A -o Dir::Cache::archives=$HOME/aptc/archives --no-download install -y -qq m4 make >/dev/null 2>&1 && {
+               curl -sSfL --retry 4 --retry-delay 10 -o /tmp/lt.tgz https://ftpmirror.gnu.org/gnu/libtool/libtool-$LT.tar.gz ||
+               curl -sSfL --retry 4 --retry-delay 10 -o /tmp/lt.tgz https://ftp.gnu.org/gnu/libtool/libtool-$LT.tar.gz; }; then
+              if echo "$LTSHA  /tmp/lt.tgz" | sha512sum -c --quiet && tar xzf /tmp/lt.tgz -C /tmp &&
+                 (cd /tmp/libtool-$LT && ./configure -q --prefix=/usr/local >/dev/null && make -s -j"$(nproc)" >/dev/null &&
+                  sudo make -s install DESTDIR=$HOME/aptc/libtool >/dev/null); then echo "libtool $LT built"
+              else sudo rm -rf ~/aptc/libtool; echo "libtool $LT not built: build jobs keep Ubuntu's"; fi
+            fi
             sudo chown -R "$USER" ~/aptc; du -sh ~/aptc; ls ~/aptc/archives | wc -l
           else
             sudo rm -rf ~/aptc; echo "deb download failed: build jobs install from the mirror"

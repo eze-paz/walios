@@ -44,6 +44,7 @@ Cflags: -I${includedir}
   fi
 fi
 log="$OUT/$pkg.log"; : > "$log"
+[ -n "${FARM_RETRY:-}" ] && echo "farm: native configure (cross_compiling=$FARM_CROSS): the cross build stopped on a check it cannot answer ($pkg.cross.log)" >> "$log"
 bdir=$(mktemp -d); trap 'rm -rf "$bdir"' EXIT
 pkgver="?"; BUILD_SECS=0; DEPS=""
 # why: the reason a failed build gives -- its first real error line. The first line merely
@@ -59,6 +60,16 @@ why() {
 }
 emit() {  # status reason kind smoke
   local row deps
+  # A configure that stopped on a check it cannot do in a cross build (AC_RUN_IFELSE without a
+  # cross answer, AC_CHECK_FILE: apr's /dev/zero, cgdb's /dev/ptmx, dovecot's epoll test) is built
+  # once more in native mode, its test programs run through binfmt (wali-run): config.site's
+  # cross_compiling=maybe. Only then -- R43 showed native mode as the default costs packages that
+  # build in cross mode (ncurses, flex, pcre2). The first attempt's log stays as <pkg>.cross.log.
+  if [ "$1" = fail ] && [ -z "${FARM_RETRY:-}" ] && [ -n "${log:-}" ] &&
+     grep -qE 'cannot (run test program|check for file existence) while cross compiling' "$log" 2>/dev/null; then
+    mv "$log" "$OUT/$pkg.cross.log"; rm -rf "${bdir:-/nonexistent}"
+    FARM_CROSS=maybe FARM_RETRY=1 exec bash "$HERE/build-one.sh" "$pkg" "$OVERLAY" "$OUT"
+  fi
   # Runtime depends, as plain package names (the index lets `apk add` pull a module's deps).
   deps=$(for d in $DEPS; do d=${d%%[<>=~]*}; case "$d" in ''|*:*|!*) ;; *) printf '"%s",' "$d";; esac; done)
   # abiwarn: format calls whose argument width differs from what the format reads (abiwarn.js);
@@ -244,8 +255,10 @@ export PKG_CONFIG_LIBDIR="$OVERLAY/usr/lib/pkgconfig:$OVERLAY/usr/share/pkgconfi
 # under the sysroot it is the overlay's: keep it (skarnet's configures build make's vpath from
 # --libs-only-L: "Unable to link against skalibs"; utmps, execline, s6-*).
 export PKG_CONFIG_ALLOW_SYSTEM_LIBS=1
+# Alpine's libtool macros (/usr/local, farm-wave.yml) before Ubuntu's older ones in /usr/share/aclocal.
+[ -d /usr/local/share/aclocal ] && export ACLOCAL_PATH="/usr/local/share/aclocal${ACLOCAL_PATH:+:$ACLOCAL_PATH}"
 export CARCH=wasm32 CLIBC=musl CBUILD=x86_64-pc-linux-gnu CHOST=wasm32-unknown-linux-musl CTARGET=wasm32-unknown-linux-musl
-export CTARGET_ARCH=wasm32 CBUILD_ARCH=x86_64 cross_compiling=yes JOBS=$(nproc) MAKEFLAGS="-j$(nproc)${PERLXS_MAKE:+ -- $PERLXS_MAKE}"
+export CTARGET_ARCH=wasm32 CBUILD_ARCH=x86_64 cross_compiling=${FARM_CROSS:-yes} JOBS=$(nproc) MAKEFLAGS="-j$(nproc)${PERLXS_MAKE:+ -- $PERLXS_MAKE}"
 export CC_FOR_BUILD=/usr/bin/gcc CXX_FOR_BUILD=/usr/bin/g++ BUILD_CC=/usr/bin/gcc BUILD_CXX=/usr/bin/g++ HOSTCC=/usr/bin/gcc HOSTCXX=/usr/bin/g++
 export srcdir="$BDIR" builddir="$SRC" pkgdir="$PKGDIR" subpkgdir="$BDIR/subpkg" startdir="$BDIR"
 msg() { echo ">>> $*"; }; msg2() { echo "  > $*"; }; warning() { echo "WARNING: $*"; }; warning2() { warning "$@"; }
@@ -260,6 +273,10 @@ source ./APKBUILD
 : "${builddir:=$SRC}"
 ( if type prepare >/dev/null 2>&1; then prepare; else default_prepare; fi )
 cd "$builddir" 2>/dev/null || cd "$SRC"
+# Samba's waf (talloc, tdb, tevent, ldb) refuses --build != --host without its own cross options;
+# the build host runs wasm (binfmt wali-run), so it configures as a native build and runs its
+# test programs through that, as autoconf could not be trusted to (R43) but waf's few checks can.
+[ -d "$builddir/buildtools/wafsamba" ] && export CBUILD="$CHOST"
 ( if type build >/dev/null 2>&1; then build; else make; fi )
 cd "$builddir" 2>/dev/null || cd "$SRC"
 ( if type package >/dev/null 2>&1; then package; fi )
