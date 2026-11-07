@@ -12,7 +12,10 @@
 //        output the Node host printed, "differs" = it ran but printed something else
 //   mod  py3-*: import each top-level module; perl-*: require the module the package is named
 //        after; lua-*: require it. The package's mod deps are mounted with it.
-//   lib  no case: a library is exercised by the programs and modules built on it.
+//   lib  the program libtest.sh linked against ALL of the library (every symbol it defines, each
+//        of its references resolved against libc and the other packages' archives) prints __libok;
+//        a library that did not link fails with the linker's error. Without libtest.json in
+//        --farm (an older release), libraries have no case.
 // Outcomes: pass, differs, fail (non-zero / import error), trap, timeout.
 import http from 'node:http';
 import fs from 'node:fs';
@@ -35,6 +38,8 @@ const LINKS = fs.existsSync(path.join(RT, 'busybox.links')) ? fs.readFileSync(pa
 const APPLETS = new Set(LINKS.map((l) => path.posix.basename(l)));
 const index = JSON.parse(fs.readFileSync(path.join(FARM, 'index.json'), 'utf8'));
 const P = index.packages;
+// libtest.sh's output beside the farm files: { lib: { ok, syms, archives, reason } }
+const LIBTEST = fs.existsSync(path.join(FARM, 'libtest.json')) ? JSON.parse(fs.readFileSync(path.join(FARM, 'libtest.json'), 'utf8')) : null;
 
 // ---- tar listing (ustar + GNU long names) of a .tar.gz ----
 function tarNames(file) {
@@ -63,6 +68,13 @@ const modDeps = (pkg, seen = new Set()) => {
 
 function buildCase(pkg) {
   const r = P[pkg];
+  if (r.kind === 'lib') {
+    const t = LIBTEST[pkg];
+    if (!t) return { pkg, kind: 'lib', fail: 'no libtest result' };
+    if (!t.ok) return { pkg, kind: 'lib', fail: t.reason };
+    return { pkg, kind: 'lib', manifest: { libtest: '/f/' + pkg + '.libtest.wasm' }, tars: [],
+      cmd: `/bin/libtest >/tmp/o 2>&1 </dev/null; echo "__rc=$?"; head -c 600 /tmp/o` };
+  }
   if (r.kind === 'exe') {
     const m = /^([^:\s]+): ?([\s\S]*)$/.exec(r.smoke || '');
     const prog = m ? m[1] : pkg, expect = m ? m[2] : '';
@@ -132,6 +144,10 @@ function judge(c, r) {
     if (!c.expect || (want ? words(body).includes(want) : norm(body).includes(norm(c.expect)))) return ['pass', ''];
     return ['differs', norm(body).slice(0, 200) + '  [node host: ' + norm(c.expect).slice(0, 120) + ']'];
   }
+  if (c.kind === 'lib') {
+    const rc = Number((/__rc=(\d+)/.exec(out) || [])[1]);
+    return rc === 0 && /__libok/.test(out) ? ['pass', ''] : ['fail', `rc=${rc} ` + norm(out.replace(/\[host\][^\n]*\n?/g, '')).slice(0, 250)];
+  }
   if (c.kind === 'files-bin') {
     const rc = Number((/__rc=(\d+)/.exec(out) || [])[1]);
     const body = out.replace(/^[\s\S]*?__rc=\d+\n?/, '').replace(/\[host\][^\n]*\n?/g, '');
@@ -176,14 +192,14 @@ const runMsg = (c) => ({
 });
 const SYSCFG = '_sysconfigdata__linux_x86_64-linux-gnu.py';
 
-let pkgs = Object.keys(P).filter((k) => ['exe', 'mod'].includes(P[k].kind) && (!CATALOG || CATALOG.has(k)) && (!ONLY || ONLY.has(k))).sort();
+let pkgs = Object.keys(P).filter((k) => ['exe', 'mod', ...(LIBTEST ? ['lib'] : [])].includes(P[k].kind) && (!CATALOG || CATALOG.has(k)) && (!ONLY || ONLY.has(k))).sort();
 pkgs = pkgs.filter((_, i) => i % NSHARD === SHARD);
 // --fetch <base url>: download only this shard's files (and its modules' deps) from the
 // release's public download URLs -- the Releases API rate-limits a dozen shards pulling ~700 assets.
 const FETCH = arg('fetch');
 if (FETCH) {
   const need = new Set();
-  for (const k of pkgs) for (const d of [k, ...(P[k].kind === 'mod' ? modDeps(k) : [])]) if (P[d].file) need.add(P[d].file);
+  for (const k of pkgs) for (const d of [k, ...(P[k].kind === 'mod' ? modDeps(k) : [])]) if (P[d] && P[d].file) need.add(P[d].file);
   const todo = [...need].filter((f) => !fs.existsSync(path.join(FARM, loc(f))));
   let n = 0;
   await Promise.all(Array.from({ length: 8 }, async () => {
@@ -217,6 +233,7 @@ for (const eng of ENGINES) {
     if (c.prog && APPLETS.has(c.prog)) row.shadowed = c.prog;
     row.case = c.kind;
     if (c.skip) { row[eng] = ['skip', c.skip]; continue; }
+    if (c.fail) { row[eng] = ['fail', c.fail, 0]; continue; }
     const t = Date.now();
     const r = await page.evaluate(([m]) => window.walRun(m, 45000), [runMsg(c)]);
     row[eng] = [...judge(c, r), Date.now() - t];

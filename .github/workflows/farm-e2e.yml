@@ -35,8 +35,42 @@ jobs:
             fs.appendFileSync(process.env.GITHUB_OUTPUT, `req=${JSON.stringify(r)}\nshards=${JSON.stringify([...Array(n).keys()])}\n`);
             console.log(r);'
 
-  shard:
+  # Library cases (farm/e2e/libtest.sh): a program linked against ALL of each library the farm
+  # built, from the release's overlays.tar.gz, with the farm's own toolchain (its cache, the key
+  # farm.yml names). The shards run those programs in walios like every other case.
+  libtests:
     needs: plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      TC: ${{ github.workspace }}/../wali-tc
+      REQ: ${{ needs.plan.outputs.req }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: key
+        run: |
+          echo "tc=$(sed -n 's/^  TC_KEY: *//p' .github/workflows/farm.yml | head -1)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache/restore@v4
+        id: tc
+        with: { path: '${{ env.TC }}', key: '${{ steps.key.outputs.tc }}' }
+      - if: steps.tc.outputs.cache-hit != 'true'
+        run: sudo apt-get install -y -qq libbsd-dev >/dev/null && bash farm/ci/toolchain.sh "$TC"
+      - name: Link
+        run: |
+          TAG=$(node -e "console.log(JSON.parse(process.env.REQ).tag)")
+          REL="https://github.com/${{ github.repository }}/releases/download/$TAG"
+          curl -fsSL --retry 5 --retry-delay 5 -o index.json "$REL/index.json"
+          curl -fsSL --retry 5 --retry-delay 10 -o "$RUNNER_TEMP/overlays.tar.gz" "$REL/overlays.tar.gz"
+          source "$TC/env.sh"
+          bash farm/e2e/libtest.sh index.json "$RUNNER_TEMP/overlays.tar.gz" farm/ci/catalog.txt libtests | tail -200
+          rm -f "$RUNNER_TEMP/overlays.tar.gz"
+      - uses: actions/upload-artifact@v4
+        with: { name: libtests, path: 'libtests/*', if-no-files-found: ignore, retention-days: 14 }
+
+  shard:
+    needs: [plan, libtests]
+    # (libtests failing leaves the libraries without a case, not the whole e2e without results)
+    if: always() && needs.plan.result == 'success'
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     strategy:
@@ -70,10 +104,14 @@ jobs:
           cp browser/rootfs.tar.gz browser/pylib.tar.gz dl/rt/
           cp farm/e2e/kernel/*.js dl/kernel/
           ls -la dl/rt dl/kernel; ls dl/farm | wc -l
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with: { name: libtests, path: dl/farm }
       - name: Run
         run: |
           N=$(node -e "console.log(JSON.parse(process.env.REQ).shards || 8)")
-          node farm/e2e/run.mjs --farm dl/farm --rt dl/rt --kernel dl/kernel --catalog farm/ci/catalog.txt \
+          ONLY=$(node -e "console.log(JSON.parse(process.env.REQ).only || '')")
+          node farm/e2e/run.mjs --farm dl/farm --rt dl/rt --kernel dl/kernel --catalog farm/ci/catalog.txt ${ONLY:+--only "$ONLY"} \
             --shard ${{ matrix.shard }}/$N --out e2e-${{ matrix.shard }}.json \
             --fetch "https://github.com/${{ github.repository }}/releases/download/$(node -e "console.log(JSON.parse(process.env.REQ).tag)")"
       - uses: actions/upload-artifact@v4
