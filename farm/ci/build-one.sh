@@ -65,8 +65,9 @@ emit() {  # status reason kind smoke
   # once more in native mode, its test programs run through binfmt (wali-run): config.site's
   # cross_compiling=maybe. Only then -- R43 showed native mode as the default costs packages that
   # build in cross mode (ncurses, flex, pcre2). The first attempt's log stays as <pkg>.cross.log.
+  # ICU refuses a cross build outright (it wants a native build of itself, --with-cross-build).
   if [ "$1" = fail ] && [ -z "${FARM_RETRY:-}" ] && [ -n "${log:-}" ] &&
-     grep -qE 'cannot (run test program|check for file existence) while cross compiling' "$log" 2>/dev/null; then
+     grep -qE 'cannot (run test program|check for file existence) while cross compiling|Cross compiling but no --with-cross-build' "$log" 2>/dev/null; then
     mv "$log" "$OUT/$pkg.cross.log"; rm -rf "${bdir:-/nonexistent}"
     FARM_CROSS=maybe FARM_RETRY=1 exec bash "$HERE/build-one.sh" "$pkg" "$OVERLAY" "$OUT"
   fi
@@ -255,8 +256,10 @@ export PKG_CONFIG_LIBDIR="$OVERLAY/usr/lib/pkgconfig:$OVERLAY/usr/share/pkgconfi
 # under the sysroot it is the overlay's: keep it (skarnet's configures build make's vpath from
 # --libs-only-L: "Unable to link against skalibs"; utmps, execline, s6-*).
 export PKG_CONFIG_ALLOW_SYSTEM_LIBS=1
-# Alpine's libtool macros (/usr/local, farm-wave.yml) before Ubuntu's older ones in /usr/share/aclocal.
-[ -d /usr/local/share/aclocal ] && export ACLOCAL_PATH="/usr/local/share/aclocal${ACLOCAL_PATH:+:$ACLOCAL_PATH}"
+# Alpine's libtool macros (/usr/local, farm-wave.yml) before Ubuntu's older ones in /usr/share/aclocal
+# -- which stays on the path: Alpine's automake (also /usr/local) has /usr/local/share/aclocal as its
+# own system dir, and the third-party macros (pkg.m4, gettext's, autoconf-archive) are Ubuntu's.
+[ -d /usr/local/share/aclocal ] && export ACLOCAL_PATH="/usr/local/share/aclocal:/usr/share/aclocal${ACLOCAL_PATH:+:$ACLOCAL_PATH}"
 export CARCH=wasm32 CLIBC=musl CBUILD=x86_64-pc-linux-gnu CHOST=wasm32-unknown-linux-musl CTARGET=wasm32-unknown-linux-musl
 export CTARGET_ARCH=wasm32 CBUILD_ARCH=x86_64 cross_compiling=${FARM_CROSS:-yes} JOBS=$(nproc) MAKEFLAGS="-j$(nproc)${PERLXS_MAKE:+ -- $PERLXS_MAKE}"
 export CC_FOR_BUILD=/usr/bin/gcc CXX_FOR_BUILD=/usr/bin/g++ BUILD_CC=/usr/bin/gcc BUILD_CXX=/usr/bin/g++ HOSTCC=/usr/bin/gcc HOSTCXX=/usr/bin/g++

@@ -1,7 +1,7 @@
 {
-  "pkgs": "libgcrypt fsarchiver gnupg skalibs execline utmps s6 s6-rc s6-networking s6-linux-init s6-dns util-linux e2fsprogs nfs-utils parted glib avahi dbus-glib atop irqbalance muon fribidi elinks bubblewrap quickjs-ng icu gnutls knot rtmpdump bash coreutils curl git jq libxml2 make nano ncurses readline sed sqlite tree wget xz zstd flex pcre2 brotli",
+  "pkgs": "libnl3 hostapd iw talloc tdb tevent cifs-utils apr apr-util apache2 cgdb atf dovecot eggdrop kyua mrtg amavisd-milter skalibs execline utmps s6 s6-rc s6-dns s6-networking s6-linux-init util-linux e2fsprogs parted nfs-utils fsarchiver coreutils glib dbus-glib atop irqbalance gnutls knot rtmpdump muon fribidi elinks bubblewrap quickjs-ng icu bash avahi audit chrpath cracklib dosfstools dropbear fakeroot freetype gettext inotify-tools lame libcap-ng libpng logrotate lua5.4 nmap pcre pkgconf procps-ng curl git jq libxml2 make nano ncurses readline sed sqlite tree wget xz zstd flex pcre2 libgcrypt gnupg brotli",
   "max": 600,
   "chunk": 3,
   "publish": true,
-  "note": "R45 canary (TC v36): recipe -O wins + CFLAGS=-O2 (libgcrypt), PKG_CONFIG_ALLOW_SYSTEM_LIBS + overlay usr/lib data dirs at host paths (skalibs chain), meson nodownload (glib), binfmt helpers get host env (muon), pyyaml (icu), gtk-doc-tools (gnutls); + regression canaries"
+  "note": "R46 canary (TC v37): batch 2 (Alpine libtool, waf, native-configure retry) + batch 3 (pkg-config adds the target -L, libffi on program links, host automake 1.18.1 + muon 0.7.0, ICU native retry, first-attempt link errors shown); + autoreconf and regression canaries"
 }

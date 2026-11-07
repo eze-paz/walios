@@ -30,7 +30,7 @@ concurrency:
 
 env:
   TC: ${{ github.workspace }}/../wali-tc
-  TC_KEY: wali-tc-llvm22.1.3-pkgs-2026-10-31-x1-v36-ilp32
+  TC_KEY: wali-tc-llvm22.1.3-pkgs-2026-10-31-x1-v37-ilp32
 
 jobs:
   plan:
@@ -138,6 +138,24 @@ jobs:
                   sudo make -s install DESTDIR=$HOME/aptc/libtool >/dev/null); then echo "libtool $LT built"
               else sudo rm -rf ~/aptc/libtool; echo "libtool $LT not built: build jobs keep Ubuntu's"; fi
             fi
+            # GNU automake at Alpine's version (main/automake), same tree: tarballs made with 1.18
+            # (gnutls) rerun "aclocal-1.18" once a patch touches their build files, and Ubuntu has 1.16.
+            AM=1.18.1 AMSHA=8baa16831416a953a743f4e3c0f55cea5ebefe0f5a7a0e390581981d4461d02dc9038415124e974b2ec390c40daaa241802cd7d42c6fafb793f87cf355db2a61
+            if { curl -sSfL --retry 4 --retry-delay 10 -o /tmp/am.txz https://ftpmirror.gnu.org/gnu/automake/automake-$AM.tar.xz ||
+                 curl -sSfL --retry 4 --retry-delay 10 -o /tmp/am.txz https://ftp.gnu.org/gnu/automake/automake-$AM.tar.xz; } &&
+               echo "$AMSHA  /tmp/am.txz" | sha512sum -c --quiet && tar xJf /tmp/am.txz -C /tmp &&
+               (cd /tmp/automake-$AM && ./configure -q --prefix=/usr/local >/dev/null && make -s >/dev/null &&
+                sudo make -s install DESTDIR=$HOME/aptc/libtool >/dev/null); then echo "automake $AM built"
+            else echo "automake $AM not built: build jobs keep Ubuntu's"; fi
+            # muon at Alpine's version (main/muon), the meson implementation abuild-muon recipes
+            # (fribidi, elinks, bubblewrap, quickjs-ng) configure and install with; Ubuntu has no
+            # package. Its bootstrap build is one C file and has samurai built in (muon samu).
+            MU=0.7.0 MUSHA=ef58a0323870ef682337361aa22187bfc2ad864dfee3392881c5e9ca160be98a7381d4bfca57ed2097d6e4df802e49a45497c48828188f8c3740448cf4523edf
+            if curl -sSfL --retry 4 --retry-delay 10 -o /tmp/mu.tgz https://muon.build/releases/v$MU/muon-v$MU.tar.gz &&
+               echo "$MUSHA  /tmp/mu.tgz" | sha512sum -c --quiet && tar xzf /tmp/mu.tgz -C /tmp &&
+               (cd /tmp/muon-v$MU && cc -O2 -Iinclude src/amalgam.c -o muon &&
+                sudo install -D -m 755 muon $HOME/aptc/libtool/usr/local/bin/muon); then echo "muon $MU built"
+            else echo "muon $MU not built"; fi
             sudo chown -R "$USER" ~/aptc; du -sh ~/aptc; ls ~/aptc/archives | wc -l
           else
             sudo rm -rf ~/aptc; echo "deb download failed: build jobs install from the mirror"

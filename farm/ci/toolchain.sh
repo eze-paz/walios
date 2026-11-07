@@ -242,7 +242,10 @@ if [ \$link = 1 ]; then
   # before every library.
   LINK=(-L$S/lib \${WALI_EXTRA_LDFLAGS:-} -nodefaultlibs
     -Wl,--shared-memory,--import-memory,--export-memory,--max-memory=2147483648,-z,stack-size=8388608,--export-table,--growable-table,--allow-multiple-definition)
-  TAIL=($cxxlibs -lwali-farm -lc $S/lib/libclang_rt.builtins.a)
+  # libffi is the sysroot's (WALI port, above), so no package's archives carry it: a program
+  # linking a library that uses it (glib's gobject-query, via libgobject's fake .so, which holds
+  # no record of its -lffi) gets it here -- an archive only contributes what something needs.
+  TAIL=($cxxlibs -lwali-farm \$([ -f $S/lib/libffi.a ] && echo $S/lib/libffi.a) -lc $S/lib/libclang_rt.builtins.a)
   G=()
   if [ -n "\${WALI_OVERLAY_LIBS+set}" ]; then
     # the package's own deps' archives (build-one.sh, from the plan's dependency closure)
@@ -255,8 +258,14 @@ if [ \$link = 1 ]; then
   fi
   if [ \${#G[@]} -gt 0 ]; then
     # With the overlay group first; if anything in it breaks the link, the same link without
-    # it (and that attempt's own errors are what the caller sees).
-    $L/$drv "\${F[@]}" "\${A[@]}" "\${LATE[@]}" "\${LINK[@]}" \${WALI_EXTRA_LIBS:-} "\${G[@]}" "\${TAIL[@]}" 2>/dev/null && exit 0
+    # it (and that attempt's own errors are what the caller sees). When that fails too, the
+    # first attempt's errors follow (bash in R45: readline's tputs undefined without ncurses,
+    # but why the link WITH ncurses failed was never shown).
+    e=\$(mktemp)
+    $L/$drv "\${F[@]}" "\${A[@]}" "\${LATE[@]}" "\${LINK[@]}" \${WALI_EXTRA_LIBS:-} "\${G[@]}" "\${TAIL[@]}" 2>"\$e" && { rm -f "\$e"; exit 0; }
+    $L/$drv "\${F[@]}" "\${A[@]}" "\${LATE[@]}" "\${LINK[@]}" \${WALI_EXTRA_LIBS:-} "\${TAIL[@]}"; rc=\$?
+    if [ \$rc != 0 ]; then echo "farm: the same link with the deps' archives failed with:" >&2; grep -m8 -E 'error|warning' "\$e" >&2; fi
+    rm -f "\$e"; exit \$rc
   fi
   exec $L/$drv "\${F[@]}" "\${A[@]}" "\${LATE[@]}" "\${LINK[@]}" \${WALI_EXTRA_LIBS:-} "\${TAIL[@]}"
 fi
@@ -267,6 +276,22 @@ cat "\$e" >&2; rm -f "\$e"; exit \$rc
 EOF
   chmod +x bin/wali-$d
 done
+# pkg-config for the target: the system's (pkgconf, PKG_CONFIG_LIBDIR = the overlay's and the
+# sysroot's .pc files; build-one.sh), plus the target's library dir on --libs / --libs-only-L.
+# On Alpine /usr/lib is the linker's and make's default, so a .pc may name no -L at all
+# (skalibs': "Libs: -lskarnet") -- skarnet's configures build make's vpath from --libs-only-L
+# and stopped with "Unable to link against skalibs" (execline, utmps, s6, util-linux...).
+cat > bin/pkg-config <<'EOF'
+#!/bin/sh
+case " $* " in *" --libs "*|*" --libs-only-L "*) ;; *) exec /usr/bin/pkg-config "$@";; esac
+out=$(/usr/bin/pkg-config "$@") || exit $?
+d=${PKG_CONFIG_SYSROOT_DIR:-}
+if [ -n "$d" ] && [ -d "$d/usr/lib" ]; then
+  case " $out " in *" -L$d/usr/lib "*) ;; *) out="-L$d/usr/lib${out:+ $out}";; esac
+fi
+printf '%s\n' "$out"
+EOF
+chmod +x bin/pkg-config
 # ELF-only assembler directives in C sources: symbol versions (.symver, attr's compat
 # symbols) and glibc-style link warnings (.gnu.warning.* sections, alsa-lib). wasm objects
 # have neither and clang's wasm assembler rejects them. wali-noelfasm <compiler command>:
