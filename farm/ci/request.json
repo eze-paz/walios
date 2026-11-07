@@ -1,6 +1,7 @@
 {
-  "all": true,
-  "max": 3000,
+  "pkgs": "libgcrypt fsarchiver gnupg skalibs execline utmps s6 s6-rc s6-networking s6-linux-init s6-dns util-linux e2fsprogs nfs-utils parted glib avahi dbus-glib atop irqbalance muon fribidi elinks bubblewrap quickjs-ng icu gnutls knot rtmpdump bash coreutils curl git jq libxml2 make nano ncurses readline sed sqlite tree wget xz zstd flex pcre2 brotli",
+  "max": 600,
+  "chunk": 3,
   "publish": true,
-  "note": "R44 full catalog: R43 canary results kept (cmake/meson emulators, real failure reasons, TC v35 batch) minus native autoconf (reverted); build tools installed offline from the plan job's debs"
+  "note": "R45 canary (TC v36): recipe -O wins + CFLAGS=-O2 (libgcrypt), PKG_CONFIG_ALLOW_SYSTEM_LIBS + overlay usr/lib data dirs at host paths (skalibs chain), meson nodownload (glib), binfmt helpers get host env (muon), pyyaml (icu), gtk-doc-tools (gnutls); + regression canaries"
 }

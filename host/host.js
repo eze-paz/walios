@@ -1916,7 +1916,11 @@ async function runProgramAsync(p, argv, envp, fdTable, cwd, selfPath, cred, asPi
 
 // ---- main ----
 const rootFds = new Map([[0, { std: 0 }], [1, { std: 1 }], [2, { std: 2 }]]);
-const rootEnv = Object.entries(process.env).filter(([k]) => k.startsWith('WALIENV_')).map(([k, v]) => k.slice(8) + '=' + v);
+// WALI_HOST_ENV=1 (the farm's binfmt runner, wali-run): a wasm program run as a build helper
+// gets the build host's environment (PATH, HOME, ...), as a native helper would.
+const rootEnv = process.env.WALI_HOST_ENV
+  ? Object.entries(process.env).filter(([k]) => !k.startsWith('WALI')).map(([k, v]) => k + '=' + v)
+  : Object.entries(process.env).filter(([k]) => k.startsWith('WALIENV_')).map(([k, v]) => k.slice(8) + '=' + v);
 const rootArgv = process.argv.slice(2).map((x, i) => i === 0 ? path.basename(x).replace(/\.wasm$/, '') : x);
 if (process.env.WALI_ARGV0) rootArgv[0] = process.env.WALI_ARGV0; // some programs (sshd) require an absolute argv[0]
 (async () => {

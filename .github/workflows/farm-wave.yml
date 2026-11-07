@@ -9,7 +9,7 @@ on:
 
 env:
   TC: ${{ github.workspace }}/../wali-tc
-  TC_KEY: wali-tc-llvm22.1.3-pkgs-2026-10-31-x1-v35-ilp32
+  TC_KEY: wali-tc-llvm22.1.3-pkgs-2026-10-31-x1-v36-ilp32
 
 jobs:
   build:
@@ -65,7 +65,7 @@ jobs:
           # Python recipes: gpep517 + installer (Alpine's wheel build/install), the common
           # PEP 517 backends and cython, in setup-python's 3.14 (sudo pip3 above is the system's).
           python3 -m pip install -q gpep517 installer build wheel setuptools setuptools-scm \
-            flit-core hatchling hatch-vcs hatch-fancy-pypi-readme poetry-core pdm-backend cython
+            flit-core hatchling hatch-vcs hatch-fancy-pypi-readme poetry-core pdm-backend cython pyyaml
           # ...whose pyconfig.h becomes walios python_cxx.wasm's (the toolchain's ABI: ILP32 by default):
           # C extensions then compile for walios (gcc = the wasm wrapper), with this Python's
           # suffix .cpython-314-x86_64-linux-gnu.so, the one walios Python imports.
@@ -79,7 +79,7 @@ jobs:
           # generators) used to die with "Exec format error".
           # With native-mode configure (farm/ci/config.site) every configure test program runs here too;
           # one that hangs (a blocking read, a busy wait) is ended after 2 minutes.
-          printf '#!/bin/sh\nexec timeout -k 5 120 node %s "$@"\n' "$PWD/host/host.js" | sudo tee /usr/local/bin/wali-run >/dev/null
+          printf '#!/bin/sh\nWALI_HOST_ENV=1 exec timeout -k 5 120 node %s "$@"\n' "$PWD/host/host.js" | sudo tee /usr/local/bin/wali-run >/dev/null
           sudo chmod +x /usr/local/bin/wali-run
           [ -e /proc/sys/fs/binfmt_misc/register ] || sudo mount -t binfmt_misc binfmt_misc /proc/sys/fs/binfmt_misc
           echo ':wasm:M::\x00asm::/usr/local/bin/wali-run:' | sudo tee /proc/sys/fs/binfmt_misc/register >/dev/null || true

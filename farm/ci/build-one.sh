@@ -219,6 +219,14 @@ for f in $(find "$SRC" -name sigsegv.in.h 2>/dev/null); do
 # environment it expects (CARCH, CHOST, the helper functions), under fakeroot so package()
 # may chown/install -o root. Not under `set -u`: recipes read optional variables freely.
 pkgdir="$bdir/pkg"; mkdir -p "$pkgdir"
+# A dep's own data dir under usr/lib (skalibs/sysdeps, read by dependents' configure at
+# /usr/lib/skalibs/sysdeps as on Alpine) at that path on the build host too, when the host has
+# none of its own. Programs and libraries stay in the overlay only.
+for d in "$OVERLAY"/usr/lib/*/; do
+  [ -d "$d" ] || continue; n=$(basename "$d")
+  case "$n" in pkgconfig|cmake|python*|perl*|lua*|girepository-1.0) continue;; esac
+  [ -e "/usr/lib/$n" ] || sudo -n ln -s "$OVERLAY/usr/lib/$n" "/usr/lib/$n" 2>/dev/null || true
+done
 cat > "$bdir/.farm-build.sh" <<'EOS'
 set +u
 # (Lua modules: 5.4's headers before /usr/include, which holds lua5.1's lua.h.)
@@ -227,10 +235,15 @@ export WALI_EXTRA_CFLAGS="${LUAMOD:+-I$OVERLAY/usr/include/lua5.4 }${PERLXS:+-fw
 # recipes look up on PATH -- last, so host tools still win over the overlay's wasm binaries.
 # (No CMAKE_PREFIX_PATH: cmake searches PREFIX/bin for programs and took the overlay's wasm ninja.)
 export PATH="$PATH:$OVERLAY/usr/bin"
-export CFLAGS="" CXXFLAGS="" LDFLAGS="" CPPFLAGS="" CONFIG_SITE="$HERE/config.site" FARM_CI_DIR="$HERE"
+# -O2 in CFLAGS, as abuild.conf's: a recipe that changes the level sees it (libgcrypt -> -O0).
+export CFLAGS="-O2" CXXFLAGS="-O2" LDFLAGS="" CPPFLAGS="" CONFIG_SITE="$HERE/config.site" FARM_CI_DIR="$HERE"
 # LIBDIR, not PATH: the build host's own .pc files (the runner's libyaml, zlib...) must not
 # be found, or a recipe enables a feature whose wasm library does not exist.
 export PKG_CONFIG_LIBDIR="$OVERLAY/usr/lib/pkgconfig:$OVERLAY/usr/share/pkgconfig:$OVERLAY/lib/pkgconfig:$WALI_SYSROOT/lib/pkgconfig" PKG_CONFIG_PATH="" PKG_CONFIG_SYSROOT_DIR="$OVERLAY"
+# The deps' libdir is /usr/lib, a "system" dir pkg-config leaves out of --libs (-L/usr/lib) -- but
+# under the sysroot it is the overlay's: keep it (skarnet's configures build make's vpath from
+# --libs-only-L: "Unable to link against skalibs"; utmps, execline, s6-*).
+export PKG_CONFIG_ALLOW_SYSTEM_LIBS=1
 export CARCH=wasm32 CLIBC=musl CBUILD=x86_64-pc-linux-gnu CHOST=wasm32-unknown-linux-musl CTARGET=wasm32-unknown-linux-musl
 export CTARGET_ARCH=wasm32 CBUILD_ARCH=x86_64 cross_compiling=yes JOBS=$(nproc) MAKEFLAGS="-j$(nproc)${PERLXS_MAKE:+ -- $PERLXS_MAKE}"
 export CC_FOR_BUILD=/usr/bin/gcc CXX_FOR_BUILD=/usr/bin/g++ BUILD_CC=/usr/bin/gcc BUILD_CXX=/usr/bin/g++ HOSTCC=/usr/bin/gcc HOSTCXX=/usr/bin/g++

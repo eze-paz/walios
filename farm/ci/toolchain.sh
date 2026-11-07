@@ -138,10 +138,10 @@ for d in cc c++; do
     cxxdefs="-D_LIBCPP_ENABLE_CXX17_REMOVED_UNARY_BINARY_FUNCTION -Wno-c++11-narrowing"; }
   cat > bin/wali-$d <<EOF
 #!/bin/bash
-link=1 shared=0 out=a.out
+link=1 shared=0 out=a.out OPT=-O2
 prev=""
 for a in "\$@"; do
-  case "\$a" in -c|-E|-S|-M|-MM) link=0;; -shared) shared=1;; esac
+  case "\$a" in -c|-E|-S|-M|-MM) link=0;; -shared) shared=1;; -O|-O[0-9sgz]*|-Ofast) OPT=;; esac
   [ "\$prev" = -o ] && out="\$a"; prev="\$a"
 done
 # __STDC_ISO_10646__: gcc on musl/glibc pre-includes stdc-predef.h, which defines it (wchar_t
@@ -150,12 +150,14 @@ done
 # _MPFR_PREC_FORMAT=2: MPFR's precision type follows GMP's mp_size_t (long), but a precision
 # in bytes must fit size_t, which is 32-bit here (MPFR's own static assertion); int is the
 # setting MPFR provides for that. Global, so every program including mpfr.h sees the same ABI.
+# -O2 unless the command line has its own -O (CFLAGS carry -O2 as abuild's do, so a recipe that
+# rewrites or drops it -- libgcrypt's jitter RNG must be -O0 -- is obeyed).
 # -msimd128: the baseline vector unit, as SSE2 is on x86-64 (every engine with JSPI or COI has it).
 # XSIMD_WITH_EMULATED=1: xsimd only takes its wasm backend under Emscripten, and with no
 # architecture it declares no API at all (pandas' scalar kernels use it); this is its own
 # switch for the portable one.
 F=($TGT --sysroot=$S -nostdlibinc $cxx -isystem $S/include -D_GNU_SOURCE -DXSIMD_WITH_EMULATED=1
-   -D__STDC_ISO_10646__=201206L -O2 -mllvm -wasm-enable-sjlj -fwasm-exceptions -matomics -mbulk-memory -mexception-handling -msimd128 -pthread
+   -D__STDC_ISO_10646__=201206L \$OPT -mllvm -wasm-enable-sjlj -fwasm-exceptions -matomics -mbulk-memory -mexception-handling -msimd128 -pthread
    -Wno-implicit-function-declaration -Wno-int-conversion -Wno-incompatible-pointer-types
    -Wno-incompatible-function-pointer-types -Wno-unused-command-line-argument -Wno-ignored-optimization-argument
    -Wno-unknown-warning-option -Wno-long-long -Wno-macro-redefined $cxxdefs $ABIDEFS
@@ -490,7 +492,10 @@ for d in "\$@" "\$PWD" "\$(dirname "\$PWD")"; do
   [ -f "\$d/vendored-meson/meson/meson.py" ] && { real="python3 \$d/vendored-meson/meson/meson.py"; break; }; done
 [ -n "\$real" ] || { echo "meson: not installed" >&2; exit 127; }
 if [ "\$1" = setup ]; then
-  case " \$* " in *" --cross-file"*) ;; *) shift; exec \$real setup --cross-file $TC/wali.meson "\$@";; esac
+  # Alpine builds offline (abuild-meson: --wrap-mode=nodownload): a dependency the recipe does not
+  # list is disabled, not fetched and built as a subproject (glib's bootstrap fetched sysprof).
+  W=--wrap-mode=nodownload; case " \$* " in *" --wrap-mode"*) W=;; esac
+  case " \$* " in *" --cross-file"*) shift; exec \$real setup \$W "\$@";; *) shift; exec \$real setup --cross-file $TC/wali.meson \$W "\$@";; esac
 fi
 exec \$real "\$@"
 EOF

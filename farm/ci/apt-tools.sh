@@ -5,4 +5,4 @@ APT_TOOLS="autoconf automake libtool autopoint pkgconf bison flex gettext texinf
 # Doc and code-generation tools some recipes run on the build host (the R39 triage: doxygen,
 # po4a, sphinx-build, protoc, googletest sources, qjs, muon, docbook2x, a2x). Best effort,
 # one by one: a name this Ubuntu lacks must not fail the job.
-APT_OPTIONAL="doxygen po4a python3-sphinx protobuf-compiler googletest libgtest-dev quickjs muon-meson muon docbook2x asciidoc"
+APT_OPTIONAL="doxygen po4a python3-sphinx protobuf-compiler googletest libgtest-dev quickjs muon-meson muon docbook2x asciidoc gtk-doc-tools"
