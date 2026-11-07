@@ -22,6 +22,7 @@ for t in "$W"/ov/*.overlay.tar.gz; do tar xzf "$t" -C "$W/all" 2>/dev/null || tr
 # every built package's archives; a library's own come first on the command line
 mapfile -t ALL < <(ls "$W"/all/usr/lib/*.a "$W"/all/lib/*.a 2>/dev/null)
 echo "libtest: ${#ALL[@]} archives in the merged overlays"
+SYSLIBS=(); for a in libc++.a libc++abi.a libunwind.a libwali-farm.a libc.a; do [ -f "$WALI_SYSROOT/lib/$a" ] && SYSLIBS+=("$WALI_SYSROOT/lib/$a"); done
 LIBS=$(node -e '
   const fs = require("fs"), [idx, cat] = process.argv.slice(1);
   const P = JSON.parse(fs.readFileSync(idx, "utf8")).packages, C = new Set(fs.readFileSync(cat, "utf8").split(/\s+/));
@@ -45,7 +46,10 @@ for lib in $LIBS; do
       sed 's/^/-Wl,--undefined=/' "$d/syms" > "$d/und.rsp"
       # WALI_OVERLAY_LIBS set and empty: the wrapper adds no archives of its own (the ones named
       # here are the whole set), and its error output is this link's.
-      if WALI_OVERLAY_LIBS= "$CXX" "$W/t.o" "@$d/und.rsp" "${A[@]}" "${ALL[@]}" -o "$OUT/$lib.libtest.wasm" 2> "$d/err"; then :
+      # walios' libc and libc++ before the other packages' archives: the first archive defining a
+      # symbol wins, and some packages define libc functions of their own (libeatmydata's open(),
+      # an LD_PRELOAD interposer) -- a dependent links only its own deps, never those.
+      if WALI_OVERLAY_LIBS= "$CXX" "$W/t.o" "@$d/und.rsp" "${A[@]}" "${SYSLIBS[@]}" "${ALL[@]}" -o "$OUT/$lib.libtest.wasm" 2> "$d/err"; then :
       else
         reason="link: $(grep -m1 -E 'error|undefined' "$d/err" | sed -E 's#/tmp/[^ :]*/##g' | tr -d '\000-\037"\\' | cut -c1-200)"
         [ "$reason" = "link: " ] && reason="link: $(head -c 200 "$d/err" | tr -d '\000-\037"\\')"
