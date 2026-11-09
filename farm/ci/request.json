@@ -2,5 +2,5 @@
   "all": true,
   "max": 3000,
   "publish": true,
-  "note": "R48 full catalog: batches 1-4 (pkg-config target -L, libffi, Alpine autoconf/automake/libtool/muon on the host, main-defining archives out of the deps group, abuild vars unexported, config.log on failure) + native retry with cross_compiling=no and a shared-on retry for libtool modules"
+  "note": "R49 full catalog: R48 again (R48 lost half of waves 6-7 jobs on GitHub, ~60 packages never built); config.log excerpt without the test sources"
 }

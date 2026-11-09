@@ -82,7 +82,8 @@ emit() {  # status reason kind smoke
       grep -q '^configure: exit [1-9]' "$c" || continue
       n=$(grep -n -m1 '^## .*Cache variables' "$c" | cut -d: -f1); [ -n "$n" ] || n=$(wc -l < "$c")
       echo "farm: ${c#"$bdir"/} (configure failed), its last checks:" >> "$log"
-      sed -n "$(( n > 40 ? n - 40 : 1 )),$(( n - 1 ))p" "$c" | cut -c1-300 >> "$log"
+      # the last 300 lines minus the test programs' sources ("| " lines, mpc1 in R48: all of it)
+      sed -n "$(( n > 300 ? n - 300 : 1 )),$(( n - 1 ))p" "$c" | grep -v '^| ' | tail -n 40 | cut -c1-300 >> "$log"
     done
   fi
   if [ "$1" = fail ] && [ -z "${FARM_RETRY:-}" ] && [ -n "${log:-}" ] &&
