@@ -62,13 +62,14 @@ jobs:
           # Ubuntu's meson (1.3) is older than glib and friends require; pip's lands in
           # /usr/local/bin, ahead of /usr/bin on PATH.
           sudo pip3 install -q --break-system-packages --upgrade meson
-          # Alpine's libtool, automake and muon (the plan job built them into ~/aptc/libtool;
-          # farm.yml): /usr/local/bin is ahead of /usr/bin, and build-one.sh puts the macros first
-          # on ACLOCAL_PATH. samu (Alpine's ninja, which muon recipes call) is muon's built-in one.
+          # Alpine's autoconf, automake, libtool and muon (the plan job built them into
+          # ~/aptc/libtool; farm.yml): /usr/local/bin is ahead of /usr/bin, and build-one.sh puts
+          # the macros first on ACLOCAL_PATH. samu (Alpine's ninja, which muon recipes call) is
+          # the muon bootstrap's built-in samurai.
           if [ -d ~/aptc/libtool/usr/local ]; then sudo cp -a ~/aptc/libtool/usr/local/. /usr/local/
-            libtoolize --version 2>/dev/null | head -1; automake --version 2>/dev/null | head -1; muon version 2>/dev/null | head -1
-            if command -v muon >/dev/null && ! command -v samu >/dev/null; then
-              printf '#!/bin/sh\nexec muon samu "$@"\n' | sudo tee /usr/local/bin/samu >/dev/null && sudo chmod +x /usr/local/bin/samu; fi
+            for t in autoconf automake libtoolize; do $t --version 2>/dev/null | head -1; done; muon version 2>/dev/null | head -1
+            if [ -x /usr/local/libexec/muon-bootstrap ] && ! command -v samu >/dev/null; then
+              printf '#!/bin/sh\nexec /usr/local/libexec/muon-bootstrap samu "$@"\n' | sudo tee /usr/local/bin/samu >/dev/null && sudo chmod +x /usr/local/bin/samu; fi
           fi
           # Python recipes: gpep517 + installer (Alpine's wheel build/install), the common
           # PEP 517 backends and cython, in setup-python's 3.14 (sudo pip3 above is the system's).

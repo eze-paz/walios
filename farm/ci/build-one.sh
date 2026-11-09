@@ -45,6 +45,13 @@ Cflags: -I${includedir}
 fi
 log="$OUT/$pkg.log"; : > "$log"
 [ -n "${FARM_RETRY:-}" ] && echo "farm: native configure (cross_compiling=$FARM_CROSS): the cross build stopped on a check it cannot answer ($pkg.cross.log)" >> "$log"
+# (ICU's retry in R46 still found "we are cross compiling": does a wasm program run here at all?)
+if [ -n "${FARM_RETRY:-}" ]; then
+  p=$(mktemp -d); printf 'int main(void) { return 0; }\n' > "$p/t.c"
+  if "${CC:-wali-cc}" "$p/t.c" -o "$p/t" >>"$log" 2>&1; then (cd "$p" && ./t) >>"$log" 2>&1; echo "farm: a wasm test program run through binfmt: rc=$?" >> "$log"
+  else echo "farm: the test program did not compile" >> "$log"; fi
+  rm -rf "$p"
+fi
 bdir=$(mktemp -d); trap 'rm -rf "$bdir"' EXIT
 pkgver="?"; BUILD_SECS=0; DEPS=""
 # why: the reason a failed build gives -- its first real error line. The first line merely
@@ -66,8 +73,19 @@ emit() {  # status reason kind smoke
   # cross_compiling=maybe. Only then -- R43 showed native mode as the default costs packages that
   # build in cross mode (ncurses, flex, pcre2). The first attempt's log stays as <pkg>.cross.log.
   # ICU refuses a cross build outright (it wants a native build of itself, --with-cross-build).
+  # (autoconf says "while" for test programs and "when" for file checks)
+  # A configure that failed leaves its reason in config.log, not in its output ("C compiler
+  # cannot create executables": procps-ng in R46): the last lines before its variable dump.
+  if [ "$1" = fail ] && [ -n "${log:-}" ] && [ -d "${bdir:-/nonexistent}" ]; then
+    find "$bdir" -name config.log -type f 2>/dev/null | head -5 | while read -r c; do
+      grep -q '^configure: exit [1-9]' "$c" || continue
+      n=$(grep -n -m1 '^## .*Cache variables' "$c" | cut -d: -f1); [ -n "$n" ] || n=$(wc -l < "$c")
+      echo "farm: ${c#"$bdir"/} (configure failed), its last checks:" >> "$log"
+      sed -n "$(( n > 40 ? n - 40 : 1 )),$(( n - 1 ))p" "$c" | cut -c1-300 >> "$log"
+    done
+  fi
   if [ "$1" = fail ] && [ -z "${FARM_RETRY:-}" ] && [ -n "${log:-}" ] &&
-     grep -qE 'cannot (run test program|check for file existence) while cross compiling|Cross compiling but no --with-cross-build' "$log" 2>/dev/null; then
+     grep -qE 'cannot (run test program|check for file existence) (while|when) cross compiling|Cross compiling but no --with-cross-build' "$log" 2>/dev/null; then
     mv "$log" "$OUT/$pkg.cross.log"; rm -rf "${bdir:-/nonexistent}"
     FARM_CROSS=maybe FARM_RETRY=1 exec bash "$HERE/build-one.sh" "$pkg" "$OVERLAY" "$OUT"
   fi
@@ -263,7 +281,10 @@ export PKG_CONFIG_ALLOW_SYSTEM_LIBS=1
 export CARCH=wasm32 CLIBC=musl CBUILD=x86_64-pc-linux-gnu CHOST=wasm32-unknown-linux-musl CTARGET=wasm32-unknown-linux-musl
 export CTARGET_ARCH=wasm32 CBUILD_ARCH=x86_64 cross_compiling=${FARM_CROSS:-yes} JOBS=$(nproc) MAKEFLAGS="-j$(nproc)${PERLXS_MAKE:+ -- $PERLXS_MAKE}"
 export CC_FOR_BUILD=/usr/bin/gcc CXX_FOR_BUILD=/usr/bin/g++ BUILD_CC=/usr/bin/gcc BUILD_CXX=/usr/bin/g++ HOSTCC=/usr/bin/gcc HOSTCXX=/usr/bin/g++
-export srcdir="$BDIR" builddir="$SRC" pkgdir="$PKGDIR" subpkgdir="$BDIR/subpkg" startdir="$BDIR"
+# Shell variables, not environment, as in abuild: tools read some of these names themselves
+# (gtkdocize takes $srcdir as the source tree: "neither configure.ac nor configure.in exist",
+# gnutls in R46).
+srcdir="$BDIR" builddir="$SRC" pkgdir="$PKGDIR" subpkgdir="$BDIR/subpkg" startdir="$BDIR"
 msg() { echo ">>> $*"; }; msg2() { echo "  > $*"; }; warning() { echo "WARNING: $*"; }; warning2() { warning "$@"; }
 error() { echo "ERROR: $*"; }; die() { error "$@"; exit 1; }
 update_config_sub() { find "${1:-.}" -name config.sub -exec chmod u+w {} \; -exec cp /usr/share/misc/config.sub {} \; ; }
@@ -291,6 +312,13 @@ EOS
 if [ -n "${WALI_OVERLAY_IDX:-}" ] && [ -f "${APORTS_DIR:-}/deps.json" ]; then
   WALI_OVERLAY_LIBS=$(for d in $(node -e 'const j=require(process.argv[1]);console.log((j[process.argv[2]]||[]).join(" "))' "$APORTS_DIR/deps.json" "$pkg"); do
     [ -f "$WALI_OVERLAY_IDX/$d.list" ] && sed "s|^|$OVERLAY/|" "$WALI_OVERLAY_IDX/$d.list"; done | tr '\n' ' ')
+  # Not an archive that defines main (flex's libfl, bison's liby): it is linked when asked for
+  # (-lfl), and in the group it gave a program that has its own main libfl's, whose yylex is
+  # then missing -- every link of bash failed so (R46), falling back to a link without ncurses.
+  keep=""; for a in $WALI_OVERLAY_LIBS; do
+    if "${NM:-llvm-nm}" -g --defined-only "$a" 2>/dev/null | grep -qE ' T (main|__main_argc_argv|__main_void)$'; then
+      echo "farm: not in the deps' group (defines main): $a" >> "$log"; else keep="$keep$a "; fi
+  done; WALI_OVERLAY_LIBS=$keep
   export WALI_OVERLAY_LIBS
   echo "farm: linking against deps' archives: $WALI_OVERLAY_LIBS" >> "$log"
 fi

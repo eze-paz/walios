@@ -138,6 +138,16 @@ jobs:
                   sudo make -s install DESTDIR=$HOME/aptc/libtool >/dev/null); then echo "libtool $LT built"
               else sudo rm -rf ~/aptc/libtool; echo "libtool $LT not built: build jobs keep Ubuntu's"; fi
             fi
+            # GNU autoconf at Alpine's version (main/autoconf), same tree: libtool 2.6.2's libtoolize
+            # traces configure.ac with it, and with Ubuntu's 2.71 saw no LT_INIT nor aux dir
+            # (libnl3, R46: the tarball's 2.5.4 ltmain.sh stayed beside 2.6.2 macros).
+            AC=2.73 ACSHA=e9f68c75e2d7a1fa84b172180621f90bccc6ef77f923be6312de621692327ef8a2ebaeb953a4545fec8d33e28efc925f1908a17d3202280113b2826aee79e70e
+            if { curl -sSfL --retry 4 --retry-delay 10 -o /tmp/ac.tgz https://ftpmirror.gnu.org/gnu/autoconf/autoconf-$AC.tar.gz ||
+                 curl -sSfL --retry 4 --retry-delay 10 -o /tmp/ac.tgz https://ftp.gnu.org/gnu/autoconf/autoconf-$AC.tar.gz; } &&
+               echo "$ACSHA  /tmp/ac.tgz" | sha512sum -c --quiet && tar xzf /tmp/ac.tgz -C /tmp &&
+               (cd /tmp/autoconf-$AC && ./configure -q --prefix=/usr/local >/dev/null && make -s >/dev/null &&
+                sudo make -s install DESTDIR=$HOME/aptc/libtool >/dev/null); then echo "autoconf $AC built"
+            else echo "autoconf $AC not built: build jobs keep Ubuntu's"; fi
             # GNU automake at Alpine's version (main/automake), same tree: tarballs made with 1.18
             # (gnutls) rerun "aclocal-1.18" once a patch touches their build files, and Ubuntu has 1.16.
             AM=1.18.1 AMSHA=8baa16831416a953a743f4e3c0f55cea5ebefe0f5a7a0e390581981d4461d02dc9038415124e974b2ec390c40daaa241802cd7d42c6fafb793f87cf355db2a61
@@ -149,12 +159,18 @@ jobs:
             else echo "automake $AM not built: build jobs keep Ubuntu's"; fi
             # muon at Alpine's version (main/muon), the meson implementation abuild-muon recipes
             # (fribidi, elinks, bubblewrap, quickjs-ng) configure and install with; Ubuntu has no
-            # package. Its bootstrap build is one C file and has samurai built in (muon samu).
+            # package. Built as Alpine does: the one-file bootstrap (samurai built in) configures and
+            # builds the real muon -- the bootstrap alone only configures muon's own tree ("failed
+            # to load required embedded source", R46). The bootstrap stays as the host's samu.
             MU=0.7.0 MUSHA=ef58a0323870ef682337361aa22187bfc2ad864dfee3392881c5e9ca160be98a7381d4bfca57ed2097d6e4df802e49a45497c48828188f8c3740448cf4523edf
             if curl -sSfL --retry 4 --retry-delay 10 -o /tmp/mu.tgz https://muon.build/releases/v$MU/muon-v$MU.tar.gz &&
                echo "$MUSHA  /tmp/mu.tgz" | sha512sum -c --quiet && tar xzf /tmp/mu.tgz -C /tmp &&
-               (cd /tmp/muon-v$MU && cc -O2 -Iinclude src/amalgam.c -o muon &&
-                sudo install -D -m 755 muon $HOME/aptc/libtool/usr/local/bin/muon); then echo "muon $MU built"
+               (cd /tmp/muon-v$MU && mkdir -p build-boot && cc -O2 -Iinclude src/amalgam.c -o build-boot/muon-bootstrap &&
+                build-boot/muon-bootstrap setup -Dlibcurl=disabled -Dlibarchive=disabled -Dlibpkgconf=disabled -Dtracy=disabled \
+                  -Dman-pages=disabled -Dmeson-docs=disabled -Dmeson-tests=disabled -Dwebsite=disabled build >/dev/null &&
+                build-boot/muon-bootstrap samu -C build >/dev/null && build/muon version &&
+                sudo install -D -m 755 build/muon $HOME/aptc/libtool/usr/local/bin/muon &&
+                sudo install -D -m 755 build-boot/muon-bootstrap $HOME/aptc/libtool/usr/local/libexec/muon-bootstrap); then echo "muon $MU built"
             else echo "muon $MU not built"; fi
             sudo chown -R "$USER" ~/aptc; du -sh ~/aptc; ls ~/aptc/archives | wc -l
           else
