@@ -1,0 +1,93 @@
+# OCR for walios (tesseract 5 + leptonica, tessdata_fast spa/cat/eng/osd), from upstream sources
+# with runtimes/ocrtools/build.sh (mirrored from sandpie walios/build/ocrtools) on the farm
+# toolchain, smoke-tested on the node WALI host, published as a prerelease whose
+# <name>.pkg.tar.gz files `apk add` mounts (kind 'pkg' in a farm index).
+name: ocrtools
+on:
+  push:
+    branches: [claude/ocrtools]
+    paths: ['runtimes/ocrtools/**', '.github/workflows/ocrtools.yml']
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ocrtools
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+      - name: Host tools
+        run: |
+          for t in 1 2 3; do sudo timeout 300 apt-get update -qq && break; done
+          sudo apt-get install -y -qq libbsd-dev libxml2 ninja-build cmake pkgconf autotools-dev fonts-dejavu-core >/dev/null
+          python3 -m pip install -q --user --break-system-packages pillow
+          printf '#!/bin/sh\nexec timeout -k 5 600 node %s "$@"\n' "$PWD/host/host.js" | sudo tee /usr/local/bin/wali-run >/dev/null
+          sudo chmod +x /usr/local/bin/wali-run
+          [ -e /proc/sys/fs/binfmt_misc/register ] || sudo mount -t binfmt_misc binfmt_misc /proc/sys/fs/binfmt_misc
+          echo ':wasm:M::\x00asm::/usr/local/bin/wali-run:' | sudo tee /proc/sys/fs/binfmt_misc/register >/dev/null || true
+          node --version
+      - uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/tc
+          key: pdftools-tc-${{ hashFiles('farm/ci/toolchain.sh') }}
+      - name: Toolchain
+        run: bash farm/ci/toolchain.sh "$RUNNER_TEMP/tc"
+      - name: Build tesseract (+ leptonica, zlib, libpng, libjpeg)
+        run: WALI_TC="$RUNNER_TEMP/tc" bash runtimes/ocrtools/build.sh "$RUNNER_TEMP/w" tesseract
+      - name: Pack tessdata (fast spa cat eng osd)
+        run: bash runtimes/ocrtools/build.sh "$RUNNER_TEMP/w" tessdata
+      - name: Smoke tesseract
+        run: |
+          P="$RUNNER_TEMP/w/pkg"
+          sudo mkdir -p /usr/share/tessdata
+          sudo cp -r "$P/tesseract/usr/share/." /usr/share/
+          sudo cp -r "$P/tesseract-data/usr/share/." /usr/share/
+          mkdir -p dist
+          bash runtimes/ocrtools/smoke.sh "$P" 2>&1 | tee dist/smoke-tesseract.txt
+          exit ${PIPESTATUS[0]}
+      - name: Collect
+        if: always()
+        run: |
+          mkdir -p dist
+          cp "$RUNNER_TEMP"/w/pkg/*.pkg.tar.gz dist/ 2>/dev/null || true
+          for f in "$RUNNER_TEMP"/w/*.log; do [ -f "$f" ] && cp "$f" "dist/ocr-$(basename "$f")"; done; ls -la dist
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: 'ocr', path: dist/*, retention-days: 7 }
+
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { path: art, merge-multiple: true }
+      - name: Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ls -la art
+          tag=ocrtools-$(date -u +%F)-${GITHUB_RUN_NUMBER}
+          # index.json in the farm's shape: kind 'pkg' = a tarball mounted at / (sandpie
+          # modules/walios-backend.js), under the Alpine names too. tesseract depends on its data.
+          cd art && TAG=$tag node -e '
+            const fs = require("fs"), cp = require("child_process"), crypto = require("crypto");
+            const VER = { tesseract: "5.5.0", "tesseract-data": "4.1.0-fast" };
+            const ALIAS = { tesseract: ["tesseract-ocr"], "tesseract-data": ["tesseract-ocr-data-spa", "tesseract-ocr-data-cat", "tesseract-ocr-data-eng", "tesseract-ocr-data-osd", "tessdata"] };
+            const DEPS = { tesseract: ["tesseract-data"] };
+            const packages = {};
+            for (const f of fs.readdirSync(".").filter((f) => f.endsWith(".pkg.tar.gz"))) {
+              const n = f.replace(/\.pkg\.tar\.gz$/, ""), b = fs.readFileSync(f);
+              const bins = cp.execSync("tar tzf " + f).toString().split("\n").filter((l) => /^usr\/bin\/[^/]+$/.test(l)).map((l) => l.slice(8));
+              const e = { ver: VER[n] || "", kind: "pkg", file: f, size: b.length, sha256: crypto.createHash("sha256").update(b).digest("hex"), bins };
+              if (DEPS[n]) e.deps = DEPS[n];
+              packages[n] = e; for (const a of ALIAS[n] || []) packages[a] = e;
+            }
+            fs.writeFileSync("index.json", JSON.stringify({ tag: process.env.TAG, built: new Date().toISOString(), packages }, null, 1));
+            console.log(fs.readFileSync("index.json", "utf8"));' && cd ..
+          gh release create "$tag" --repo "$GITHUB_REPOSITORY" --prerelease --target "$GITHUB_SHA" \
+            --title "$tag" --notes "OCR for walios (branch ${GITHUB_REF_NAME}, run ${GITHUB_RUN_ID}); smoke-tesseract.txt = node-host test output" art/*
