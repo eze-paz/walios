@@ -96,12 +96,15 @@ tesseract() {
   fetch https://github.com/tesseract-ocr/tesseract/archive/refs/tags/$TESS_VER.tar.gz tesseract-$TESS_VER.tar.gz
   # TESSDATA_PREFIX: the CMake build compiles no data directory in (only autotools does), so
   # without it tesseract looked for its models in ./ (ccutil.cpp: <prefix>/tessdata/).
+  # 5.5.0 pastes it as a string literal (datadir = TESSDATA_PREFIX "/tessdata/"), so it must be
+  # a quoted string; a CMake include sets it (CMake does the quoting, not the shell).
+  echo 'add_compile_definitions(TESSDATA_PREFIX="/usr/share")' > "$R/tessdata-prefix.cmake"
   local ld; ld=$(dirname "$(find "$OV/usr/lib" -name 'LeptonicaConfig.cmake' -o -name 'leptonica-config.cmake' | head -n1)")
   run tesseract-cmake cmake -S src/tesseract-$TESS_VER -B b-tess "${CM[@]}" -DLeptonica_DIR="$ld" \
     -DSW_BUILD=OFF -DOPENMP_BUILD=OFF -DGRAPHICS_DISABLED=ON -DDISABLED_LEGACY_ENGINE=ON \
     -DBUILD_TRAINING_TOOLS=OFF -DBUILD_TESTS=OFF -DENABLE_LTO=OFF -DENABLE_NATIVE=OFF \
     -DDISABLE_ARCHIVE=ON -DDISABLE_CURL=ON -DINSTALL_CONFIGS=ON \
-    -DCMAKE_CXX_FLAGS="-DTESSDATA_PREFIX=/usr/share"
+    -DCMAKE_PROJECT_INCLUDE="$R/tessdata-prefix.cmake"
   grep -iE 'leptonica|simd|openmp|legacy|curl|archive' "$R/tesseract-cmake.log" | tail -n 30 || true
   run tesseract-build cmake --build b-tess -j$J --target tesseract
   local d=$R/pkg/tesseract
