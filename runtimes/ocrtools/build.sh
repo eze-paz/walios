@@ -74,6 +74,10 @@ deps() {
   run libtiff bash -c "cmake -S src/tiff-$TIFF_VER -B b-tiff ${CM[*]} -Dtiff-tools=OFF -Dtiff-tests=OFF -Dtiff-contrib=OFF -Dtiff-docs=OFF -Dcxx=OFF \
     -Dzlib=ON -Djpeg=ON -Dlzma=OFF -Dzstd=OFF -Dwebp=OFF -Djbig=OFF -Dlerc=OFF -Dlibdeflate=OFF -Dpixarlog=ON \
     && cmake --build b-tiff -j$J && DESTDIR=$OV cmake --install b-tiff"
+  # libtiff's CMake package names a CMath::CMath target that only its own build defines;
+  # leptonica's find_package(TIFF) took that package and failed to generate. Without it,
+  # CMake's FindTIFF module finds libtiff.a (its deps come in through the overlay's archives).
+  rm -rf "$OV/usr/lib/cmake/tiff"
   # leptonica: the codecs tesseract's inputs need (mutool/pdftoppm render to PNG; scans come as TIFF).
   fetch https://github.com/DanBloomberg/leptonica/releases/download/$LEPT_VER/leptonica-$LEPT_VER.tar.gz
   run leptonica bash -c "cmake -S src/leptonica-$LEPT_VER -B b-lept ${CM[*]} -DSW_BUILD=OFF -DBUILD_PROG=OFF \
