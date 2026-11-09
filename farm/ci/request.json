@@ -1,7 +1,6 @@
 {
-  "pkgs": "procps-ng libnl3 hostapd iw apr apr-util apache2 cgdb atf dovecot eggdrop kyua mrtg amavisd-milter util-linux e2fsprogs parted nfs-utils fsarchiver glib dbus-glib atop irqbalance gnutls knot rtmpdump fribidi elinks bubblewrap quickjs-ng icu bash avahi curl git jq libxml2 make nano ncurses readline sed sqlite tree wget xz zstd flex pcre2 libgcrypt gnupg brotli coreutils skalibs execline utmps s6 audit chrpath cracklib dosfstools fakeroot freetype gettext lame libcap-ng libpng logrotate lua5.4 nmap pcre pkgconf",
-  "max": 600,
-  "chunk": 3,
+  "all": true,
+  "max": 3000,
   "publish": true,
-  "note": "R47 canary: retry regex (when|while), main-defining archives out of the deps group (bash), srcdir & co. not exported (gtkdocize), host autoconf 2.73 (libtoolize tracing), host muon built properly + samu, config.log excerpt on configure failure, binfmt probe on retry"
+  "note": "R48 full catalog: batches 1-4 (pkg-config target -L, libffi, Alpine autoconf/automake/libtool/muon on the host, main-defining archives out of the deps group, abuild vars unexported, config.log on failure) + native retry with cross_compiling=no and a shared-on retry for libtool modules"
 }

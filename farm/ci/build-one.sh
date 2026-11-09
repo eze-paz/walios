@@ -44,9 +44,10 @@ Cflags: -I${includedir}
   fi
 fi
 log="$OUT/$pkg.log"; : > "$log"
-[ -n "${FARM_RETRY:-}" ] && echo "farm: native configure (cross_compiling=$FARM_CROSS): the cross build stopped on a check it cannot answer ($pkg.cross.log)" >> "$log"
+[ -n "${FARM_CROSS:-}" ] && echo "farm: native configure (cross_compiling=$FARM_CROSS): the cross build stopped on a check it cannot answer ($pkg.cross.log)" >> "$log"
+[ -n "${FARM_SHARED:-}" ] && echo "farm: shared libraries on: libtool could not build a module with them off ($pkg.static.log)" >> "$log"
 # (ICU's retry in R46 still found "we are cross compiling": does a wasm program run here at all?)
-if [ -n "${FARM_RETRY:-}" ]; then
+if [ -n "${FARM_CROSS:-}" ]; then
   p=$(mktemp -d); printf 'int main(void) { return 0; }\n' > "$p/t.c"
   if "${CC:-wali-cc}" "$p/t.c" -o "$p/t" >>"$log" 2>&1; then (cd "$p" && ./t) >>"$log" 2>&1; echo "farm: a wasm test program run through binfmt: rc=$?" >> "$log"
   else echo "farm: the test program did not compile" >> "$log"; fi
@@ -87,7 +88,14 @@ emit() {  # status reason kind smoke
   if [ "$1" = fail ] && [ -z "${FARM_RETRY:-}" ] && [ -n "${log:-}" ] &&
      grep -qE 'cannot (run test program|check for file existence) (while|when) cross compiling|Cross compiling but no --with-cross-build' "$log" 2>/dev/null; then
     mv "$log" "$OUT/$pkg.cross.log"; rm -rf "${bdir:-/nonexistent}"
-    FARM_CROSS=maybe FARM_RETRY=1 exec bash "$HERE/build-one.sh" "$pkg" "$OVERLAY" "$OUT"
+    FARM_CROSS=no FARM_RETRY=1 exec bash "$HERE/build-one.sh" "$pkg" "$OVERLAY" "$OUT"
+  fi
+  # libtool refuses a -module (always shared) under --disable-shared: once more with shared on
+  # (the wrapper makes the "shared" library an archive like any other).
+  if [ "$1" = fail ] && [ -z "${FARM_RETRY:-}" ] && [ -n "${log:-}" ] &&
+     grep -q 'libtool: *error: cannot build a shared library' "$log" 2>/dev/null; then
+    mv "$log" "$OUT/$pkg.static.log"; rm -rf "${bdir:-/nonexistent}"
+    FARM_SHARED=yes FARM_RETRY=1 exec bash "$HERE/build-one.sh" "$pkg" "$OVERLAY" "$OUT"
   fi
   # Runtime depends, as plain package names (the index lets `apk add` pull a module's deps).
   deps=$(for d in $DEPS; do d=${d%%[<>=~]*}; case "$d" in ''|*:*|!*) ;; *) printf '"%s",' "$d";; esac; done)

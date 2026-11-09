@@ -2,7 +2,9 @@
 # libraries only (walios executables link statically; the wrapper turns -shared into an
 # archive anyway, so a "shared" libfoo would just be built twice).
 . "$FARM_CI_DIR/../config.site"
-enable_shared=no
+# (build-one.sh's retry after libtool's "cannot build a shared library" -- a -module that only
+# builds shared, util-linux's pam_lastlog2 -- sets FARM_SHARED=yes)
+enable_shared=${FARM_SHARED:-no}
 enable_static=yes
 # Always a cross build, even when a recipe runs ./configure without --host: otherwise
 # AC_PROG_CC tries to RUN a test program ("cannot run C compiled programs").
@@ -11,7 +13,9 @@ enable_static=yes
 # then build their host-side generators for wasm (gcc got clang's -Qunused-arguments; flex's
 # stage1flex ran under wali-run and crashed), pcre2's configure stopped. cmake's
 # CROSSCOMPILING_EMULATOR and meson's exe_wrapper stay: they keep the build a cross build.
-# (build-one.sh's one retry after a check a cross build cannot answer sets FARM_CROSS=maybe)
+# (build-one.sh's one retry after a check a cross build cannot answer sets FARM_CROSS=no: with
+# maybe, apr/cgdb/ICU still came out "cross compiling... yes" in R47 though a wasm program ran
+# through binfmt there -- no makes configure run its test program and fail loudly if it can't)
 cross_compiling=${FARM_CROSS:-yes}
 # No JIT backend targets wasm (pcre2's sljit: "Unsupported architecture"); Alpine enables
 # it for every arch it knows. config.site is read after the command line, so this wins.
