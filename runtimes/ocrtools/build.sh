@@ -6,7 +6,9 @@
 #               linked statically into tesseract (no separate package: nothing else uses it)
 #   tesseract   tesseract 5 CLI, LSTM engine only (the legacy engine is off: the fast models
 #               below are LSTM-only), no OpenMP, no curl/libarchive, no training tools
-#   tessdata    the tessdata_fast models for spa, cat, eng (+ osd for --psm 0) under
+#   tessdata    the best_int models for spa, cat, eng (+ osd for --psm 0): the exact files the
+#               in-page ocr engine (tesseract.js) uses, @tesseract.js-data/<lang>/4.0.0_best_int
+#               (tessdata_best quantized to integers; tessdata_fast lost accuracy on photos), under
 #               /usr/share/tessdata, tesseract's compiled-in default
 # Each lands as <workdir>/pkg/<name>.pkg.tar.gz: usr/bin/<program> (wasm) and/or usr/share data,
 # mounted at / by `apk add` (kind 'pkg' in the farm index).
@@ -26,7 +28,7 @@ JPEG_VER=3.0.4
 TIFF_VER=4.7.0
 LEPT_VER=1.85.0
 TESS_VER=5.5.0
-TESSDATA_FAST_REF=4.1.0
+TESSDATA_JS_REF=4.0.0_best_int
 LANGS="spa cat eng osd"
 
 fetch() {   # fetch <url> [name] -> unpacked under src/ (once)
@@ -42,8 +44,9 @@ tessdata() {   # data only: no toolchain needed
   local d=$R/pkg/tesseract-data
   rm -rf "$d"; mkdir -p "$d/usr/share/tessdata"
   for l in $LANGS; do
-    curl -sSfL --retry 8 --retry-all-errors --retry-delay 10 -o "$d/usr/share/tessdata/$l.traineddata" \
-      "https://github.com/tesseract-ocr/tessdata_fast/raw/$TESSDATA_FAST_REF/$l.traineddata"
+    curl -sSfL --retry 8 --retry-all-errors --retry-delay 10 "https://cdn.jsdelivr.net/npm/@tesseract.js-data/$l/$TESSDATA_JS_REF/$l.traineddata.gz" \
+      | gunzip > "$d/usr/share/tessdata/$l.traineddata"
+    [ -s "$d/usr/share/tessdata/$l.traineddata" ] || { echo "tessdata: $l is empty"; exit 1; }
   done
   pack tesseract-data
 }

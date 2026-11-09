@@ -1,4 +1,4 @@
-# OCR for walios (tesseract 5 + leptonica, tessdata_fast spa/cat/eng/osd), from upstream sources
+# OCR for walios (tesseract 5 + leptonica, tessdata best_int spa/cat/eng/osd), from upstream sources
 # with runtimes/ocrtools/build.sh (mirrored from sandpie walios/build/ocrtools) on the farm
 # toolchain, smoke-tested on the node WALI host, published as a prerelease whose
 # <name>.pkg.tar.gz files `apk add` mounts (kind 'pkg' in a farm index).
@@ -39,7 +39,7 @@ jobs:
         run: bash farm/ci/toolchain.sh "$RUNNER_TEMP/tc"
       - name: Build tesseract (+ leptonica, zlib, libpng, libjpeg)
         run: WALI_TC="$RUNNER_TEMP/tc" bash runtimes/ocrtools/build.sh "$RUNNER_TEMP/w" tesseract
-      - name: Pack tessdata (fast spa cat eng osd)
+      - name: Pack tessdata (best_int spa cat eng osd)
         run: bash runtimes/ocrtools/build.sh "$RUNNER_TEMP/w" tessdata
       - name: Smoke tesseract
         run: |
@@ -76,7 +76,7 @@ jobs:
           # modules/walios-backend.js), under the Alpine names too. tesseract depends on its data.
           cd art && TAG=$tag node -e '
             const fs = require("fs"), cp = require("child_process"), crypto = require("crypto");
-            const VER = { tesseract: "5.5.0", "tesseract-data": "4.1.0-fast" };
+            const VER = { tesseract: "5.5.0", "tesseract-data": "4.0.0-best_int" };
             const ALIAS = { tesseract: ["tesseract-ocr"], "tesseract-data": ["tesseract-ocr-data-spa", "tesseract-ocr-data-cat", "tesseract-ocr-data-eng", "tesseract-ocr-data-osd", "tessdata"] };
             const DEPS = { tesseract: ["tesseract-data"] };
             const packages = {};
