@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # OCR for walios, from upstream sources with their own build systems (no source edits):
-#   leptonica   image library tesseract reads with (PNG, JPEG, zlib; no TIFF/GIF/WebP/JP2),
+#   leptonica   image library tesseract reads with (PNG, JPEG, TIFF, zlib; no GIF/WebP/JP2; TIFF
+#               is also how leptonica stores its built-in bitmap font: without it every run
+#               printed pixReadMemTiff errors),
 #               linked statically into tesseract (no separate package: nothing else uses it)
 #   tesseract   tesseract 5 CLI, LSTM engine only (the legacy engine is off: the fast models
 #               below are LSTM-only), no OpenMP, no curl/libarchive, no training tools
@@ -21,6 +23,7 @@ mkdir -p "$R/src" "$R/pkg" && cd "$R"
 ZLIB_VER=1.3.1
 PNG_VER=1.6.44
 JPEG_VER=3.0.4
+TIFF_VER=4.7.0
 LEPT_VER=1.85.0
 TESS_VER=5.5.0
 TESSDATA_FAST_REF=4.1.0
@@ -67,10 +70,14 @@ deps() {
   run libpng bash -c "cmake -S src/libpng-$PNG_VER -B b-png ${CM[*]} -DPNG_SHARED=OFF -DPNG_STATIC=ON -DPNG_TESTS=OFF -DPNG_TOOLS=OFF -DPNG_EXECUTABLES=OFF -DPNG_HARDWARE_OPTIMIZATIONS=OFF && cmake --build b-png -j$J && DESTDIR=$OV cmake --install b-png"
   fetch https://github.com/libjpeg-turbo/libjpeg-turbo/releases/download/$JPEG_VER/libjpeg-turbo-$JPEG_VER.tar.gz
   run libjpeg bash -c "cmake -S src/libjpeg-turbo-$JPEG_VER -B b-jpeg ${CM[*]} -DENABLE_SHARED=OFF -DENABLE_STATIC=ON -DWITH_SIMD=OFF -DWITH_TURBOJPEG=OFF && cmake --build b-jpeg -j$J && DESTDIR=$OV cmake --install b-jpeg"
-  # leptonica: only the codecs tesseract's inputs need (mutool/pdftoppm render to PNG).
+  fetch https://download.osgeo.org/libtiff/tiff-$TIFF_VER.tar.gz
+  run libtiff bash -c "cmake -S src/tiff-$TIFF_VER -B b-tiff ${CM[*]} -Dtiff-tools=OFF -Dtiff-tests=OFF -Dtiff-contrib=OFF -Dtiff-docs=OFF -Dcxx=OFF \
+    -Dzlib=ON -Djpeg=ON -Dlzma=OFF -Dzstd=OFF -Dwebp=OFF -Djbig=OFF -Dlerc=OFF -Dlibdeflate=OFF -Dpixarlog=ON \
+    && cmake --build b-tiff -j$J && DESTDIR=$OV cmake --install b-tiff"
+  # leptonica: the codecs tesseract's inputs need (mutool/pdftoppm render to PNG; scans come as TIFF).
   fetch https://github.com/DanBloomberg/leptonica/releases/download/$LEPT_VER/leptonica-$LEPT_VER.tar.gz
   run leptonica bash -c "cmake -S src/leptonica-$LEPT_VER -B b-lept ${CM[*]} -DSW_BUILD=OFF -DBUILD_PROG=OFF \
-    -DENABLE_ZLIB=ON -DENABLE_PNG=ON -DENABLE_JPEG=ON -DENABLE_GIF=OFF -DENABLE_TIFF=OFF -DENABLE_WEBP=OFF -DENABLE_OPENJPEG=OFF \
+    -DENABLE_ZLIB=ON -DENABLE_PNG=ON -DENABLE_JPEG=ON -DENABLE_GIF=OFF -DENABLE_TIFF=ON -DENABLE_WEBP=OFF -DENABLE_OPENJPEG=OFF \
     && cmake --build b-lept -j$J && DESTDIR=$OV cmake --install b-lept"
   ls -la "$OV/usr/lib" "$OV/usr/lib/cmake" || true
   touch "$OV/.done"
@@ -83,11 +90,14 @@ inst() { mkdir -p "$(dirname "$2")"; "$L/llvm-strip" --strip-debug -o "$2" "$1";
 tesseract() {
   deps
   fetch https://github.com/tesseract-ocr/tesseract/archive/refs/tags/$TESS_VER.tar.gz tesseract-$TESS_VER.tar.gz
+  # TESSDATA_PREFIX: the CMake build compiles no data directory in (only autotools does), so
+  # without it tesseract looked for its models in ./ (ccutil.cpp: <prefix>/tessdata/).
   local ld; ld=$(dirname "$(find "$OV/usr/lib" -name 'LeptonicaConfig.cmake' -o -name 'leptonica-config.cmake' | head -n1)")
   run tesseract-cmake cmake -S src/tesseract-$TESS_VER -B b-tess "${CM[@]}" -DLeptonica_DIR="$ld" \
     -DSW_BUILD=OFF -DOPENMP_BUILD=OFF -DGRAPHICS_DISABLED=ON -DDISABLED_LEGACY_ENGINE=ON \
     -DBUILD_TRAINING_TOOLS=OFF -DBUILD_TESTS=OFF -DENABLE_LTO=OFF -DENABLE_NATIVE=OFF \
-    -DDISABLE_ARCHIVE=ON -DDISABLE_CURL=ON -DINSTALL_CONFIGS=ON
+    -DDISABLE_ARCHIVE=ON -DDISABLE_CURL=ON -DINSTALL_CONFIGS=ON \
+    -DCMAKE_CXX_FLAGS="-DTESSDATA_PREFIX=/usr/share"
   grep -iE 'leptonica|simd|openmp|legacy|curl|archive' "$R/tesseract-cmake.log" | tail -n 30 || true
   run tesseract-build cmake --build b-tess -j$J --target tesseract
   local d=$R/pkg/tesseract
