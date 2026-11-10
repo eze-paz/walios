@@ -1,10 +1,9 @@
 {
-  "tag": "farm-2026-11-06-47",
+  "tag": "farm-2026-11-10-52",
   "busybox": "runtimes-ilp32-2026-11-03-7",
   "python": "runtimes-ilp32-2026-11-03-6",
   "perl": "runtimes-ilp32-2026-11-03-8",
   "lua": "runtimes-ilp32-2026-11-02-3",
-  "shards": 4,
-  "note": "libtest rerun: libc/libc++ before the other packages archives (libeatmydata open() won every test program in the first run)",
-  "only": "abseil-cpp,alsa-lib,apparmor,argp-standalone,argtable2,bctoolbox,check,cjson,clucene,cmocka,confuse,cunit,czmq,daq,datefudge,eudev,eventlog,fmt,gmp,graphene,graphite2,gtest,heimdal,hiredis,inih,iniparser,isl26,ivykis,jansson,jitterentropy-library,json-c,judy,ldns,libart-lgpl,libassuan,libatomic_ops,libcap,libcbor,libconfig,libdaemon,libdbi,libeatmydata,libedit,libestr,libev,libevent,libfastjson,libfontenc,libice,libid3tag,libisofs,libksba,libmd,libmilter,libmnl,libnet,libnetfilter_acct,libnetfilter_conntrack,libnetfilter_cthelper,libnetfilter_cttimeout,libnetfilter_log,libnetfilter_queue,libnfnetlink,libnftnl,libnvme,libogg,libpcap,libpciaccess,librelp,libresample,libsamplerate,libsodium,libsrtp,libssh2,libtheora,libtirpc,libtool,libunistring,libusb,libusb-compat,libuv,libvdpau,libverto,libvorbis,libx11,libxau,libxcb,libxcomposite,libxcursor,libxdamage,libxdmcp,libxext,libxfixes,libxi,libxinerama,libxkbfile,libxrandr,libxrender,libxshmfence,libxtst,libxv,libxxf86vm,linenoise,log4cplus,lzo,mpc1,mpdecimal,mpfr4,multipath-tools,musl-fts,musl-obstack,neon,nghttp3,npth,oniguruma,opus,opusfile,pixman,pkcs11-helper,popt,portaudio,protobuf,razor,readline,rlog,simdjson,skalibs,slang,sngtc_client,speexdsp,tinyxml2,vanessa_adt,volk,vulkan-loader,xcb-util,xmlrpc-c,yaml,zlib,zlib-ng"
+  "shards": 12,
+  "note": "R49 full catalog (1174 built): every package + library cases"
 }
