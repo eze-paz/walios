@@ -59,11 +59,19 @@ if (ADIR) for (const sub of ['main', 'community']) {
   for (const dir of fs.readdirSync(path.join(ADIR, sub))) {
     let t; try { t = fs.readFileSync(path.join(ADIR, sub, dir, 'APKBUILD'), 'utf8'); } catch { continue; }
     const name = (t.match(/^pkgname=["']?([^"'\s]+)/m) || [])[1] || dir;
+    const own = (s) => s && !/[$`{}:]/.test(s) && !fs.existsSync(path.join(ADIR, 'main', s)) && !fs.existsSync(path.join(ADIR, 'community', s));
+    // provides= names too (mpfr4 provides mpfr), and a -dev subpackage under the name clean()
+    // leaves of it: mpc1's "mpfr-dev" became "mpfr", found nowhere, so mpc1 was built without
+    // mpfr4 when they shared a wave (R49: "mpfr.h not found").
+    const pv = t.match(/^provides="([^"]*)"/m);
+    if (pv) for (const s of pv[1].split(/\s+/).map((x) => x.replace(/[<>=~].*$/, ''))) if (own(s)) origin[s] = origin[s] || dir;
     const m = t.match(/^subpackages="([^"]*)"/m);
     if (!m) continue;
     for (let s of m[1].split(/\s+/)) {
       s = s.split(':')[0].replace(/\$\{?pkgname\}?/g, name);
-      if (s && !/[$`{}]/.test(s) && !fs.existsSync(path.join(ADIR, 'main', s)) && !fs.existsSync(path.join(ADIR, 'community', s))) origin[s] = origin[s] || dir;
+      if (own(s)) origin[s] = origin[s] || dir;
+      const b = s && s.replace(/-dev$/, '');
+      if (b !== s && own(b)) origin[b] = origin[b] || dir;
     }
   }
 }

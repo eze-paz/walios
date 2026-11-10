@@ -66,6 +66,10 @@ jobs:
           # ~/aptc/libtool; farm.yml): /usr/local/bin is ahead of /usr/bin, and build-one.sh puts
           # the macros first on ACLOCAL_PATH. samu (Alpine's ninja, which muon recipes call) is
           # the muon bootstrap's built-in samurai.
+          # Debian's asciidoc and a2x run "python3 -m asciidoc": setup-python's python3 is first on
+          # PATH and has no asciidoc module (git's docs failed in R49) -- the system python3 does.
+          for f in /usr/bin/asciidoc /usr/bin/a2x; do [ -f "$f" ] && ! grep -q '/usr/bin/python3 -m' "$f" &&
+            sudo sed -i -E '1s@^#!.*python3.*$@#!/usr/bin/python3@; s@(^|[^/])python3 -m@\1/usr/bin/python3 -m@' "$f"; done; true
           if [ -d ~/aptc/libtool/usr/local ]; then sudo cp -a ~/aptc/libtool/usr/local/. /usr/local/
             for t in autoconf automake libtoolize; do $t --version 2>/dev/null | head -1; done; muon version 2>/dev/null | head -1
             if [ -x /usr/local/libexec/muon-bootstrap ] && ! command -v samu >/dev/null; then
