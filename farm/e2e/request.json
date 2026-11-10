@@ -1,9 +1,9 @@
 {
-  "tag": "farm-2026-11-10-52",
+  "tag": "farm-2026-11-10-54",
   "busybox": "runtimes-ilp32-2026-11-03-7",
   "python": "runtimes-ilp32-2026-11-03-6",
   "perl": "runtimes-ilp32-2026-11-03-8",
   "lua": "runtimes-ilp32-2026-11-02-3",
   "shards": 12,
-  "note": "R49 full catalog (1174 built): every package + library cases"
+  "note": "R50 full catalog (1178 built, git back): every package + library cases"
 }
