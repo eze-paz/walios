@@ -2,5 +2,5 @@
   "all": true,
   "max": 3000,
   "publish": true,
-  "note": "R50 full catalog: R49 + plan maps provides=C:/Program Files/Git/-dev subpackages (mpc1), asciidoc on the system python3 (git)"
-}/n
+  "note": "R50 full catalog: R49 + plan maps provides= names and -dev subpackages (mpc1), asciidoc on the system python3 (git)"
+}
