@@ -144,6 +144,14 @@ for a in "\$@"; do
   case "\$a" in -c|-E|-S|-M|-MM) link=0;; -shared) shared=1;; -O|-O[0-9sgz]*|-Ofast) OPT=;; esac
   [ "\$prev" = -o ] && out="\$a"; prev="\$a"
 done
+# The linker's version, as a GNU-style linker reports it: wasm-ld takes GNU ld's options but says
+# only "LLD 22.x", where ELF lld adds "(compatible with GNU linkers)" -- muon picks its linker
+# for clang by that word and found none (fribidi, elinks, bubblewrap, quickjs-ng: "unable to
+# detect c compiler").
+case " \$* " in *" -Wl,--version "*|*" -Wl,-v "*)
+  v=\$($L/wasm-ld --version) || exit \$?
+  case "\$v" in *GNU*) ;; *) v="\$v (compatible with GNU linkers)";; esac
+  echo "\$v"; exit 0;; esac
 # __STDC_ISO_10646__: gcc on musl/glibc pre-includes stdc-predef.h, which defines it (wchar_t
 # holds Unicode code points); clang for wasm does not, and libedit refuses to build without
 # it. (Not the whole header: it redefines two clang builtins, a warning under -Werror.)
@@ -281,8 +289,21 @@ done
 # On Alpine /usr/lib is the linker's and make's default, so a .pc may name no -L at all
 # (skalibs': "Libs: -lskarnet") -- skarnet's configures build make's vpath from --libs-only-L
 # and stopped with "Unable to link against skalibs" (execline, utmps, s6, util-linux...).
+# A package found through the recipe's own PKG_CONFIG_PATH, outside the sysroot (glib's
+# bootstrap install under the build dir, for its bootstrap gobject-introspection), is not
+# under it: pkgconf would put the overlay in front of its paths ("glib.h not found"), so that
+# call runs without the sysroot -- the wrapper still maps the deps' /usr/include/... onto it.
 cat > bin/pkg-config <<'EOF'
 #!/bin/sh
+if [ -n "${PKG_CONFIG_SYSROOT_DIR:-}" ] && [ -n "${PKG_CONFIG_PATH:-}" ]; then
+  nosys=; oldifs=$IFS; IFS=:
+  for p in $PKG_CONFIG_PATH; do
+    case "$p" in ''|"$PKG_CONFIG_SYSROOT_DIR"|"$PKG_CONFIG_SYSROOT_DIR"/*) continue;; esac
+    for a in "$@"; do case "$a" in -*) continue;; esac; [ -f "$p/${a%%[<>=! ]*}.pc" ] && nosys=1; done
+  done
+  IFS=$oldifs
+  [ -n "$nosys" ] && unset PKG_CONFIG_SYSROOT_DIR
+fi
 case " $* " in *" --libs "*|*" --libs-only-L "*) ;; *) exec /usr/bin/pkg-config "$@";; esac
 out=$(/usr/bin/pkg-config "$@") || exit $?
 d=${PKG_CONFIG_SYSROOT_DIR:-}

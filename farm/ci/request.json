@@ -1,6 +1,7 @@
 {
-  "all": true,
-  "max": 3000,
+  "pkgs": "muon fribidi elinks bubblewrap quickjs-ng glib dbus-glib atop irqbalance avahi libnl3 iw hostapd gnutls knot rtmpdump harfbuzz pango cairo libxkbcommon gstreamer libepoxy fuse3 pixman libdrm dav1d json-c zstd pcre2 curl git jq libxml2 make nano ncurses readline sed sqlite tree wget xz flex bash coreutils mpc1 procps-ng",
+  "max": 600,
+  "chunk": 3,
   "publish": true,
-  "note": "R50 full catalog: R49 + plan maps provides= names and -dev subpackages (mpc1), asciidoc on the system python3 (git)"
+  "note": "R51 canary (TC v38): host muon from Alpine distfiles (muon.build 404s), wasm-ld version reported GNU-compatible (muon linker detection), pkg-config without sysroot for .pc files outside it (glib bootstrap gobject-introspection), libtoolize diagnosis; + meson and regression canaries"
 }

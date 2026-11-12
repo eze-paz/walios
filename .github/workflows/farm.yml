@@ -30,7 +30,7 @@ concurrency:
 
 env:
   TC: ${{ github.workspace }}/../wali-tc
-  TC_KEY: wali-tc-llvm22.1.3-pkgs-2026-10-31-x1-v37-ilp32
+  TC_KEY: wali-tc-llvm22.1.3-pkgs-2026-10-31-x1-v38-ilp32
 
 jobs:
   plan:
@@ -162,8 +162,11 @@ jobs:
             # package. Built as Alpine does: the one-file bootstrap (samurai built in) configures and
             # builds the real muon -- the bootstrap alone only configures muon's own tree ("failed
             # to load required embedded source", R46). The bootstrap stays as the host's samu.
-            MU=0.7.0 MUSHA=ef58a0323870ef682337361aa22187bfc2ad864dfee3392881c5e9ca160be98a7381d4bfca57ed2097d6e4df802e49a45497c48828188f8c3740448cf4523edf
-            if curl -sSfL --retry 4 --retry-delay 10 -o /tmp/mu.tgz https://muon.build/releases/v$MU/muon-v$MU.tar.gz &&
+            # (muon.build no longer serves its releases -- R50's host muon was a 404 -- so Alpine's
+            # distfiles mirror, checked against the same sha512 as Alpine's recipe)
+            MU=0.7.1 MUSHA=5459918efb6585f4f5a44ebe29166e5817488839b6d99b614250e65e2d82d8ce3ed34c09cbd317e316ba27bb3d81e9922f5bdc3e258a7b033e290c173b47dd14
+            if { curl -sSfL --retry 4 --retry-delay 10 -o /tmp/mu.tgz https://distfiles.alpinelinux.org/distfiles/edge/muon-v$MU.tar.gz ||
+                 curl -sSfL --retry 4 --retry-delay 10 -o /tmp/mu.tgz https://muon.build/releases/v$MU/muon-v$MU.tar.gz; } &&
                echo "$MUSHA  /tmp/mu.tgz" | sha512sum -c --quiet && tar xzf /tmp/mu.tgz -C /tmp &&
                (cd /tmp/muon-v$MU && mkdir -p build-boot && cc -O2 -Iinclude src/amalgam.c -o build-boot/muon-bootstrap &&
                 build-boot/muon-bootstrap setup -Dlibcurl=disabled -Dlibarchive=disabled -Dlibpkgconf=disabled -Dtracy=disabled \

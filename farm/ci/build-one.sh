@@ -86,6 +86,18 @@ emit() {  # status reason kind smoke
       sed -n "$(( n > 300 ? n - 300 : 1 )),$(( n - 1 ))p" "$c" | grep -v '^| ' | tail -n 40 | cut -c1-300 >> "$log"
     done
   fi
+  # libtoolize that saw no LT_INIT (nor AC_CONFIG_AUX_DIR) in a configure.ac that has both
+  # (libnl3, gnutls since R46, with Alpine's libtool 2.6.2 and autoconf 2.73): what it finds.
+  if [ "$1" = fail ] && [ -n "${log:-}" ] && [ -d "${bdir:-/nonexistent}" ] && grep -q "Remember to add 'LT_INIT'" "$log" 2>/dev/null; then
+    ca=$(find "$bdir" -maxdepth 3 -name configure.ac -type f 2>/dev/null | head -1)
+    if [ -n "$ca" ]; then
+      { echo "farm: libtoolize diagnosis in ${ca%/configure.ac}:"
+        for t in libtoolize m4 gm4 sed grep autoconf autom4te; do printf '  %s = %s\n' "$t" "$(command -v $t)"; done
+        env | grep -E '^(M4|SED|GREP|EGREP|ECHO|AUTOCONF|AUTOM4TE|AUTOMAKE|ACLOCAL)=' | sed 's/^/  env /'
+        (cd "${ca%/configure.ac}" && libtoolize --debug --dry-run --copy --force 2>&1 | grep -E 'extract_trace|M4|m4 |error|trace' | head -30)
+      } 2>&1 | cut -c1-300 >> "$log"
+    fi
+  fi
   if [ "$1" = fail ] && [ -z "${FARM_RETRY:-}" ] && [ -n "${log:-}" ] &&
      grep -qE 'cannot (run test program|check for file existence) (while|when) cross compiling|Cross compiling but no --with-cross-build' "$log" 2>/dev/null; then
     mv "$log" "$OUT/$pkg.cross.log"; rm -rf "${bdir:-/nonexistent}"
