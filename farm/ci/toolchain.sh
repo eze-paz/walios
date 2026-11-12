@@ -101,7 +101,7 @@ fi
 cat > env.sh <<EOF
 export WALI_TC=$TC WALI_LLVM=$L WALI_SYSROOT=$S WALI_ABI=$ABI WALI_TARGET="$TGT" WALI_SIDE_OBJ="$SIDEOBJ"
 export CC=$TC/bin/wali-cc CXX=$TC/bin/wali-c++ LD=$TC/bin/wali-ld
-export AR=$L/llvm-ar RANLIB=$L/llvm-ranlib NM=$L/llvm-nm STRIP=$TC/bin/wali-strip OBJCOPY=$L/llvm-objcopy
+export AR=$TC/bin/wali-ar RANLIB=$L/llvm-ranlib NM=$L/llvm-nm STRIP=$TC/bin/wali-strip OBJCOPY=$L/llvm-objcopy
 export CMAKE_TOOLCHAIN_FILE=$TC/wali.cmake
 export PATH=$TC/bin:\$PATH
 EOF
@@ -353,8 +353,33 @@ done
 rm -rf "$t"; exit $rc
 EOF
 chmod +x bin/wali-noelfasm
-printf '#!/bin/sh\nargs=""\nfor a in "$@"; do [ "$a" = "-nostdlib" ] || args="$args $a"; done\nexec %s/wasm-ld $args\n' "$L" > bin/wali-ld
+# `ld -v` as ELF lld answers it, "(compatible with GNU linkers)": libtool decides by that word
+# whether the linker can build shared libraries at all (with_gnu_ld) -- without it every -module
+# and every shared library stopped at "cannot build a shared library" or got no archive_cmds
+# (util-linux's pam module, then libsmartcols.so.1.1.0 never made). The -shared link itself is
+# the compiler wrapper's archive.
+cat > bin/wali-ld <<EOF
+#!/bin/sh
+if [ \$# = 1 ]; then case "\$1" in -v|-V|--version|-version)
+  v=\$($L/wasm-ld --version) || exit \$?
+  case "\$v" in *GNU*) ;; *) v="\$v (compatible with GNU linkers)";; esac
+  echo "\$v"; exit 0;; esac; fi
+args=""
+for a in "\$@"; do [ "\$a" = "-nostdlib" ] || args="\$args \$a"; done
+exec $L/wasm-ld \$args
+EOF
 chmod +x bin/wali-ld
+# ar: llvm-ar takes GNU ar's operations, but its --version names no GNU, and muon then took it
+# for a Solaris ar and called it with no archive name ("an archive name must be specified":
+# quickjs-ng's static library). It answers as the GNU-compatible ar it is.
+cat > bin/wali-ar <<EOF
+#!/bin/sh
+if [ \$# = 1 ]; then case "\$1" in --version|-V)
+  $L/llvm-ar --version || exit \$?
+  echo "(GNU ar compatible: the GNU Binutils ar interface of the Free Software Foundation)"; exit 0;; esac; fi
+exec $L/llvm-ar "\$@"
+EOF
+chmod +x bin/wali-ar
 # BSD headers musl leaves out and Alpine adds with bsd-compat-headers: sys/queue.h (the
 # runner's glibc copy, BSD-licensed, self-contained) and a minimal sys/cdefs.h shim.
 mkdir -p $S/include/sys
@@ -454,7 +479,15 @@ Cflags:
 ' "${pc%%:*}" "${pc#*:}" > $S/lib/pkgconfig/${pc%%:*}.pc
 done
 # musl keeps crypt/resolv/util/... in libc; their -l names exist as empty archives (as in musl).
-for l in crypt resolv util xnet; do [ -f $S/lib/lib$l.a ] || $L/llvm-ar rcs $S/lib/lib$l.a; done
+# libatomic too: wasm atomics are instructions, and glib's meson asks for -latomic (R51).
+for l in crypt resolv util xnet atomic; do [ -f $S/lib/lib$l.a ] || $L/llvm-ar rcs $S/lib/lib$l.a; done
+# -lstdc++ (Alpine's C++ runtime): here libc++ with libc++abi, one archive (elfutils' configure
+# looks for __cxa_demangle in it).
+if [ ! -f $S/lib/libstdc++.a ] && [ -f $S/lib/libc++.a ]; then
+  $L/llvm-ar rcs $S/lib/libstdc++.a
+  for x in c++ c++abi; do [ -f $S/lib/lib$x.a ] && $L/llvm-ar qL $S/lib/libstdc++.a $S/lib/lib$x.a; done
+  $L/llvm-ar s $S/lib/libstdc++.a
+fi
 # Recipes and Makefiles that call cc/gcc/c++ directly get the WALI compiler; tools built to
 # run during the build use CC_FOR_BUILD/BUILD_CC/HOSTCC, which build-one.sh points at gcc.
 for n in cc gcc; do ln -sf wali-cc bin/$n; done

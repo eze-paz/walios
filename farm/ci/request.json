@@ -1,7 +1,7 @@
 {
-  "pkgs": "muon fribidi elinks bubblewrap quickjs-ng glib dbus-glib atop irqbalance avahi libnl3 iw hostapd gnutls knot rtmpdump harfbuzz pango cairo libxkbcommon gstreamer libepoxy fuse3 pixman libdrm dav1d json-c zstd pcre2 curl git jq libxml2 make nano ncurses readline sed sqlite tree wget xz flex bash coreutils mpc1 procps-ng",
+  "pkgs": "gnutls knot rtmpdump libmicrohttpd libnl3 iw hostapd gpm elinks quickjs-ng muon pkgconf util-linux glib dbus-glib avahi elfutils libsm libxt procps-ng atop irqbalance curl git jq libxml2 make nano ncurses readline sed sqlite tree wget xz flex bash coreutils mpc1 gmp mpfr4 libffi libpng expat file gawk grep diffutils findutils tar gzip bzip2 m4 bison libidn2 libunistring libarchive pcre2 zstd pixman json-c dav1d fribidi bubblewrap",
   "max": 600,
   "chunk": 3,
   "publish": true,
-  "note": "R51 canary (TC v38): host muon from Alpine distfiles (muon.build 404s), wasm-ld version reported GNU-compatible (muon linker detection), pkg-config without sysroot for .pc files outside it (glib bootstrap gobject-introspection), libtoolize diagnosis; + meson and regression canaries"
+  "note": "R52 canary (TC v39): libtoolize puts aux files in AC_CONFIG_AUX_DIR when its trace misses LT_INIT (gnutls/libnl3/gpm), wali-ld/wali-ar report GNU-compatible versions (libtool shared support: util-linux; muon ar: quickjs-ng), empty libatomic (glib), libstdc++ = libc++ + libc++abi (elfutils); m4 trace diagnosis; + autotools regression set"
 }

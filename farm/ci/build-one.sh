@@ -78,6 +78,8 @@ emit() {  # status reason kind smoke
   # A configure that failed leaves its reason in config.log, not in its output ("C compiler
   # cannot create executables": procps-ng in R46): the last lines before its variable dump.
   if [ "$1" = fail ] && [ -n "${log:-}" ] && [ -d "${bdir:-/nonexistent}" ]; then
+    grep -q 'C compiler cannot create executables' "$log" 2>/dev/null &&
+      echo "farm: config.log files: $(find "$bdir" -name config.log 2>/dev/null | head -5 | tr '\n' ' ')" >> "$log"
     find "$bdir" -name config.log -type f 2>/dev/null | head -5 | while read -r c; do
       grep -q '^configure: exit [1-9]' "$c" || continue
       n=$(grep -n -m1 '^## .*Cache variables' "$c" | cut -d: -f1); [ -n "$n" ] || n=$(wc -l < "$c")
@@ -94,7 +96,13 @@ emit() {  # status reason kind smoke
       { echo "farm: libtoolize diagnosis in ${ca%/configure.ac}:"
         for t in libtoolize m4 gm4 sed grep autoconf autom4te; do printf '  %s = %s\n' "$t" "$(command -v $t)"; done
         env | grep -E '^(M4|SED|GREP|EGREP|ECHO|AUTOCONF|AUTOM4TE|AUTOMAKE|ACLOCAL)=' | sed 's/^/  env /'
-        (cd "${ca%/configure.ac}" && libtoolize --debug --dry-run --copy --force 2>&1 | grep -E 'extract_trace|M4|m4 |error|trace' | head -30)
+        (cd "${ca%/configure.ac}" || exit 0
+         lt=libtoolize; command -v libtoolize.real >/dev/null && lt=libtoolize.real
+         $lt --debug --dry-run --copy --force 2>&1 | grep -E 'func_extract_trace_result=|_G_m4_traces=|export M4|M4=|-daq' | head -20
+         # extract-trace's own m4 call, by hand: the trace lines it should have seen, and m4's errors
+         echo "  m4 trace by hand:"
+         printf 'm4_changequote([,])m4_define([AC_DEFUN],[m4_define([$1],[$2])])AC_DEFUN([LT_INIT])AC_DEFUN([AC_CONFIG_AUX_DIR])AC_DEFUN([AC_PROG_LIBTOOL])\n' |
+           m4 -daq --prefix --trace=LT_INIT --trace=AC_CONFIG_AUX_DIR --trace=AC_PROG_LIBTOOL - configure.ac 2>&1 >/dev/null | head -12)
       } 2>&1 | cut -c1-300 >> "$log"
     fi
   fi
