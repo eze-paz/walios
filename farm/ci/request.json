@@ -1,7 +1,7 @@
 {
-  "pkgs": "gnutls knot rtmpdump libmicrohttpd libnl3 iw hostapd gpm elinks quickjs-ng muon pkgconf util-linux glib dbus-glib avahi elfutils libsm libxt procps-ng atop irqbalance curl git jq libxml2 make nano ncurses readline sed sqlite tree wget xz flex bash coreutils mpc1 gmp mpfr4 libffi libpng expat file gawk grep diffutils findutils tar gzip bzip2 m4 bison libidn2 libunistring libarchive pcre2 zstd pixman json-c dav1d fribidi bubblewrap",
+  "pkgs": "gnutls knot rtmpdump libmicrohttpd gpm elinks util-linux glib dbus-glib avahi atop irqbalance harfbuzz pango elfutils libsm libxt libxmu procps-ng tar libbsd libjpeg-turbo libavif ngtcp2 abseil-cpp aom protobuf protobuf-c tiff json-c c-ares gtest graphite2 libnl3 iw hostapd quickjs-ng muon pkgconf curl git jq libxml2 make nano ncurses readline sed sqlite tree wget xz flex bash coreutils gmp mpfr4 libffi libpng expat file gawk grep diffutils findutils gzip bzip2 m4 bison libarchive pcre2 zstd fribidi bubblewrap",
   "max": 600,
   "chunk": 3,
   "publish": true,
-  "note": "R52 canary (TC v39): libtoolize puts aux files in AC_CONFIG_AUX_DIR when its trace misses LT_INIT (gnutls/libnl3/gpm), wali-ld/wali-ar report GNU-compatible versions (libtool shared support: util-linux; muon ar: quickjs-ng), empty libatomic (glib), libstdc++ = libc++ + libc++abi (elfutils); m4 trace diagnosis; + autotools regression set"
+  "note": "R53 canary (TC v40): wali-cc answers -Wl,-v/--version itself only with no inputs (CMake ABI link: libjpeg-turbo), wali-ld --help names elf targets (libtool shared libs: util-linux, gpm), musl's __unused members renamed (tar, libbsd), __builtin_return_address = 0 (gnutls), empty libintl (procps-ng), symbol versioning off (elfutils); + regression set"
 }

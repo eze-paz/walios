@@ -81,7 +81,9 @@ emit() {  # status reason kind smoke
     grep -q 'C compiler cannot create executables' "$log" 2>/dev/null &&
       echo "farm: config.log files: $(find "$bdir" -name config.log 2>/dev/null | head -5 | tr '\n' ' ')" >> "$log"
     find "$bdir" -name config.log -type f 2>/dev/null | head -5 | while read -r c; do
-      grep -q '^configure: exit [1-9]' "$c" || continue
+      # (procps-ng in R52 had a config.log without a nonzero exit line: the compiler check's
+      # failure is shown anyway)
+      grep -q '^configure: exit [1-9]' "$c" || grep -q 'C compiler cannot create executables' "$c" || continue
       n=$(grep -n -m1 '^## .*Cache variables' "$c" | cut -d: -f1); [ -n "$n" ] || n=$(wc -l < "$c")
       echo "farm: ${c#"$bdir"/} (configure failed), its last checks:" >> "$log"
       # the last 300 lines minus the test programs' sources ("| " lines, mpc1 in R48: all of it)

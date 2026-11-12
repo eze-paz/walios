@@ -138,17 +138,20 @@ for d in cc c++; do
     cxxdefs="-D_LIBCPP_ENABLE_CXX17_REMOVED_UNARY_BINARY_FUNCTION -Wno-c++11-narrowing"; }
   cat > bin/wali-$d <<EOF
 #!/bin/bash
-link=1 shared=0 out=a.out OPT=-O2
+link=1 shared=0 out=a.out OPT=-O2 io=0
 prev=""
 for a in "\$@"; do
   case "\$a" in -c|-E|-S|-M|-MM) link=0;; -shared) shared=1;; -O|-O[0-9sgz]*|-Ofast) OPT=;; esac
+  case "\$a" in -o|*.c|*.cc|*.cpp|*.cxx|*.C|*.o|*.obj|*.s|*.S|*.a|*.so|*.lo|*.bc|-) io=1;; esac
   [ "\$prev" = -o ] && out="\$a"; prev="\$a"
 done
 # The linker's version, as a GNU-style linker reports it: wasm-ld takes GNU ld's options but says
 # only "LLD 22.x", where ELF lld adds "(compatible with GNU linkers)" -- muon picks its linker
 # for clang by that word and found none (fribidi, elinks, bubblewrap, quickjs-ng: "unable to
-# detect c compiler").
-case " \$* " in *" -Wl,--version "*|*" -Wl,-v "*)
+# detect c compiler"). Only a bare version query: CMake's compiler-ABI link also carries -Wl,-v,
+# with a source and -o, and must link (R51/R52: "Detecting C compiler ABI info - failed", no
+# CMAKE_SIZEOF_VOID_P -- libjpeg-turbo's "math cannot parse the expression: \" * 8\"").
+[ \$io = 0 ] && case " \$* " in *" -Wl,--version "*|*" -Wl,-v "*)
   v=\$($L/wasm-ld --version) || exit \$?
   case "\$v" in *GNU*) ;; *) v="\$v (compatible with GNU linkers)";; esac
   echo "\$v"; exit 0;; esac
@@ -161,11 +164,14 @@ case " \$* " in *" -Wl,--version "*|*" -Wl,-v "*)
 # -O2 unless the command line has its own -O (CFLAGS carry -O2 as abuild's do, so a recipe that
 # rewrites or drops it -- libgcrypt's jitter RNG must be -O0 -- is obeyed).
 # -msimd128: the baseline vector unit, as SSE2 is on x86-64 (every engine with JSPI or COI has it).
+# __builtin_return_address: wasm has no readable return address (clang: "Non-Emscripten
+# WebAssembly hasn't implemented __builtin_return_address", gnutls' key_share.c in R52); 0 is
+# what GCC gives when it cannot find one, and what Emscripten's emscripten_return_address does.
 # XSIMD_WITH_EMULATED=1: xsimd only takes its wasm backend under Emscripten, and with no
 # architecture it declares no API at all (pandas' scalar kernels use it); this is its own
 # switch for the portable one.
 F=($TGT --sysroot=$S -nostdlibinc $cxx -isystem $S/include -D_GNU_SOURCE -DXSIMD_WITH_EMULATED=1
-   -D__STDC_ISO_10646__=201206L \$OPT -mllvm -wasm-enable-sjlj -fwasm-exceptions -matomics -mbulk-memory -mexception-handling -msimd128 -pthread
+   -D__STDC_ISO_10646__=201206L '-D__builtin_return_address(x)=((void *)0)' \$OPT -mllvm -wasm-enable-sjlj -fwasm-exceptions -matomics -mbulk-memory -mexception-handling -msimd128 -pthread
    -Wno-implicit-function-declaration -Wno-int-conversion -Wno-incompatible-pointer-types
    -Wno-incompatible-function-pointer-types -Wno-unused-command-line-argument -Wno-ignored-optimization-argument
    -Wno-unknown-warning-option -Wno-long-long -Wno-macro-redefined $cxxdefs $ABIDEFS
@@ -364,6 +370,12 @@ if [ \$# = 1 ]; then case "\$1" in -v|-V|--version|-version)
   v=\$($L/wasm-ld --version) || exit \$?
   case "\$v" in *GNU*) ;; *) v="\$v (compatible with GNU linkers)";; esac
   echo "\$v"; exit 0;; esac; fi
+# --help as GNU ld's names its targets: libtool on linux* builds shared libraries only when
+# "\$LD --help" says ": supported targets: ... elf" (else ld_shlibs=no -- util-linux's
+# pam_lastlog2 "cannot build a shared library", gpm's libgpm.so link with no -shared, R52).
+if [ \$# = 1 ] && [ "\$1" = --help ]; then
+  $L/wasm-ld --help; rc=\$?
+  echo "wali-ld: supported targets: elf32-wasm32 elf64-wasm64 elf"; exit \$rc; fi
 args=""
 for a in "\$@"; do [ "\$a" = "-nostdlib" ] || args="\$args \$a"; done
 exec $L/wasm-ld \$args
@@ -383,6 +395,11 @@ chmod +x bin/wali-ar
 # BSD headers musl leaves out and Alpine adds with bsd-compat-headers: sys/queue.h (the
 # runner's glibc copy, BSD-licensed, self-contained) and a minimal sys/cdefs.h shim.
 mkdir -p $S/include/sys
+# musl names reserved struct members __unused (bits/stat.h: "long __unused[3]"), the BSD macro
+# for __attribute__((unused)) that sys/cdefs.h and libbsd define: any file with both stops at
+# "expected member name" (tar's gnulib, libbsd's setmode.c, R52). glibc calls them
+# __glibc_reserved; here __wali_reserved (padding, never read).
+grep -rl '__unused\[' $S/include 2>/dev/null | while read -r h; do sed -i 's/\b__unused\[/__wali_reserved[/g' "$h"; done
 # libbsd's queue.h (full BSD set: TAILQ_FOREACH_SAFE...) when the host has libbsd-dev,
 # else glibc's, which lacks the _SAFE iterators.
 if [ ! -f $S/include/sys/queue.h ]; then
@@ -480,7 +497,8 @@ Cflags:
 done
 # musl keeps crypt/resolv/util/... in libc; their -l names exist as empty archives (as in musl).
 # libatomic too: wasm atomics are instructions, and glib's meson asks for -latomic (R51).
-for l in crypt resolv util xnet atomic; do [ -f $S/lib/lib$l.a ] || $L/llvm-ar rcs $S/lib/lib$l.a; done
+# intl too: musl's libc has gettext (Alpine's -lintl comes from gettext; procps-ng's LIBS).
+for l in crypt resolv util xnet atomic intl; do [ -f $S/lib/lib$l.a ] || $L/llvm-ar rcs $S/lib/lib$l.a; done
 # -lstdc++ (Alpine's C++ runtime): here libc++ with libc++abi, one archive (elfutils' configure
 # looks for __cxa_demangle in it).
 if [ ! -f $S/lib/libstdc++.a ] && [ -f $S/lib/libc++.a ]; then

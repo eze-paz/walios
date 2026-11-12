@@ -20,3 +20,6 @@ cross_compiling=${FARM_CROSS:-yes}
 # No JIT backend targets wasm (pcre2's sljit: "Unsupported architecture"); Alpine enables
 # it for every arch it knows. config.site is read after the command line, so this wins.
 enable_jit=no
+# wasm objects have no ELF symbol versions (.symver): elfutils' configure stops with "Symbol
+# versioning is not supported" unless told; an explicit --enable-symbol-versioning still wins.
+enable_symbol_versioning=${enable_symbol_versioning-no}
