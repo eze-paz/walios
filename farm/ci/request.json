@@ -1,7 +1,7 @@
 {
-  "pkgs": "elfutils glib dbus-glib avahi atop irqbalance harfbuzz pango gobject-introspection py3-dbus py3-gobject3 vala libsecret libjpeg-turbo tiff libavif gnutls util-linux libmicrohttpd procps-ng tar libsm libxt libxmu libxaw ngtcp2 cmake abseil-cpp protobuf curl git jq libxml2 make nano ncurses readline sed sqlite tree wget xz bash coreutils gmp libffi libpng expat file gawk grep diffutils findutils gzip bzip2 m4 bison libarchive pcre2 zstd",
+  "pkgs": "glib dbus-glib avahi atop irqbalance harfbuzz pango gobject-introspection py3-dbus py3-gobject3 vala libsecret elfutils muon tiff libjpeg-turbo libwebp libxml2 libxslt util-linux gnutls libmicrohttpd procps-ng tar libsm libxt libxmu libxaw libx11 libxcb ngtcp2 cmake abseil-cpp protobuf curl git jq make nano ncurses readline sed sqlite tree wget xz bash coreutils gmp libffi libpng expat file gawk grep diffutils findutils gzip bzip2 m4 bison libarchive pcre2 zstd lua5.4 perl-xml-parser py3-markupsafe py3-yaml",
   "max": 600,
   "chunk": 3,
   "publish": true,
-  "note": "R54 canary (TC v41): elf.h gets RELR types (elfutils' gelf.h in glib's gresource), CMake package files' absolute /usr paths made relative (libjpeg-turbo targets -> tiff); + regression set"
+  "note": "R55 canary (TC v42): a -shared archive records what it linked (__wali_needed member: -L, -l, archives), program links add it transitively (glib's gresource: libgio's -lz, libelf's -lzstd); + regression set incl. side modules"
 }

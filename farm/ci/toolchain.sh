@@ -242,9 +242,22 @@ if [ \$link = 1 ] && [ \$shared = 1 ]; then
       @*) [ -f "\${a#@}" ] && for x in \$(cat "\${a#@}"); do case "\$x" in *.o|*.lo|*.obj) objs+=("\$x");; /*.a) ;; *.a) [ -f "\$x" ] && ars+=("\$x");; esac; done;;   # cmake/ninja response files
     esac
   done
+  # What the library itself was linked against -- an ELF .so keeps it as DT_NEEDED + RUNPATH --
+  # goes in as a text member, __wali_needed, that program links read back (wali_needed below):
+  # a program linking libgio's archive got no -lz, one linking libelf's no -lzstd (glib, R54).
+  nd=\$(mktemp -d); : > "\$nd/__wali_needed"
+  for a in "\${A[@]}"; do case "\$a" in
+    -L*) d=\${a#-L}; [ -d "\$d" ] && echo "-L\$(cd "\$d" && pwd)" >> "\$nd/__wali_needed";;
+    -lc|-lm|-ldl|-lpthread|-lrt|-lutil|-lxnet|-lresolv|-lcrypt) ;;
+    -l*) echo "\$a" >> "\$nd/__wali_needed";;
+    /*.a|/*.so|/*.so.*) [ -f "\$a" ] && echo "\$a" >> "\$nd/__wali_needed";;
+  esac; done
   rm -f "\$out"; $L/llvm-ar rcs "\$out" "\${objs[@]}" || exit 1
   for x in "\${ars[@]}"; do $L/llvm-ar qL "\$out" "\$x" || exit 1; done
-  [ \${#ars[@]} -gt 0 ] && $L/llvm-ranlib "\$out"
+  oa=\$(cd "\$(dirname "\$out")" && pwd)/\$(basename "\$out")
+  [ -s "\$nd/__wali_needed" ] && (cd "\$nd" && $L/llvm-ar q "\$oa" __wali_needed)
+  rm -rf "\$nd"
+  $L/llvm-ranlib "\$out"
   # -lfoo only searches lib*.a here (no dynamic linking), so give the archive that name too.
   case "\$out" in *lib*.so*) cp -f "\$out" "\${out%%.so*}.a";; esac
   exit 0
@@ -270,6 +283,26 @@ if [ \$link = 1 ]; then
     # No --start-group: wasm-ld rejects it, and like lld it resolves archives in any order.
     [ \${#ov[@]} -gt 0 ] && G=("\${ov[@]}")
   fi
+  # The needs the archives on the line recorded at their -shared link (__wali_needed, above),
+  # transitively: -L dirs, -l names (found as lib*.a / lib*.so in those dirs, the sysroot's and
+  # the overlay's), archives by path.
+  NEEDED=(); dirs=($S/lib); [ -n "\${WALI_OVERLAY:-}" ] && dirs+=("\$WALI_OVERLAY/usr/lib" "\$WALI_OVERLAY/lib")
+  for a in \${WALI_EXTRA_LDFLAGS:-}; do case "\$a" in -L*) dirs+=("\${a#-L}");; esac; done
+  todo=("\${A[@]}" "\${G[@]}"); seen=" "
+  while [ \${#todo[@]} -gt 0 ]; do
+    x=\${todo[0]}; todo=("\${todo[@]:1}"); f=""
+    case "\$x" in
+      -L*) dirs+=("\${x#-L}"); continue;;
+      -l*) for d in "\${dirs[@]}"; do
+             [ -f "\$d/lib\${x#-l}.a" ] && { f=\$d/lib\${x#-l}.a; break; }
+             [ -f "\$d/lib\${x#-l}.so" ] && { f=\$d/lib\${x#-l}.so; break; }; done;;
+      *.a|*.so|*.so.*) f=\$x;;
+    esac
+    { [ -n "\$f" ] && [ -f "\$f" ]; } || continue
+    case "\$seen" in *" \$f "*) continue;; esac; seen="\$seen\$f "
+    while read -r y; do [ -n "\$y" ] && { NEEDED+=("\$y"); todo+=("\$y"); }; done < <($L/llvm-ar p "\$f" __wali_needed 2>/dev/null)
+  done
+  A+=("\${NEEDED[@]}")
   if [ \${#G[@]} -gt 0 ]; then
     # With the overlay group first; if anything in it breaks the link, the same link without
     # it (and that attempt's own errors are what the caller sees). When that fails too, the
