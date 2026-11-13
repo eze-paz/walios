@@ -23,3 +23,7 @@ enable_jit=no
 # wasm objects have no ELF symbol versions (.symver): elfutils' configure stops with "Symbol
 # versioning is not supported" unless told; an explicit --enable-symbol-versioning still wins.
 enable_symbol_versioning=${enable_symbol_versioning-no}
+# Run-test answers for clang/musl/wasm that a cross build cannot find out (fontconfig in R55:
+# "cannot run test program while cross compiling" at OSSP's va_copy.m4, then its C99 vsnprintf).
+ac_cv_va_copy=${ac_cv_va_copy-C99}
+fc_cv_c99_vsnprintf=${fc_cv_c99_vsnprintf-yes}

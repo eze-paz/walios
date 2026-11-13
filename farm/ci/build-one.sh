@@ -53,6 +53,19 @@ if [ -n "${FARM_CROSS:-}" ]; then
   else echo "farm: the test program did not compile" >> "$log"; fi
   rm -rf "$p"
 fi
+# R55: configure's own "are we cross compiling" program (fopen conftest.out) exited 3 under wali-run
+# (ICU, fontconfig) where the probe's `return 0` ran. That program, traced, without the deps'
+# archives (here) and with them (below, as configure links it).
+ioprobe() {
+  local p; p=$(mktemp -d)
+  printf '#include <stdio.h>\nint main(void) { FILE *f = fopen("conftest.out", "w"); if (!f) return 1; return ferror(f) || fclose(f) != 0; }\n' > "$p/conftest.c"
+  if "${CC:-wali-cc}" -O2 "$p/conftest.c" -o "$p/conftest" >>"$log" 2>&1; then
+    (cd "$p" && WALI_TRACE=1 ./conftest) > "$p/trace" 2>&1; echo "farm: configure's IO test program ($1): rc=$?" >> "$log"
+    tail -n 25 "$p/trace" | cut -c1-200 >> "$log"
+  else echo "farm: configure's IO test program ($1) did not compile" >> "$log"; fi
+  rm -rf "$p"
+}
+[ -n "${FARM_CROSS:-}" ] && ioprobe "no deps"
 bdir=$(mktemp -d); trap 'rm -rf "$bdir"' EXIT
 pkgver="?"; BUILD_SECS=0; DEPS=""
 # why: the reason a failed build gives -- its first real error line. The first line merely
@@ -353,6 +366,7 @@ if [ -n "${WALI_OVERLAY_IDX:-}" ] && [ -f "${APORTS_DIR:-}/deps.json" ]; then
   export WALI_OVERLAY_LIBS
   echo "farm: linking against deps' archives: $WALI_OVERLAY_LIBS" >> "$log"
 fi
+[ -n "${FARM_CROSS:-}" ] && ioprobe "deps linked"
 # WALI ABI (32-bit pointers, 64-bit long) flags for this package, from abi-flags.txt; the
 # ILP32 ABI needs none.
 ABIFLAGS=""

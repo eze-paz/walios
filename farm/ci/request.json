@@ -1,7 +1,7 @@
 {
-  "pkgs": "glib dbus-glib avahi atop irqbalance harfbuzz pango gobject-introspection py3-dbus py3-gobject3 vala libsecret elfutils muon tiff libjpeg-turbo libwebp libxml2 libxslt util-linux gnutls libmicrohttpd procps-ng tar libsm libxt libxmu libxaw libx11 libxcb ngtcp2 cmake abseil-cpp protobuf curl git jq make nano ncurses readline sed sqlite tree wget xz bash coreutils gmp libffi libpng expat file gawk grep diffutils findutils gzip bzip2 m4 bison libarchive pcre2 zstd lua5.4 perl-xml-parser py3-markupsafe py3-yaml",
+  "pkgs": "fontconfig icu cairo harfbuzz pango libxft gobject-introspection py3-cairo py3-gobject3 avahi vala libsecret bash coreutils sqlite curl",
   "max": 600,
   "chunk": 3,
   "publish": true,
-  "note": "R55 canary (TC v42): a -shared archive records what it linked (__wali_needed member: -L, -l, archives), program links add it transitively (glib's gresource: libgio's -lz, libelf's -lzstd); + regression set incl. side modules"
+  "note": "R56 canary (TC v42): config.site answers OSSP va_copy (C99) + fontconfig's C99 vsnprintf for cross builds; native retry logs configure's IO test program traced (ICU's ./conftest exited 3 under wali-run)"
 }
