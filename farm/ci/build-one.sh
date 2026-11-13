@@ -382,6 +382,14 @@ for f in $(find "$pkgdir" -name 'lib*.so*' \( -type f -o -type l \) 2>/dev/null)
   a="${f%%.so*}.a"
   [ -e "$a" ] || { [ "$(head -c7 "$f" 2>/dev/null)" = '!<arch>' ] && cp -L "$f" "$a"; }
 done
+# CMake package files that name absolute /usr/... paths (libjpeg-turbo's targets: "/usr/lib/
+# libjpeg.so.8.3.2") point dependents at the build host's /usr, not the overlay (tiff, R53:
+# "references the file ... but this file does not exist"): relative to the file itself instead.
+find "$pkgdir" -path '*/cmake/*' -name '*.cmake' -type f 2>/dev/null | while read -r c; do
+  grep -q '"/usr/' "$c" || continue
+  rel=$(dirname "${c#"$pkgdir"/}" | sed 's|[^/][^/]*|..|g')
+  sed -i -e "s|\"/usr/|\"\${CMAKE_CURRENT_LIST_DIR}/$rel/usr/|g" -e "s|;/usr/|;\${CMAKE_CURRENT_LIST_DIR}/$rel/usr/|g" "$c"
+done
 # libtool .la files name /usr/lib/... paths, which then break every dependent's libtool link
 # ("'/usr/lib/libXdmcp.la' is not a valid libtool archive"); Alpine deletes them too.
 find "$pkgdir" -name '*.la' -delete 2>/dev/null

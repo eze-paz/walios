@@ -1,7 +1,7 @@
 {
-  "pkgs": "gnutls knot rtmpdump libmicrohttpd gpm elinks util-linux glib dbus-glib avahi atop irqbalance harfbuzz pango elfutils libsm libxt libxmu procps-ng tar libbsd libjpeg-turbo libavif ngtcp2 abseil-cpp aom protobuf protobuf-c tiff json-c c-ares gtest graphite2 libnl3 iw hostapd quickjs-ng muon pkgconf curl git jq libxml2 make nano ncurses readline sed sqlite tree wget xz flex bash coreutils gmp mpfr4 libffi libpng expat file gawk grep diffutils findutils gzip bzip2 m4 bison libarchive pcre2 zstd fribidi bubblewrap",
+  "pkgs": "elfutils glib dbus-glib avahi atop irqbalance harfbuzz pango gobject-introspection py3-dbus py3-gobject3 vala libsecret libjpeg-turbo tiff libavif gnutls util-linux libmicrohttpd procps-ng tar libsm libxt libxmu libxaw ngtcp2 cmake abseil-cpp protobuf curl git jq libxml2 make nano ncurses readline sed sqlite tree wget xz bash coreutils gmp libffi libpng expat file gawk grep diffutils findutils gzip bzip2 m4 bison libarchive pcre2 zstd",
   "max": 600,
   "chunk": 3,
   "publish": true,
-  "note": "R53 canary (TC v40): wali-cc answers -Wl,-v/--version itself only with no inputs (CMake ABI link: libjpeg-turbo), wali-ld --help names elf targets (libtool shared libs: util-linux, gpm), musl's __unused members renamed (tar, libbsd), __builtin_return_address = 0 (gnutls), empty libintl (procps-ng), symbol versioning off (elfutils); + regression set"
+  "note": "R54 canary (TC v41): elf.h gets RELR types (elfutils' gelf.h in glib's gresource), CMake package files' absolute /usr paths made relative (libjpeg-turbo targets -> tiff); + regression set"
 }

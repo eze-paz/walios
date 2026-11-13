@@ -400,6 +400,25 @@ mkdir -p $S/include/sys
 # "expected member name" (tar's gnulib, libbsd's setmode.c, R52). glibc calls them
 # __glibc_reserved; here __wali_reserved (padding, never read).
 grep -rl '__unused\[' $S/include 2>/dev/null | while read -r h; do sed -i 's/\b__unused\[/__wali_reserved[/g' "$h"; done
+# RELR relocations (musl 1.2.4's elf.h has them; this sysroot's musl is older): elfutils' gelf.h
+# uses Elf64_Relr, and glib's gresource tool includes it (R53).
+if [ -f $S/include/elf.h ] && ! grep -q 'Elf64_Relr' $S/include/elf.h; then
+  cat >> $S/include/elf.h <<'RELR'
+#ifndef _WALI_ELF_RELR
+#define _WALI_ELF_RELR
+typedef Elf32_Word Elf32_Relr;
+typedef Elf64_Xword Elf64_Relr;
+#ifndef SHT_RELR
+#define SHT_RELR 19
+#endif
+#ifndef DT_RELRSZ
+#define DT_RELRSZ 35
+#define DT_RELR 36
+#define DT_RELRENT 37
+#endif
+#endif
+RELR
+fi
 # libbsd's queue.h (full BSD set: TAILQ_FOREACH_SAFE...) when the host has libbsd-dev,
 # else glibc's, which lacks the _SAFE iterators.
 if [ ! -f $S/include/sys/queue.h ]; then
