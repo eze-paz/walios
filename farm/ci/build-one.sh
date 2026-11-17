@@ -66,6 +66,9 @@ ioprobe() {
   rm -rf "$p"
 }
 [ -n "${FARM_CROSS:-}" ] && ioprobe "no deps"
+# (and every wasm program that exits nonzero in this build -- configure's conftests -- logs its last
+# syscalls to <pkg>.exits.log: host.js WALI_EXITLOG)
+[ -n "${FARM_CROSS:-}" ] && export WALI_EXITLOG="$OUT/$pkg.exits.log"
 bdir=$(mktemp -d); trap 'rm -rf "$bdir"' EXIT
 pkgver="?"; BUILD_SECS=0; DEPS=""
 # why: the reason a failed build gives -- its first real error line. The first line merely

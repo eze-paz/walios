@@ -1689,6 +1689,7 @@ class Process {
             if (now - S.lastYield >= QUANTUM_MS) { S.lastYield = now; await new Promise(res => setImmediate(res)); }
             const r = BLOCKING.has(sysname) ? await S.sysAsync(sysname, map(a2)) : S.sys(sysname, map(a2));
             if (process.env.WALI_TRACE) process.stderr.write(`[p${S.pid}:${S.syscalls}] ${sysname}(${a2.join(',')}) = ${r} (async)\n`);
+            if (exitRing) ringPush(`[p${S.pid}:${S.syscalls}] ${sysname}(${a2.join(',')}) = ${r} (async)`);
             return r;
           });
         } else {
@@ -1700,6 +1701,7 @@ class Process {
             const dv = S.predeliver(); if (dv !== null) return dv;
             const r = S.sys(sysname, map(a2));
             if (process.env.WALI_TRACE) process.stderr.write(`[p${S.pid}:${S.syscalls}] ${sysname}(${a2.join(',')}) = ${r}\n`);
+            if (exitRing) ringPush(`[p${S.pid}:${S.syscalls}] ${sysname}(${a2.join(',')}) = ${r}`);
             return r;
           };
         }
@@ -1831,6 +1833,12 @@ class Process {
     return child;
   }
 }
+// WALI_EXITLOG=<file> (the farm's native-mode configure): a program that exits nonzero appends its
+// argv, cwd and last syscalls there -- configure's ./conftest exited 3 under wali-run for ICU (R55,
+// R56) while the same program run outside configure returned 0; a trace on stderr would land in
+// configure's own output.
+const exitRing = process.env.WALI_EXITLOG ? [] : null;
+function ringPush(l) { exitRing.push(l); if (exitRing.length > 40) exitRing.shift(); }
 class ExitError extends Error { constructor(code) { super('exit'); this.code = code; } }
 
 // run a program synchronously, return exit code (null if module unresolvable)
@@ -1932,6 +1940,9 @@ if (process.env.WALI_ARGV0) rootArgv[0] = process.env.WALI_ARGV0; // some progra
     if (!(fg && signalPgrp(fg, SIG.INT))) postSignal(rootProc, SIG.INT);
   });
   const code = JSPI ? await root.runAsync() : root.run();
+  if (exitRing && code !== 0) try {
+    fs.appendFileSync(process.env.WALI_EXITLOG, `== exit=${code} argv=${JSON.stringify(process.argv.slice(2))} cwd=${process.cwd()} env=${rootEnv.length} vars/${rootEnv.join('').length}B\n${exitRing.join('\n')}\n`);
+  } catch {}
   process.stderr.write(`[wali-host] exit=${code} procs=${procCount} syscalls=${syscallTotal} wall=${((Date.now() - t0) / 1000).toFixed(2)}s${JSPI ? ` [jspi] suspends=${pipeSuspends}pipe/${waitSuspends}wait` : ''}\n`);
   process.exit(code);
 })();

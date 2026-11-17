@@ -1,7 +1,7 @@
 {
-  "pkgs": "fontconfig icu cairo harfbuzz pango libxft gobject-introspection py3-cairo py3-gobject3 avahi vala libsecret bash coreutils sqlite curl",
+  "pkgs": "icu harfbuzz pango py3-dbus py3-gobject3 avahi py3-cairo cairo glib py3-numpy py3-markupsafe py3-yaml libxml2 bash coreutils sqlite curl",
   "max": 600,
   "chunk": 3,
   "publish": true,
-  "note": "R56 canary (TC v42): config.site answers OSSP va_copy (C99) + fontconfig's C99 vsnprintf for cross builds; native retry logs configure's IO test program traced (ICU's ./conftest exited 3 under wali-run)"
+  "note": "R57 canary (TC v43): meson cross file names python = python3 (setup-python 3.14, not meson's own 3.12: py3-dbus had no Python.h); host.js WALI_EXITLOG logs failing wasm programs' last syscalls in native-mode configure (ICU's conftest exit 3)"
 }

@@ -596,6 +596,9 @@ ar = '$L/llvm-ar'
 strip = '$TC/bin/wali-strip'
 nm = '$L/llvm-nm'
 pkg-config = 'pkg-config'
+# (python.find_installation() otherwise takes the interpreter meson runs under: the runner's
+# system 3.12, which has no Python.h -- py3-dbus in R56. setup-python's 3.14 is first on PATH.)
+python = 'python3'
 # (cc.run() checks, and the sanity check, run the wasm program on the build machine: farm-wave.yml)
 exe_wrapper = '/usr/local/bin/wali-run'
 [host_machine]
