@@ -1,7 +1,7 @@
 {
-  "pkgs": "icu harfbuzz pango zstd elfutils kmod bash coreutils",
+  "pkgs": "icu harfbuzz pango xz kmod libxft bash coreutils",
   "max": 600,
   "chunk": 3,
   "publish": true,
-  "note": "R60 canary (TC v44): shim posix_spawn/posix_spawnp on walios fork -- musl's needs clone(CLONE_VM), so system()/popen() failed (ICU's pkgdata install stopped before icu-uc.pc; harfbuzz/pango)"
+  "note": "R61 canary (TC v44): host.js runs native ELF execs under WALI_HOST_ENV (pkgdata: cannot resolve /bin/sh); shim posix_spawn/posix_spawnp on walios fork -- musl's needs clone(CLONE_VM), so system()/popen() failed (ICU's pkgdata install stopped before icu-uc.pc; harfbuzz/pango)"
 }

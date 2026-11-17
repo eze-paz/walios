@@ -1888,6 +1888,47 @@ function scriptExecRewrite(pabs, argv) {
   } catch {}
   return null;
 }
+// WALI_HOST_ENV=1 (the farm's binfmt runner): a wasm build helper that execs one of the build
+// host's own programs runs it natively, as on Linux. ICU's pkgdata runs system("install ...")
+// during ICU's install; /bin/sh is the runner's ELF, which this host could not resolve
+// ("execve: cannot resolve /bin/sh", status 127), so the install stopped before icu-uc.pc.
+// stdio: the guest's fds 0-2 that are host fds pass through; a pipe end is fed or filled
+// through a buffer (the native program runs to completion first).
+function nativeExecPath(p, envp) {
+  if (!process.env.WALI_HOST_ENV) return null;
+  let cands = [p];
+  if (!p.includes('/')) {
+    const pe = envp.find(e => e.startsWith('PATH=')); const P = pe ? pe.slice(5) : (process.env.PATH || '/usr/bin:/bin');
+    cands = P.split(':').filter(Boolean).map(d => path.join(d, p));
+  }
+  for (const c of cands) {
+    try {
+      const fd = fs.openSync(c, 'r'); const b = Buffer.alloc(4); fs.readSync(fd, b, 0, 4, 0); fs.closeSync(fd);
+      if (b[0] === 0x7f && b[1] === 0x45 && b[2] === 0x4c && b[3] === 0x46) return c;  // \x7fELF
+      if (p.includes('/')) return null;
+    } catch {}
+  }
+  return null;
+}
+function runNative(np, argv, envp, fdTable, cwd) {
+  const stdio = [], feed = [], fill = [];
+  for (let i = 0; i < 3; i++) {
+    const h = fdTable.get(i);
+    if (!h || h.devnull) stdio.push('ignore');
+    else if (h.std !== undefined) stdio.push(h.std);
+    else if (h.fd !== undefined) stdio.push(h.fd);
+    else if (h.fifo && h.end === 'r' && i === 0) { stdio.push('pipe'); feed.push(h.fifo); }
+    else if (h.fifo && h.end === 'w' && i > 0) { stdio.push('pipe'); fill[i] = h.fifo; }
+    else stdio.push('ignore');
+  }
+  let input;
+  if (feed.length) { const f = feed[0]; input = Buffer.concat(f.chunks); f.chunks = []; }
+  const env = {}; for (const e of envp) { const k = e.indexOf('='); if (k > 0) env[e.slice(0, k)] = e.slice(k + 1); }
+  const r = require('child_process').spawnSync(np, argv.slice(1), { argv0: argv[0], cwd, env, stdio, input, maxBuffer: 1 << 30 });
+  for (const i of [1, 2]) if (fill[i] && r.output && r.output[i] && r.output[i].length) { fill[i].chunks.push(Buffer.from(r.output[i])); wakePipe(fill[i]); }
+  if (r.error) return null;
+  return r.status !== null ? r.status : 128 + (require('os').constants.signals[r.signal] || 0);
+}
 function runProgram(p, argv, envp, fdTable, cwd, selfPath, cred, asPid, depth) {
   // "compiler as a service": the browser can't run native clang, but a build is
   // just a process the shell spawns. Here (node host) we resolve cc/clang to the
@@ -1908,6 +1949,7 @@ function runProgram(p, argv, envp, fdTable, cwd, selfPath, cred, asPid, depth) {
     const sc = scriptExecRewrite(pabs, argv);
     if (sc) return runProgram(sc.path, sc.argv, envp, fdTable, cwd, selfPath, cred, asPid, (depth || 0) + 1);
   }
+  const np = nativeExecPath(pabs, envp); if (np) return runNative(np, argv, envp, fdTable, cwd);
   const mp = resolveModulePath(pabs, selfPath);
   if (!mp) { process.stderr.write(`[wali-host] execve: cannot resolve ${p}\n`); return null; }
   const proc = new Process(mp, argv, envp, fdTable, cwd); if (cred) proc.cred = { ...cred }; if (asPid) { const old = procs.get(asPid); procs.delete(proc.pid); proc.pid = asPid; proc.pgid = old ? old.pgid : asPid; if (old && old.ppid) proc.ppid = old.ppid; else for (const P of procs.values()) if (P.childTasks && P.childTasks.has(asPid)) { proc.ppid = P.pid; break; } procs.set(asPid, proc); } applySuid(proc, mp);
@@ -1923,6 +1965,7 @@ async function runProgramAsync(p, argv, envp, fdTable, cwd, selfPath, cred, asPi
     const sc = scriptExecRewrite(pabs, argv);
     if (sc) return runProgramAsync(sc.path, sc.argv, envp, fdTable, cwd, selfPath, cred, asPid, (depth || 0) + 1);
   }
+  const np = nativeExecPath(pabs, envp); if (np) { await new Promise(res => setImmediate(res)); return runNative(np, argv, envp, fdTable, cwd); }
   const mp = resolveModulePath(pabs, selfPath);
   if (!mp) { process.stderr.write(`[wali-host] execve: cannot resolve ${p}\n`); return null; }
   const proc = new Process(mp, argv, envp, fdTable, cwd); if (cred) proc.cred = { ...cred }; if (asPid) { const old = procs.get(asPid); procs.delete(proc.pid); proc.pid = asPid; proc.pgid = old ? old.pgid : asPid; if (old && old.ppid) proc.ppid = old.ppid; else for (const P of procs.values()) if (P.childTasks && P.childTasks.has(asPid)) { proc.ppid = P.pid; break; } procs.set(asPid, proc); } applySuid(proc, mp);
