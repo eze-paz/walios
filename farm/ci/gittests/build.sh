@@ -47,9 +47,13 @@ tar czf "$OUT/git-tests-$GITV.tar.gz" --exclude='t/perf' t GIT-BUILD-OPTIONS tem
 # walios shipped only the git binary, so `git submodule` was "not a git command". Installed at
 # /usr/libexec/git-core (GIT_EXEC_PATH) by sandpie's walios-backend.js.
 SCRIPTS="git-submodule git-sh-setup git-sh-i18n git-mergetool--lib git-merge-octopus git-merge-one-file git-merge-resolve git-mergetool git-quiltimport git-request-pull git-web--browse git-difftool--helper git-filter-branch"
-make "${MAKEVARS[@]}" $SCRIPTS
-mkdir -p ../gc/usr/libexec/git-core && cp $SCRIPTS ../gc/usr/libexec/git-core/ && cp -r mergetools ../gc/usr/libexec/git-core/
+make "${MAKEVARS[@]}" $SCRIPTS git-sh-i18n--envsubst
+mkdir -p ../gc/usr/libexec/git-core && cp $SCRIPTS git-sh-i18n--envsubst ../gc/usr/libexec/git-core/ && cp -r mergetools ../gc/usr/libexec/git-core/
+# walios's git.wasm was built with prefix=$HOME on the build box: its compiled-in exec-path is
+# /home/aezequiel/libexec/git-core. Point that at the real one, so git finds its scripts even
+# when GIT_EXEC_PATH is unset (git's own test-lib unsets it; so does env -i).
+mkdir -p ../gc/home/aezequiel/libexec && ln -s /usr/libexec/git-core ../gc/home/aezequiel/libexec/git-core
 chmod 755 ../gc/usr/libexec/git-core/git-*
 head -1 ../gc/usr/libexec/git-core/git-submodule
-tar czf "$OUT/git-core-$GITV.tar.gz" -C ../gc usr
+tar czf "$OUT/git-core-$GITV.tar.gz" -C ../gc usr home
 ls -la "$OUT"
