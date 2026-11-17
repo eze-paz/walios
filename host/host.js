@@ -381,7 +381,7 @@ class Process {
   }
   syncShm() { for (const [base, at] of this.shmAt) this.syncShmOne(base, at); }
   retire() {                         // process is gone: unregister + disarm timers
-    try { fs.unlinkSync(path.join(require('os').tmpdir(), `wali_env_${this.pid}`)); } catch {} // env files accumulate otherwise
+    try { fs.unlinkSync(path.join(require('os').tmpdir(), `wali_env_${process.pid}_${this.pid}`)); } catch {} // env files accumulate otherwise
     for (const [base, m] of this.maps) this.msyncMap(base, m);            // flush shared file mappings
     try { this.syncShm(); } catch {}                                      // flush shm
     procs.delete(this.pid);
@@ -1622,8 +1622,16 @@ class Process {
       if (name === '__init' || name === '__deinit') wali[name] = () => 0;
       else if (name === '__get_init_envfile') wali[name] = (buf, sz) => {
         if (!S.env.length) return 0;
-        const f = path.join(require('os').tmpdir(), `wali_env_${S.pid}`);
-        fs.writeFileSync(f, S.env.join('\n') + '\n');
+        // The env file is newline-separated (wali-musl's init_env), so a value containing a
+        // newline splits into a fragment with no '=' and init_env exits 3 before main. Autoconf
+        // exports as_nl='<newline>': every program configure ran died so (ICU's "cannot run C
+        // compiled programs", R55-R58). Dropped, as walios' browser kernel does (wali-worker.js).
+        const safe = S.env.filter(e => e.indexOf('\n') < 0);
+        if (!safe.length) return 0;
+        // (named per host process: every wali-run root is guest pid 100, and parallel builds
+        // ran many at once on one /tmp)
+        const f = path.join(require('os').tmpdir(), `wali_env_${process.pid}_${S.pid}`);
+        fs.writeFileSync(f, safe.join('\n') + '\n');
         S.wstr(buf, f, sz); return 1;
       };
       else if (name === 'log_execution') { // wasm-opt --log-execution instrumentation: a hook at every
