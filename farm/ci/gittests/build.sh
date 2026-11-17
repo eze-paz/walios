@@ -33,6 +33,9 @@ MAKEVARS=(
   SHELL_PATH=/bin/sh TAR=tar
 )
 make -j"$(nproc)" "${MAKEVARS[@]}" t/helper/test-tool t/helper/test-fake-ssh GIT-BUILD-OPTIONS
+# templates/blt: test-lib.sh points GIT_TEMPLATE_DIR there (and bails out without it)
+make "${MAKEVARS[@]}" -C templates SHELL_PATH=/bin/sh PERL_PATH=/usr/bin/perl
+test -d templates/blt || { echo "!! templates/blt missing"; exit 1; }
 for b in t/helper/test-tool t/helper/test-fake-ssh; do
   head -c4 "$b" | od -An -tx1 | grep -qi "00 61 73 6d" || { echo "!! $b is not wasm"; exit 1; }
 done
