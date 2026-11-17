@@ -34,5 +34,5 @@ jobs:
         env: { GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}' }
         run: |
           tag=gittests-2.45.3-${{ github.run_number }}
-          gh release create "$tag" out/git-tests-2.45.3.tar.gz --prerelease --title "$tag" \
+          gh release create "$tag" out/git-tests-2.45.3.tar.gz out/git-core-2.45.3.tar.gz --prerelease --title "$tag" \
             --notes "git 2.45.3 test suite (t/ + WALI test helpers) for walios; built by farm/ci/gittests/build.sh"

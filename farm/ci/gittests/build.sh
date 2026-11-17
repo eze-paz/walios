@@ -43,4 +43,13 @@ ls -la t/helper/test-tool t/helper/test-fake-ssh
 # The package: t/ (minus perf), the helpers in place, GIT-BUILD-OPTIONS, templates dir for
 # GIT_TEST_TEMPLATE_DIR. Paths stay relative to the git tree (test-lib.sh expects ../ layout).
 tar czf "$OUT/git-tests-$GITV.tar.gz" --exclude='t/perf' t GIT-BUILD-OPTIONS templates
+# git's scripted commands (git submodule, git-sh-setup, mergetool, ...) for walios's exec path:
+# walios shipped only the git binary, so `git submodule` was "not a git command". Installed at
+# /usr/libexec/git-core (GIT_EXEC_PATH) by sandpie's walios-backend.js.
+SCRIPTS="git-submodule git-sh-setup git-sh-i18n git-mergetool--lib git-merge-octopus git-merge-one-file git-merge-resolve git-mergetool git-quiltimport git-request-pull git-web--browse git-difftool--helper git-filter-branch"
+make "${MAKEVARS[@]}" $SCRIPTS
+mkdir -p ../gc/usr/libexec/git-core && cp $SCRIPTS ../gc/usr/libexec/git-core/ && cp -r mergetools ../gc/usr/libexec/git-core/
+chmod 755 ../gc/usr/libexec/git-core/git-*
+head -1 ../gc/usr/libexec/git-core/git-submodule
+tar czf "$OUT/git-core-$GITV.tar.gz" -C ../gc usr
 ls -la "$OUT"
