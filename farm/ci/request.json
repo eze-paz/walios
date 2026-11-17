@@ -1,7 +1,7 @@
 {
-  "pkgs": "icu harfbuzz pango apr atf cgdb dovecot eggdrop mrtg ocaml5 perdition libxft bash coreutils",
+  "pkgs": "icu harfbuzz pango zstd elfutils kmod bash coreutils",
   "max": 600,
   "chunk": 3,
   "publish": true,
-  "note": "R59 canary (TC v43): host.js env file drops newline values (autoconf's as_nl killed every program a native-mode configure ran: exit 3 before main, ICU) and is named per host process"
+  "note": "R60 canary (TC v44): shim posix_spawn/posix_spawnp on walios fork -- musl's needs clone(CLONE_VM), so system()/popen() failed (ICU's pkgdata install stopped before icu-uc.pc; harfbuzz/pango)"
 }
