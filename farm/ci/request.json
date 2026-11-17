@@ -1,7 +1,7 @@
 {
-  "pkgs": "icu harfbuzz pango py3-dbus py3-gobject3 avahi py3-cairo cairo glib py3-numpy py3-markupsafe py3-yaml libxml2 bash coreutils sqlite curl",
+  "pkgs": "icu harfbuzz bash",
   "max": 600,
   "chunk": 3,
   "publish": true,
-  "note": "R57 canary (TC v43): meson cross file names python = python3 (setup-python 3.14, not meson's own 3.12: py3-dbus had no Python.h); host.js WALI_EXITLOG logs failing wasm programs' last syscalls in native-mode configure (ICU's conftest exit 3)"
+  "note": "R58 canary (TC v43): WALI_EXITLOG decodes path syscalls and lists env var names (ICU's conftest exits 3 right after mapping a 7637-byte file = its env size)"
 }

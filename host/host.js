@@ -1689,7 +1689,7 @@ class Process {
             if (now - S.lastYield >= QUANTUM_MS) { S.lastYield = now; await new Promise(res => setImmediate(res)); }
             const r = BLOCKING.has(sysname) ? await S.sysAsync(sysname, map(a2)) : S.sys(sysname, map(a2));
             if (process.env.WALI_TRACE) process.stderr.write(`[p${S.pid}:${S.syscalls}] ${sysname}(${a2.join(',')}) = ${r} (async)\n`);
-            if (exitRing) ringPush(`[p${S.pid}:${S.syscalls}] ${sysname}(${a2.join(',')}) = ${r} (async)`);
+            if (exitRing) ringPush(`[p${S.pid}:${S.syscalls}] ${sysname}(${a2.join(',')}) = ${r}${ringPath(S, sysname, a2)} (async)`);
             return r;
           });
         } else {
@@ -1701,7 +1701,7 @@ class Process {
             const dv = S.predeliver(); if (dv !== null) return dv;
             const r = S.sys(sysname, map(a2));
             if (process.env.WALI_TRACE) process.stderr.write(`[p${S.pid}:${S.syscalls}] ${sysname}(${a2.join(',')}) = ${r}\n`);
-            if (exitRing) ringPush(`[p${S.pid}:${S.syscalls}] ${sysname}(${a2.join(',')}) = ${r}`);
+            if (exitRing) ringPush(`[p${S.pid}:${S.syscalls}] ${sysname}(${a2.join(',')}) = ${r}${ringPath(S, sysname, a2)}`);
             return r;
           };
         }
@@ -1839,6 +1839,9 @@ class Process {
 // configure's own output.
 const exitRing = process.env.WALI_EXITLOG ? [] : null;
 function ringPush(l) { exitRing.push(l); if (exitRing.length > 40) exitRing.shift(); }
+// (the path a path syscall named, read from guest memory)
+const RING_PATH_ARG = { open: 0, access: 0, stat: 0, lstat: 0, readlink: 0, execve: 0, openat: 1, faccessat: 1, faccessat2: 1, newfstatat: 1, fstatat: 1, readlinkat: 1, statx: 1 };
+function ringPath(S, sysname, a2) { const i = RING_PATH_ARG[sysname]; if (i === undefined) return ''; try { return ' ' + JSON.stringify(S.cstr(Number(a2[i]))); } catch { return ''; } }
 class ExitError extends Error { constructor(code) { super('exit'); this.code = code; } }
 
 // run a program synchronously, return exit code (null if module unresolvable)
@@ -1941,7 +1944,7 @@ if (process.env.WALI_ARGV0) rootArgv[0] = process.env.WALI_ARGV0; // some progra
   });
   const code = JSPI ? await root.runAsync() : root.run();
   if (exitRing && code !== 0) try {
-    fs.appendFileSync(process.env.WALI_EXITLOG, `== exit=${code} argv=${JSON.stringify(process.argv.slice(2))} cwd=${process.cwd()} env=${rootEnv.length} vars/${rootEnv.join('').length}B\n${exitRing.join('\n')}\n`);
+    fs.appendFileSync(process.env.WALI_EXITLOG, `== exit=${code} argv=${JSON.stringify(process.argv.slice(2))} cwd=${process.cwd()} env=${rootEnv.length} vars/${rootEnv.join('').length}B names=${rootEnv.map(e => e.split('=')[0]).join(',')}\n${exitRing.join('\n')}\n`);
   } catch {}
   process.stderr.write(`[wali-host] exit=${code} procs=${procCount} syscalls=${syscallTotal} wall=${((Date.now() - t0) / 1000).toFixed(2)}s${JSPI ? ` [jspi] suspends=${pipeSuspends}pipe/${waitSuspends}wait` : ''}\n`);
   process.exit(code);
