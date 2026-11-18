@@ -1,1 +1,1 @@
-{ "gittests": "gittests-2.45.3-9", "runtimes": "runtimes-wali-2026-11-18-11", "shards": 20, "timeout": 900, "why": "full git suite in walios (kernel vfs5); a fresh browser per script", "try": 2 }
+{ "gittests": "gittests-2.45.3-15", "runtimes": "runtimes-wali-2026-11-18-11", "shards": 20, "timeout": 900, "env": "", "why": "final: kernel with fork-from-thread, FIFOs, mtimes, links, exec, nc; git with extras", "try": 3 }
