@@ -1,1 +1,1 @@
-{ "abi": "wali", "only": "busybox perl cpython", "why": "NUL-separated env reader (libc-envpatch)", "try": 10 }
+{ "abi": "wali", "only": "cpython", "cpython_dir": "runtimes/cpython-v11", "why": "python_cxx v11 recipe (sandpie 473f496f) + NUL-separated env reader", "try": 11 }

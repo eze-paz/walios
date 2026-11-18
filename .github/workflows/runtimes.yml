@@ -27,6 +27,7 @@ jobs:
       abi: ${{ steps.in.outputs.abi }}
       only: ${{ steps.in.outputs.only }}
       tag: ${{ steps.in.outputs.tag }}
+      cpy: ${{ steps.in.outputs.cpy }}
     steps:
       - uses: actions/checkout@v4
         with: { sparse-checkout: runtimes }
@@ -38,10 +39,13 @@ jobs:
           node -e '
             const i = process.env.EV === "push" ? require("./runtimes/request.json") : JSON.parse(process.env.IN || "{}");
             const abi = i.abi || "ilp32", only = (i.only || "busybox lua perl cpython").trim();
+            // cpython_dir: another recipe directory (runtimes/cpython-v11 = the one the deployed binary came from)
+            const cpy = i.cpython_dir || "runtimes/cpython";
+            if (!/^runtimes\/cpython[\w-]*$/.test(cpy)) throw new Error("cpython_dir: " + cpy);
             if (!["wali", "ilp32"].includes(abi)) throw new Error("abi: " + abi);
             const tag = "runtimes-" + abi + "-" + new Date().toISOString().slice(0, 10) + "-" + process.env.GITHUB_RUN_NUMBER;
-            require("fs").appendFileSync(process.env.GITHUB_OUTPUT, `abi=${abi}\nonly=${only}\ntag=${tag}\n`);
-            console.log({ abi, only, tag });'
+            require("fs").appendFileSync(process.env.GITHUB_OUTPUT, `abi=${abi}\nonly=${only}\ntag=${tag}\ncpy=${cpy}\n`);
+            console.log({ abi, only, tag, cpy });'
 
   # busybox, lua and perl: the farm toolchain (farm/ci/toolchain.sh) in the requested ABI
   small:
@@ -110,9 +114,9 @@ jobs:
           bash farm/ci/toolchain.sh "$RUNNER_TEMP/tc"
           bash farm/ci/libc-envpatch.sh "$RUNNER_TEMP/tc" "$RUNNER_TEMP/sysroot.tar.gz"
       - name: python_cxx.wasm
-        run: bash runtimes/cpython/build.sh "$RUNNER_TEMP/sysroot.tar.gz" "$RUNNER_TEMP/py"
+        run: bash "${{ needs.inputs.outputs.cpy }}/build.sh" "$RUNNER_TEMP/sysroot.tar.gz" "$RUNNER_TEMP/py"
       - name: Stdlib extensions (zlib, _bz2, _sqlite3, _ssl)
-        run: bash runtimes/cpython/ext.sh "$RUNNER_TEMP/py"
+        run: if [ -f "${{ needs.inputs.outputs.cpy }}/ext.sh" ]; then bash "${{ needs.inputs.outputs.cpy }}/ext.sh" "$RUNNER_TEMP/py"; else echo "no ext.sh in ${{ needs.inputs.outputs.cpy }}"; fi
       - name: Logs on failure
         if: failure()
         run: for f in "$RUNNER_TEMP"/py/*.log; do echo "== $f"; tail -n 80 "$f"; done; true
@@ -121,8 +125,7 @@ jobs:
           P="$RUNNER_TEMP/py"; mkdir -p dist
           cp "$P/python_cxx.wasm" "$P/_sysconfigdata__linux_x86_64-linux-gnu.py" dist/
           cp "$P/cross-py/pyconfig.h" dist/python-pyconfig.h
-          cp "$P/ext-obj/python-exports.txt" dist/
-          tar czf dist/python-ext.tar.gz -C "$P/ext" .
+          if [ -d "$P/ext" ]; then cp "$P/ext-obj/python-exports.txt" dist/; tar czf dist/python-ext.tar.gz -C "$P/ext" .; fi
           ls -la dist
       - uses: actions/upload-artifact@v4
         with: { name: rt-cpython, path: dist/*, retention-days: 7 }
