@@ -21,7 +21,10 @@ GITV=2.45.3 ZV=1.3.1
 fetch() { curl -sSfL --retry 8 --retry-all-errors --retry-delay 10 -o "$2" "$1"; }
 
 # zlib (static, into a private prefix)
-fetch https://zlib.net/fossils/zlib-$ZV.tar.gz z.tgz && tar xzf z.tgz
+# (GitHub release first: zlib.net once answered a non-gzip page and the build died in tar)
+{ fetch https://github.com/madler/zlib/releases/download/v$ZV/zlib-$ZV.tar.gz z.tgz && gzip -t z.tgz; } \
+  || { fetch https://zlib.net/fossils/zlib-$ZV.tar.gz z.tgz && gzip -t z.tgz; }
+tar xzf z.tgz
 ( cd zlib-$ZV && CHOST=wasm32 CC="$CC" AR="$AR" RANLIB="$RANLIB" ./configure --static --prefix="$PWD/../zinst" >/dev/null \
   && make -j"$(nproc)" libz.a >/dev/null && make install >/dev/null )
 
