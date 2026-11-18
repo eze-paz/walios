@@ -64,6 +64,9 @@ const LINKS = fs.readFileSync(path.join(RT, 'busybox.links'), 'utf8').split(/\s+
 const ENV = { HOME: '/root', TERM: 'dumb', PATH: '/usr/local/bin:/bin:/usr/bin', HOSTNAME: 'walios', LC_ALL: 'C.UTF-8', NO_COLOR: '1',
   GIT_EXEC_PATH: '/usr/libexec/git-core',
   PERL5LIB: '/usr/share/perl5/vendor_perl:/usr/share/perl5:/usr/lib/perl5/vendor_perl' };
+// --env K=V,K2=V2: extra variables for the suite (e.g. GIT_TEST_GIT_DAEMON=1, the opt-in for
+// the tests that serve on a real TCP port)
+for (const kv of (arg('env') || '').split(',').filter(Boolean)) { const i = kv.indexOf('='); ENV[kv.slice(0, i)] = kv.slice(i + 1); }
 const cmdFor = (name) => [
   'cd /tmp/gt/t || exit 9',
   'chmod +x helper/test-tool helper/test-fake-ssh *.sh 2>/dev/null',
