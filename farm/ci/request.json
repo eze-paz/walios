@@ -1,7 +1,6 @@
 {
-  "pkgs": "icu harfbuzz pango zstd kmod bash coreutils",
-  "max": 600,
-  "chunk": 3,
+  "all": true,
+  "max": 3000,
   "publish": true,
-  "note": "R62 canary (TC v45): wali-elfdata -- ELF data-only .s/.S (ICU pkgdata -m static genccode) retried as C arrays; R61c proved native exec from wasm helpers works"
+  "note": "R63 full run (TC v45): posix_spawn shim, native ELF exec under WALI_HOST_ENV, wali-elfdata; R62 canary: icu installs its .pc files"
 }
