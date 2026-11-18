@@ -112,16 +112,22 @@ let chromium;
 try { ({ chromium } = require('playwright')); } catch { ({ chromium } = require(path.join(execSync('npm root -g').toString().trim(), 'playwright'))); }
 await new Promise((r) => server.listen(0, '127.0.0.1', r));
 const url = `http://127.0.0.1:${server.address().port}/harness.html`;
-let browser = await chromium.launch({ headless: true });
-let page;
+// A NEW BROWSER per script, with its own profile. Every kernel and process is a dedicated worker
+// in the page's renderer, each reserving a large shared wasm memory that a dead worker gives
+// back only lazily; scripts sharing one page ran out of reservations ("WebAssembly.Memory():
+// could not allocate memory") and later scripts sat silent until their timeout. A persistent
+// profile, not an incognito one: incognito OPFS has a ~1 GiB quota.
+let ctx = null, page = null, prof = null;
 const fresh = async () => {
-  if (page) await page.close().catch(() => {});
-  page = await browser.newPage();
+  if (ctx) await ctx.close().catch(() => {});
+  if (prof) fs.rmSync(prof, { recursive: true, force: true });
+  prof = fs.mkdtempSync(path.join(process.env.RUNNER_TEMP || '/tmp', 'gitsuite-prof-'));
+  ctx = await chromium.launchPersistentContext(prof, { headless: true });
+  page = ctx.pages()[0] || await ctx.newPage();
   await page.goto(url);
   const eng = await page.evaluate(() => window.walEngine);
   if (eng !== 'coi') throw new Error('harness came up as ' + eng + ', wanted coi');
 };
-await fresh();
 const results = {}, t0 = Date.now();
 // --deadline <minutes>: start no script after this (the job's own timeout would kill the shard
 // and its results with it). The results file is rewritten after every script either way.
@@ -131,22 +137,23 @@ for (const name of scripts) {
   if (Date.now() + Math.min(TIMEOUT_S, 600) * 1000 > DEADLINE) { results[name] = { status: 'not-run', pass: 0, fail: 0, skip: 0, known: 0, failures: [], host: [], secs: 0 }; continue; }
   const t = Date.now();
   let r;
-  try { r = await page.evaluate(([m, ms]) => {
+  try {
+    await fresh();
+    r = await page.evaluate(([m, ms]) => {
       m.blobs = {}; for (const [p, t] of Object.entries(m.blobText)) m.blobs[p] = new TextEncoder().encode(t).buffer; delete m.blobText;
       return window.walRun(m, ms);
-    }, [runMsg(name), TIMEOUT_S * 1000]); }
-  catch (e) {   // the page itself died (OOM, crash): note it and carry on with a new one
+    }, [runMsg(name), TIMEOUT_S * 1000]);
+  } catch (e) {   // the page itself died (OOM, crash): recorded as broken
     r = { out: '[suite] page error: ' + (e && e.message || e), code: -3 };
-    try { await fresh(); } catch (_) { await browser.close().catch(() => {}); browser = await chromium.launch({ headless: true }); page = null; await fresh(); }
   }
   const row = results[name] = { ...judge(name, r), secs: Math.round((Date.now() - t) / 1000) };
   console.log(`${row.status.padEnd(7)} ${name.padEnd(44)} pass ${String(row.pass).padStart(4)} fail ${String(row.fail).padStart(3)} skip ${String(row.skip).padStart(3)}${row.known ? ' todo ' + row.known : ''} ${row.secs}s`
     + (row.failures.length ? '\n          ' + row.failures.slice(0, 5).join('\n          ') : ''));
   save();
-  // A fresh page every 25 scripts: OPFS handles and worker garbage do not pile up.
-  if (Object.keys(results).length % 25 === 0) await fresh();
 }
-await browser.close(); server.close();
+if (ctx) await ctx.close().catch(() => {});
+if (prof) fs.rmSync(prof, { recursive: true, force: true });
+server.close();
 save();
 const tot = { pass: 0, fail: 0, skip: 0, known: 0 }, by = {};
 for (const r of Object.values(results)) { for (const k of Object.keys(tot)) tot[k] += r[k]; by[r.status] = (by[r.status] || 0) + 1; }

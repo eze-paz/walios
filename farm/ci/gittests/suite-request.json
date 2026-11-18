@@ -1,1 +1,1 @@
-{ "gittests": "gittests-2.45.3-9", "runtimes": "runtimes-wali-2026-11-18-11", "shards": 20, "timeout": 1800, "why": "full git suite in walios (kernel vfs5)" }
+{ "gittests": "gittests-2.45.3-9", "runtimes": "runtimes-wali-2026-11-18-11", "shards": 20, "timeout": 900, "why": "full git suite in walios (kernel vfs5); a fresh browser per script", "try": 2 }
