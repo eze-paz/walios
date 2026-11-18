@@ -57,3 +57,15 @@ chmod 755 ../gc/usr/libexec/git-core/git-*
 head -1 ../gc/usr/libexec/git-core/git-submodule
 tar czf "$OUT/git-core-$GITV.tar.gz" -C ../gc usr home
 ls -la "$OUT"
+
+# Candidate git.wasm with REAL fork() (Asyncify, as farm/ci/asyncify-fork.txt programs): the
+# shipped git uses the vfork protocol, whose child branch runs inside the parent until it
+# execs -- and git's child sets its die/warn routines before exec, which then stuck in the
+# parent ("warn() should not be called in child", t3600). Same tree, rebuilt with the define,
+# then wasm-opt --asyncify on SYS_fork. Published as git-asyncfork.wasm for sandpie to A/B.
+cd "$OLDPWD" 2>/dev/null || true
+cd "$(dirname "$OUT")/work/git-$GITV"
+make "${MAKEVARS[@]}" CFLAGS="-O2 -I$PWD/../zinst/include -D__WALI_ASYNCIFY_FORK" clean-obj >/dev/null 2>&1 || make "${MAKEVARS[@]}" clean >/dev/null 2>&1 || true
+make -j"$(nproc)" "${MAKEVARS[@]}" CFLAGS="-O2 -I$PWD/../zinst/include -D__WALI_ASYNCIFY_FORK" git
+"$TC/binaryen/bin/wasm-opt" --asyncify --pass-arg=asyncify-imports@wali.SYS_fork -O2 git -o "$OUT/git-asyncfork.wasm"
+ls -la "$OUT/git-asyncfork.wasm"
