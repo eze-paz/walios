@@ -12,6 +12,11 @@ mkdir -p "$OUT" work && cd work
 bash "$HERE/../toolchain.sh" "$TC"
 # shellcheck disable=SC1091
 source "$TC/env.sh"
+# libc: the walios env reader (musl-patches/src/env/initenv.c: a NUL-separated environment from
+# __get_init_envfile0, so values may contain newlines) swapped into this job's libc.a BEFORE
+# anything links -- the sysroot release predates it. Every wasm built below (the test helpers,
+# git-sh-i18n--envsubst, iconv, git) imports __get_init_envfile0.
+bash "$HERE/../libc-envpatch.sh" "$TC"
 GITV=2.45.3 ZV=1.3.1
 fetch() { curl -sSfL --retry 8 --retry-all-errors --retry-delay 10 -o "$2" "$1"; }
 
@@ -63,18 +68,7 @@ head -1 ../gc/usr/libexec/git-core/git-submodule
 # then wasm-opt --asyncify on SYS_fork. Published as git-asyncfork.wasm for sandpie to A/B.
 cd "$OLDPWD" 2>/dev/null || true
 cd "$(dirname "$OUT")/work/git-$GITV"
-# libc: the walios env reader (musl-patches/src/env/initenv.c: NUL-separated environment from
-# __get_init_envfile0, so values may contain newlines) swapped into this job's libc.a -- the
-# sysroot release predates it. The git built below imports __get_init_envfile0.
-REPO=$(cd "$HERE/../../.." && pwd)
-mkdir -p ../envpatch
-curl -sSfL --retry 6 -o ../envpatch/init_env.h https://raw.githubusercontent.com/arjunr2/wali-musl/243ec00c3ffb910375db487d7eb24ea76d1e2c9f/arch/wasm32/init_env.h
-LIBC="$WALI_SYSROOT/lib/libc.a"
-MEM=$("$WALI_LLVM/llvm-ar" t "$LIBC" | grep -E '^initenv\.l?o$' | head -1)
-[ -n "$MEM" ] || { echo "!! no initenv member in libc.a"; "$WALI_LLVM/llvm-ar" t "$LIBC" | grep -i env | head; exit 1; }
-"$CC" -c -O2 -I../envpatch "$REPO/musl-patches/src/env/initenv.c" -o "../envpatch/$MEM"
-( cd ../envpatch && "$WALI_LLVM/llvm-ar" r "$LIBC" "$MEM" )
-echo "libc.a: replaced $MEM"
+# (libc.a already carries the walios env reader: see the top)
 make "${MAKEVARS[@]}" prefix=/usr CFLAGS="-O2 -I$PWD/../zinst/include -D__WALI_ASYNCIFY_FORK" clean-obj >/dev/null 2>&1 || make "${MAKEVARS[@]}" clean >/dev/null 2>&1 || true
 # prefix=/usr: its exec-path is /usr/libexec/git-core (where walios installs git-core.tar.gz)
 make -j"$(nproc)" "${MAKEVARS[@]}" prefix=/usr CFLAGS="-O2 -I$PWD/../zinst/include -D__WALI_ASYNCIFY_FORK" git
