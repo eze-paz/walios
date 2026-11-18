@@ -432,7 +432,7 @@ self.onmessage = async (ev) => {
     if (m.tls >= 0 && inst.exports.__tls_base) inst.exports.__tls_base.value = m.tls;
     else if (m.sp >= 0 && !inst.exports.__stack_pointer && !warned.has('nosp')) { warned.add('nosp'); warn('fork: this binary does not export __stack_pointer; the child runs with the initial stack pointer (relink with -Wl,--export=__stack_pointer)'); }
     inst.exports.asyncify_start_rewind(asyncifyBuf);
-    drive();
+    drive(m.thread || undefined);   // forked from a thread: rewind through that thread's entry
     return;
   }
 
@@ -544,26 +544,23 @@ function driveRestore(snap, code, testFail) {
 // the same shared memory. `entry` is the module's thread trampoline -- wasi-threads
 // exports wasi_thread_start, wali-musl exports __wasm_thread_start_libc; both take
 // (tid, start_arg), set up __stack_pointer/__tls_base from start_arg and run the user
-// function. Run it to completion; fork/exec from a thread is not a thing, so none of
-// drive()'s protocol applies.
-function driveThread(entry, tid, startArg) {
-  let code = 0;
-  cpuGo();
-  try { inst.exports[entry](tid, startArg); }
-  catch (e) {
-    if (e instanceof ProcExit) code = e.code;
-    else { code = 139; self.postMessage({ t: 'trap', error: errText(e).slice(0, 400) }); }
-  }
-  finish(code);
-}
+// function. A thread CAN fork: git runs its filters and async helpers on a pthread that
+// forks and execs (start_async -> start_command). The fork unwinds to the thread entry,
+// exactly as a main-thread fork unwinds to _start, so the same handshake serves it; the
+// child -- a copy of just this thread, as on Linux -- rewinds through the same entry.
+// Before, that unwind simply returned from the entry: the thread ended without a word and
+// its process waited forever on the pipe the helper was to feed (every filter hung).
+function driveThread(entry, tid, startArg) { drive({ entry, tid, startArg }); }
 
-// Run the guest until it exits, servicing every fork() unwind on the way.
-function drive() {
+// Run the guest until it exits, servicing every fork() unwind on the way. `thread`: this
+// worker runs a thread (or a child forked from one): enter through its entry, not _start.
+function drive(thread) {
   let code = 0;
   cpuGo();
   try {
     for (;;) {
-      inst.exports._start();
+      if (thread) inst.exports[thread.entry](thread.tid, thread.startArg);
+      else inst.exports._start();
       if (forkState !== 'unwinding') break;
       inst.exports.asyncify_stop_unwind();
       // Ask the kernel to build the child. It replies with the pid once the child worker
@@ -579,6 +576,10 @@ function drive() {
       const spg = inst.exports.__stack_pointer, tlsg = inst.exports.__tls_base;
       i64[(ARGS >> 3) + 0] = spg ? BigInt(spg.value) : -1n;
       i64[(ARGS >> 3) + 1] = tlsg ? BigInt(tlsg.value) : -1n;
+      // which entry the child rewinds through: 0 _start, 1 wasi_thread_start, 2 __wasm_thread_start_libc
+      i64[(ARGS >> 3) + 2] = !thread ? 0n : thread.entry === 'wasi_thread_start' ? 1n : 2n;
+      i64[(ARGS >> 3) + 3] = BigInt(thread ? thread.tid | 0 : 0);
+      i64[(ARGS >> 3) + 4] = BigInt(thread ? thread.startArg >>> 0 : 0);
       cpuPark();
       Atomics.store(i32, 0, ST_FORKED);
       Atomics.notify(i32, 0);

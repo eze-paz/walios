@@ -60,6 +60,8 @@ const server = http.createServer((req, res) => {
   fs.createReadStream(file).pipe(res);
 });
 
+// scalar, git-shell, git-http-backend, git-daemon (sandpie mounts them when git first runs)
+const HAS_EXTRAS = fs.existsSync(path.join(RT, 'git-extras.tar.gz'));
 const LINKS = fs.readFileSync(path.join(RT, 'busybox.links'), 'utf8').split(/\s+/).filter((l) => l.startsWith('/'));
 const ENV = { HOME: '/root', TERM: 'dumb', PATH: '/usr/local/bin:/bin:/usr/bin', HOSTNAME: 'walios', LC_ALL: 'C.UTF-8', NO_COLOR: '1',
   GIT_EXEC_PATH: '/usr/libexec/git-core',
@@ -89,7 +91,7 @@ const BLOB_TEXT = {
 const runMsg = (name) => ({
   t: 'run', wasm: '/rt/busybox.wasm',
   manifest: { busybox: '/rt/busybox.wasm', sh: '/rt/busybox.wasm', hush: '/rt/busybox.wasm', perl: '/rt/perl.wasm', git: '/rt/git.wasm' },
-  tars: [['/rt/rootfs.tar.gz', '/'], ['/rt/git-core.tar.gz', '/'], ['/rt/git-tests.tar.gz', '/tmp/gt']],
+  tars: [['/rt/rootfs.tar.gz', '/'], ['/rt/git-core.tar.gz', '/'], ...(HAS_EXTRAS ? [['/rt/git-extras.tar.gz', '/']] : []), ['/rt/git-tests.tar.gz', '/tmp/gt']],
   lazyTars: { '/rt/perl.wasm': [['/rt/perllib.tar.gz', '/usr/lib/perl5']] },
   blobText: BLOB_TEXT, opfs: '/root', env: ENV, cwd: '/root', argv: ['busybox', 'sh', '-c', cmdFor(name)], appletLinks: LINKS,
 });

@@ -63,6 +63,7 @@ jobs:
           get "$(T gittests)" git-asyncfork.wasm git.wasm
           get "$(T gittests)" git-core-2.45.3.tar.gz git-core.tar.gz
           get "$(T gittests)" git-tests-2.45.3.tar.gz git-tests.tar.gz
+          get "$(T gittests)" git-extras-2.45.3.tar.gz git-extras.tar.gz || echo "(no git-extras in this release)"
           for f in busybox.wasm busybox.links perl.wasm perllib.tar.gz; do get "$(T runtimes)" $f $f; done
           cp browser/rootfs.tar.gz rt/
           ls -la rt

@@ -25,9 +25,9 @@
 // SAB layout (same shape as the wisp bridge): Int32Array ctl at 0 —
 // [0]=req seq, [1]=done seq, [2]=op, [3..5]=args, [6]=res, [7]=aux; data at 32.
 'use strict';
-const OP = { READDIR: 1, OPEN: 2, READ: 3, WRITE: 4, TRUNC: 5, CLOSE: 6, UNLINK: 7, MKDIR: 8, RMDIR: 9, RENAME: 10, RELEASE: 11, SETMODE: 12, FSYNC: 13, SYMLINK: 14, RENAMEDIR: 15, STAT: 16, LOCK: 17, UNLOCK: 18 };
+const OP = { READDIR: 1, OPEN: 2, READ: 3, WRITE: 4, TRUNC: 5, CLOSE: 6, UNLINK: 7, MKDIR: 8, RMDIR: 9, RENAME: 10, RELEASE: 11, SETMODE: 12, FSYNC: 13, SYMLINK: 14, RENAMEDIR: 15, STAT: 16, LOCK: 17, UNLOCK: 18, SETMTIME: 19, LINK: 20 };
 const EDQUOT = -122;   // shellfs download budget spent (the kernel names dbxsearch)
-const ENOENT = -2, EIO = -5, EBADF = -9, EACCES = -13, EEXIST = -17, EBUSY = -16, EINVAL = -22, ENOSPC = -28, ENOTEMPTY = -39, EISDIR = -21, EXDEV = -18, ENOTDIR = -20;
+const EPERM = -1, ENOENT = -2, EIO = -5, EBADF = -9, EACCES = -13, EEXIST = -17, EBUSY = -16, EINVAL = -22, ENOSPC = -28, ENOTEMPTY = -39, EISDIR = -21, EXDEV = -18, ENOTDIR = -20;
 const te = new TextEncoder(), td = new TextDecoder();
 let root = null, rootReady = null;
 
@@ -55,7 +55,13 @@ let shareStore = false;
 let dlBudget = null;                          // shellfs: {files, bytes} per command, or null (no cap)                       // set by the host ('share-store', or on 'sab')
 const HOME_SHARED = ['.ssh'];
 const homeShared = (r) => HOME_SHARED.some((h) => r === h || r.startsWith(h + '/')) || (shareStore && (r === 'sandpie' || r.startsWith('sandpie/')));
-const S = (C, rel) => { const scope = C.scope; const r = String(rel || '').replace(/^\/+/, ''); if (scope && homeShared(r)) return r; return scope ? (r ? scope + '/' + r : scope) : r; };
+// OPFS refuses '\' in a name (Linux takes any byte but '/' and NUL): git's tests make
+// 'post\image.txt' and `git submodule add` of a path with a backslash failed EACCES. Every
+// path from the kernel passes through S, which stores a backslash as U+F05C (private use);
+// listings turn it back (unBs), so the guest only ever sees the real name.
+const BS_ESC = '';
+const unBs = (n) => n.indexOf(BS_ESC) >= 0 ? n.split(BS_ESC).join('\\') : n;
+const S = (C, rel) => { const scope = C.scope; const r = String(rel || '').replace(/^\/+/, '').split('\\').join(BS_ESC); if (scope && homeShared(r)) return r; return scope ? (r ? scope + '/' + r : scope) : r; };
 
 // ---- bounded, never-hanging service --------------------------------------
 // The guest is BLOCKED (Atomics.wait) for as long as one request takes, and a channel's
@@ -178,6 +184,14 @@ const IDB_DEFAULT = { db: 'sandpie-dbxfull', store: 'cloudIndex', key: 'index' }
 // the store in step. Per origin like OPFS itself: modes do not travel via cloud.
 const META_DB = 'walios-fsmeta', META_STORE = 'modes';
 let modes = null, modesPromise = null;         // rel path -> mode bits (0..0o7777)
+// Explicit mtimes (utimensat: touch -d, tar x, make's stamps, git's test-tool chmtime) live in
+// the same store under MT_KEY + rel, as [mtime ms, OPFS lastModified when it was set]. OPFS
+// cannot set a file's lastModified, so the kernel's value vanished at the next listing. The
+// record holds only while the file's lastModified is still that base: a later write moves
+// it, and the write's own time wins, as on Linux. (Older workers read these keys as modes of
+// paths that never exist: harmless.)
+const MT_KEY = '\u0000mt:';
+const mtimes = new Map();                      // rel path -> [mtime ms, base lastModified]
 const normRel = (rel) => String(rel).replace(/^\/+/, '');
 // Bounded (IDB_MS): an open can queue forever behind another connection's version change
 // or another tab's long transaction. A late success closes the connection it was given.
@@ -205,7 +219,12 @@ async function loadModes(C) {
     await bounded(new Promise((res) => {
       let tx; try { tx = db.transaction(META_STORE, 'readonly'); } catch { return res(); }
       const st = tx.objectStore(META_STORE), rk = st.getAllKeys(), rv = st.getAll();
-      tx.oncomplete = () => { const ks = rk.result || [], vs = rv.result || []; for (let i = 0; i < ks.length; i++) m.set(ks[i], vs[i] | 0); res(); };
+      tx.oncomplete = () => { const ks = rk.result || [], vs = rv.result || [];
+        for (let i = 0; i < ks.length; i++) {
+          if (typeof ks[i] === 'string' && ks[i].startsWith(MT_KEY)) { if (Array.isArray(vs[i])) mtimes.set(ks[i].slice(MT_KEY.length), vs[i]); }
+          else m.set(ks[i], vs[i] | 0);
+        }
+        res(); };
       tx.onerror = tx.onabort = () => res();
     }), IDB_MS, 'reading file modes').catch(() => { note(C, 'walios: file modes unavailable (IndexedDB read stalled) - chmod bits fall back to defaults this run'); });
     try { db.close(); } catch {}
@@ -237,8 +256,11 @@ try {
   modesBus.onmessage = (ev) => {
     const m = ev.data; if (!m || !modes) return;
     if (m.t === 'set') { if (m.v < 0) modes.delete(m.rel); else modes.set(m.rel, m.v); }
-    else if (m.t === 'drop') { for (const k of [...modes.keys()]) if (k === m.rel || k.startsWith(m.rel + '/')) modes.delete(k); }
+    else if (m.t === 'drop') { for (const k of [...modes.keys()]) if (k === m.rel || k.startsWith(m.rel + '/')) modes.delete(k);
+      for (const k of [...mtimes.keys()]) if (k === m.rel || k.startsWith(m.rel + '/')) mtimes.delete(k); }
     else if (m.t === 'move') { for (const [o, n, v] of m.mv) { modes.delete(o); modes.set(n, v); } }
+    else if (m.t === 'mt') { if (m.v) mtimes.set(m.rel, m.v); else mtimes.delete(m.rel); }
+    else if (m.t === 'mtmove') { for (const [o, n, v] of m.mv) { mtimes.delete(o); mtimes.set(n, v); } }
   };
 } catch (_) { modesBus = null; }
 const busPost = (m) => { try { if (modesBus) modesBus.postMessage(m); } catch (_) {} };
@@ -247,8 +269,34 @@ function setMode(rel, mode) {
   if (mode < 0) { modes.delete(rel); metaWrite((s) => s.delete(rel)); busPost({ t: 'set', rel, v: -1 }); }
   else { const v = modeRecord(mode); modes.set(rel, v); metaWrite((s) => s.put(v, rel)); busPost({ t: 'set', rel, v }); }
 }
+function setMtime(rel, v) {                    // v: [mtime ms, base lastModified], or null to forget
+  rel = normRel(rel); if (!modes || !rel) return;
+  if (v) { mtimes.set(rel, v); metaWrite((s) => s.put(v, MT_KEY + rel)); }
+  else { if (!mtimes.has(rel)) return; mtimes.delete(rel); metaWrite((s) => s.delete(MT_KEY + rel)); }
+  busPost({ t: 'mt', rel, v: v || null });
+}
+// The mtime to report for a file whose OPFS lastModified is `lm`: its explicit one while that
+// still holds (see MT_KEY), else lm (a stale record is dropped).
+function mtimeOf(rel, lm) {
+  const r = mtimes.get(rel); if (!r) return lm;
+  if (r[1] === lm) return r[0];
+  setMtime(rel, null); return lm;
+}
+function dropMtimes(rel) {
+  const gone = []; for (const k of mtimes.keys()) if (k === rel || k.startsWith(rel + '/')) gone.push(k);
+  for (const k of gone) mtimes.delete(k);
+  if (gone.length) metaWrite((s) => { for (const k of gone) s.delete(MT_KEY + k); });
+}
+function moveMtimes(oldRel, newRel) {          // rename keeps the mtime (Linux); the base moves with it
+  const mv = []; for (const [k, v] of mtimes) if (k === oldRel || k.startsWith(oldRel + '/')) mv.push([k, newRel + k.slice(oldRel.length), v]);
+  if (!mv.length) return;
+  for (const [o, n, v] of mv) { mtimes.delete(o); mtimes.set(n, v); }
+  metaWrite((s) => { for (const [o, n, v] of mv) { s.delete(MT_KEY + o); s.put(v, MT_KEY + n); } });
+  busPost({ t: 'mtmove', mv });
+}
 function dropModes(rel) {                      // a path (and anything under it) is gone
   rel = normRel(rel); if (!modes || !rel) return;
+  dropMtimes(rel);
   const gone = []; for (const k of modes.keys()) if (k === rel || k.startsWith(rel + '/')) gone.push(k);
   if (!gone.length) return;
   for (const k of gone) modes.delete(k);
@@ -257,6 +305,7 @@ function dropModes(rel) {                      // a path (and anything under it)
 }
 function moveModes(oldRel, newRel) {
   oldRel = normRel(oldRel); newRel = normRel(newRel); if (!modes || !oldRel || !newRel) return;
+  moveMtimes(oldRel, newRel);
   const mv = []; for (const [k, v] of modes) if (k === oldRel || k.startsWith(oldRel + '/')) mv.push([k, newRel + k.slice(oldRel.length), v]);
   if (!mv.length) return;
   for (const [o, n, v] of mv) { modes.delete(o); modes.set(n, v); }
@@ -870,6 +919,7 @@ async function handle(C, op) {
         // Stored modes ride along as `p`; entries without one get the kernel's default.
         await loadModes(C);
         if (modes.size) for (const e of out) { const pm = modes.get((rel ? rel + '/' : '') + e.n); if (pm !== undefined) e.p = pm; }
+        if (mtimes.size) for (const e of out) if (!e.d && e.m) e.m = mtimeOf((rel ? rel + '/' : '') + e.n, e.m);   // explicit mtimes (MT_KEY)
         // Symlinks carry their target (`l`): the file's content. A cloud-only one (no local
         // copy yet) lists as a plain file until it is downloaded.
         if (d) await Promise.all(out.filter((e) => !e.d && isLinkMode(e.p)).map(async (e) => {
@@ -877,6 +927,7 @@ async function handle(C, op) {
         }));
         // aux carries how many entries are cloud-only AND unreadable right now, so
         // the kernel can warn once instead of the guest meeting an EIO per file.
+        for (const e of out) e.n = unBs(e.n);   // stored names back to real ones (see BS_ESC)
         out.sort((x, y) => x.n < y.n ? -1 : x.n > y.n ? 1 : 0);   // Promise.all filled `out` in completion order: ls shuffled between calls
         const b = te.encode(JSON.stringify(out));
         if (b.length > data.length) return finish(C, EINVAL, 0);
@@ -1050,6 +1101,7 @@ async function handle(C, op) {
           if (C.closed) return;
           e.file = f; e.fileAt = Date.now(); e.gen = genOf(e.rel); e.ra = null;
           size = f.size; mtime = f.lastModified;
+          await loadModes(C); mtime = mtimeOf(e.rel, mtime);   // an explicit mtime still in force (MT_KEY)
         }
         new DataView(data.buffer, data.byteOffset, 8).setFloat64(0, mtime, true);
         return finish(C, 8, size + 1);
@@ -1109,6 +1161,41 @@ async function handle(C, op) {
         try { const b = te.encode(target); sh.truncate(0); shWrite(sh, b, 0); sh.flush(); } finally { sh.close(); }
         await loadModes(C); setMode(lrel, S_IFLNK | 0o777);
         tombs.delete(String(lrel).replace(/^\/+/, '').toLowerCase()); reportChange(C, lrel); caseClash(C, lrel);
+        return finish(C, 0, 0);
+      }
+      case OP.LINK: {                        // in: old \0 new -- link(2) on the mount: out: aux = size
+        // OPFS has no hard links. A copy under the new name (with the old one's mode and mtime)
+        // is what link() is used for in practice: git's clone --local and pack tmp files link
+        // objects that never change again. Unlike a real link, later writes through one name
+        // are not seen through the other. Exclusive like link(): an existing name is EEXIST.
+        const [oldRel, newRel] = td.decode(data.slice(0, a0)).split('\0').map((r) => S(C, r));
+        try { await hydrate(C, oldRel); } catch (err) { return finish(C, err && err.quota ? EDQUOT : EIO, 0); }
+        if (writers.get(oldRel) && !copies.get(oldRel)) letGo(oldRel);   // pending writes land first
+        let src;
+        try { src = await (await fileHandleOf(oldRel)).getFile(); }
+        catch (e) { return finish(C, e && e.name === 'NotFoundError' ? ENOENT : e && e.name === 'TypeMismatchError' ? EPERM : EIO, 0); }
+        const { d: nd, name: nn } = await parentOf(newRel);
+        try { await nd.getFileHandle(nn); return finish(C, EEXIST, 0); }
+        catch (e) { if (e && e.name === 'TypeMismatchError') return finish(C, EEXIST, 0); if (e && e.name !== 'NotFoundError') throw e; }
+        const cp = copies.get(oldRel);
+        const bytes = cp ? cp.buf.slice(0, cp.size) : new Uint8Array(await src.arrayBuffer());
+        await writeWhole(newRel, bytes);
+        await loadModes(C);
+        const om = modes.get(normRel(oldRel)); if (om !== undefined) setMode(newRel, om);
+        try { const lm = (await (await fileHandleOf(newRel)).getFile()).lastModified; setMtime(newRel, [mtimeOf(normRel(oldRel), src.lastModified), lm]); } catch (_) {}
+        tombs.delete(String(newRel).replace(/^\/+/, '').toLowerCase()); reportChange(C, newRel); caseClash(C, newRel);
+        return finish(C, 0, bytes.length);
+      }
+      case OP.SETMTIME: {                    // in: path, a1 = mtime seconds (unsigned), a2 = milliseconds
+        // utimensat on the mount: OPFS keeps its own lastModified, so the time is recorded
+        // beside it (MT_KEY) against the file's lastModified right now.
+        const rel = S(C, td.decode(data.slice(0, a0)));
+        await loadModes(C);
+        if (writers.get(rel) && !copies.get(rel)) letGo(rel);   // a pending writer would move lastModified after this
+        let lm;
+        try { lm = (await (await fileHandleOf(rel)).getFile()).lastModified; }
+        catch (e) { return finish(C, e && e.name === 'NotFoundError' ? ENOENT : EIO, 0); }
+        setMtime(rel, [(a1 >>> 0) * 1000 + (a2 | 0), lm]);
         return finish(C, 0, 0);
       }
       case OP.SETMODE: {                     // in: path, a1 = mode bits (or -1 to forget)

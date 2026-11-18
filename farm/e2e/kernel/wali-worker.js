@@ -166,6 +166,7 @@ function inoOf(x) {
     if (inOpfs(x)) return pathIno('d:' + opfsRel(x));
     let n = dirInos.get(x); if (!n) dirInos.set(x, n = ++inoSeq); return n;
   }
+  if (x.linkIno) return x.linkIno;   // a link() copy on the mount reports its source's inode (OP.LINK)
   if (x.br !== undefined) return pathIno('f:' + x.br);
   if (!x.ino) x.ino = ++inoSeq; return x.ino;
 }
@@ -390,7 +391,7 @@ function protectedDelete(S, p) {
   }
   return true;
 }
-const OFS = { READDIR: 1, OPEN: 2, READ: 3, WRITE: 4, TRUNC: 5, CLOSE: 6, UNLINK: 7, MKDIR: 8, RMDIR: 9, RENAME: 10, RELEASE: 11, SETMODE: 12, FSYNC: 13, SYMLINK: 14, RENAMEDIR: 15, STAT: 16, LOCK: 17, UNLOCK: 18 };
+const OFS = { READDIR: 1, OPEN: 2, READ: 3, WRITE: 4, TRUNC: 5, CLOSE: 6, UNLINK: 7, MKDIR: 8, RMDIR: 9, RENAME: 10, RELEASE: 11, SETMODE: 12, FSYNC: 13, SYMLINK: 14, RENAMEDIR: 15, STAT: 16, LOCK: 17, UNLOCK: 18, SETMTIME: 19, LINK: 20 };
 // ---- bridges without SharedArrayBuffer (in-process engine) ----
 // The OPFS and WISP workers answer over a MessagePort here (sandpie-worker.js wires
 // one when the page has no SAB; the 'opfs-port' / 'wisp-port' messages). The VFS and
@@ -1083,7 +1084,7 @@ function prepareSpare(modKey, plan) {
       try { bulk = new SharedArrayBuffer(1 << 20, { maxByteLength: 64 << 20 }); }
       catch (_) { bulk = new SharedArrayBuffer(32 << 20); }
       const ctl = new SharedArrayBuffer(KCTL.BYTES);
-      const w = new Worker('wali-proc-worker.js?v=snap3');
+      const w = new Worker('wali-proc-worker.js?v=tfork4');
       let settle;
       const ready = new Promise((res) => { settle = res; });
       const sp = { w, ctl, bulk, memory, ready, settle: (m) => settle(m) };
@@ -1400,9 +1401,54 @@ function ptySlaveWrite(p, bytes) { const of = tflag(p, 4), onlcr = (of & OPOST) 
 // a reader on an empty pipe waits (in sysAsync) until a write wakes it or the
 // last writer closes (writers==0 => EOF). readWaiters holds suspend resolvers.
 function mkPipe() { return { chunks: [], writers: 1, readers: 1, readWaiters: [] }; }
+// Named pipes (mkfifo / mknod S_IFIFO). The node is a VFS file with f.fnode; every open of it
+// shares ONE pipe (fnode.pipe) until all its ends are closed, then the next open starts a
+// fresh one (unread data is dropped, as on Linux). Linux blocks open() until the other side
+// arrives; here open() returns at once and the same thing is seen at the next step instead:
+// a reader WAITS (not EOF) until a writer has connected, and a writer's data is kept until a
+// reader comes (no EPIPE before any reader ever opened). git's test-lib (git daemon output)
+// and every shell script that mkfifo's a pipe between two jobs depend on that.
+const fifoEOF = (f) => f.writers <= 0 && !(f.named && !f.hadWriter);       // read() would see end-of-file
+const fifoNoReader = (f) => f.readers <= 0 && !(f.named && !f.hadReader);  // write() would see EPIPE
+function fifoDrop(h) {                     // one end of h's pipe closed
+  const f = h.fifo;
+  if (h.end === 'w') { if (--f.writers <= 0) wakePipe(f); } else if (h.end === 'r') f.readers--;
+  // All ends closed: the next open starts afresh -- unless a writer left data no reader has
+  // seen yet (on Linux that writer would still sit in open() until a reader came).
+  if (f.named && f.readers <= 0 && f.writers <= 0 && f.node && f.node.pipe === f && !(f.chunks.length && !f.hadReader)) f.node.pipe = null;
+}
+function fifoOpen(f, acc) {                // an open() of a named pipe node: the handle's fifo/end
+  const node = f.fnode;
+  if (!node.pipe) { node.pipe = { chunks: [], writers: 0, readers: 0, readWaiters: [], named: true, hadWriter: false, hadReader: false, node }; }
+  const pp = node.pipe;
+  if (acc === 1) { pp.writers++; pp.hadWriter = true; wakePipe(pp); return { fifo: pp, end: 'w' }; }
+  pp.readers++; pp.hadReader = true;
+  if (acc === 2) { pp.writers++; pp.hadWriter = true; return { fifo: pp, end: 'r', alsoW: true }; }   // O_RDWR: both ends (Linux allows it on a FIFO)
+  return { fifo: pp, end: 'r' };
+}
 function wakePipe(fifo) { if (fifo.readWaiters && fifo.readWaiters.length) { const w = fifo.readWaiters; fifo.readWaiters = []; for (const f of w) f(); } }
+// Free every loopback listener (localListeners) that no live process holds a socket of any
+// more. close() freed the port only for an UNSHARED fd, and a process killed or exiting with
+// its listener open never freed it: git daemon (its socket shared with each forked child)
+// was stopped and could not listen again -- "Address in use" (git's t5570 restarts it).
+// Deferred a turn, so the exiting process has left `procs` by then.
+let listenerSweepQueued = false;
+function listenerSweepSoon() {
+  if (listenerSweepQueued || !localListeners.size) return;
+  listenerSweepQueued = true;
+  setTimeout(() => {
+    listenerSweepQueued = false;
+    const held = new Set();
+    for (const P of procs.values()) {
+      if (P._dead !== undefined) continue;
+      try { for (const h of P.fds.values()) if (h && h.sock && h.sock.local) held.add(h.sock.local); } catch (_) {}
+    }
+    for (const [port, L] of [...localListeners]) if (!held.has(L)) localListeners.delete(port);
+  }, 0);
+}
 function releaseFds(fdMap) { for (const h of fdMap.values()) {
-  if (h && h.fifo) { if (h.end === 'w') { if (--h.fifo.writers <= 0) wakePipe(h.fifo); } else if (h.end === 'r') h.fifo.readers--; }
+  if (h && h.sock && h.sock.listener) listenerSweepSoon();
+  if (h && h.fifo) { fifoDrop(h); if (h.alsoW) fifoDrop({ fifo: h.fifo, end: 'w' }); }
   else if (h && h.spair) { if (--h.spair.wr.writers <= 0) wakePipe(h.spair.wr); h.spair.rd.readers--; }
   else if (h && h.file && h.file.brId) opfsMaybeRelease(h.file); } }   // a process that exits with files open
 function wakeWaiters(S) { if (S.waitWaiters.length) { const w = S.waitWaiters; S.waitWaiters = []; for (const f of w) f(); } }
@@ -1410,7 +1456,8 @@ function wakeWaiters(S) { if (S.waitWaiters.length) { const w = S.waitWaiters; S
 // release their refcount or the reader never sees EOF (writers stays high).
 function execDropCloexec(fdMap) {
   for (const [fd, h] of [...fdMap]) if (h && h.cloexec) {
-    if (h.fifo) { if (h.end === 'w') { if (--h.fifo.writers <= 0) wakePipe(h.fifo); } else if (h.end === 'r') h.fifo.readers--; }
+    if (h.sock && h.sock.listener) listenerSweepSoon();
+    if (h.fifo) { fifoDrop(h); if (h.alsoW) fifoDrop({ fifo: h.fifo, end: 'w' }); }
     else if (h.spair) { if (--h.spair.wr.writers <= 0) wakePipe(h.spair.wr); h.spair.rd.readers--; }
     fdMap.delete(fd);
   }
@@ -1694,7 +1741,20 @@ function initWisp() {
 }
 function readSockaddr(S, p) { S.refresh();
   const fam = S.dv.getUint16(p, true), port = S.dv.getUint16(p + 2, false); let ip;
-  if (fam === 10) { const g = []; for (let i = 0; i < 16; i += 2) g.push(S.dv.getUint16(p + 8 + i, false).toString(16)); ip = g.join(':'); }
+  if (fam === 10) {
+    // Canonical text (RFC 5952): the groups were joined uncompressed, so '::' (the any-address
+    // busybox nc -l binds) read as 0:0:0:0:0:0:0:0, missed the loopback check and went to the
+    // relay, which cannot listen: "nc: listen: Address in use". A v4-mapped ::ffff:a.b.c.d is
+    // that IPv4 address, as a dual-stack socket treats it.
+    const g = []; for (let i = 0; i < 16; i += 2) g.push(S.dv.getUint16(p + 8 + i, false));
+    if (g.slice(0, 5).every((x) => x === 0) && g[5] === 0xffff) ip = `${g[6] >> 8}.${g[6] & 255}.${g[7] >> 8}.${g[7] & 255}`;
+    else {
+      let bs = -1, bl = 0;
+      for (let i = 0; i < 8;) { if (g[i]) { i++; continue; } let j = i; while (j < 8 && !g[j]) j++; if (j - i > bl && j - i >= 2) { bs = i; bl = j - i; } i = j; }
+      const h = g.map((x) => x.toString(16));
+      ip = bs < 0 ? h.join(':') : h.slice(0, bs).join(':') + '::' + h.slice(bs + bl).join(':');
+    }
+  }
   else ip = `${S.u8[p+4]}.${S.u8[p+5]}.${S.u8[p+6]}.${S.u8[p+7]}`; return { ip, port }; }
 function writeSockaddr(S, p, d) { S.refresh(); S.u8.fill(0, p, p + 16);
   S.dv.setUint16(p, 2, true); S.dv.setUint16(p + 2, d.port, false);
@@ -1871,6 +1931,11 @@ class Process {
     // signal and warn about --export-table instead.
     if (this.callGuest) return null;
     if (!this.sig.pending.size) return null;
+    // After a handler runs, scan again: a signal raised WHILE it ran (blocked then) is
+    // delivered as the handler returns, as on Linux -- not at some later syscall the program
+    // may never make (git's sigchain re-raises SIGTERM to reach the next handler, then the
+    // default action; test-tool exited 0 instead of dying by the signal).
+    for (let rescan = 0; rescan < 64; rescan++) { let ran = false;
     for (const sig of [...this.sig.pending]) {
       if (this.sig.mask & (1n << BigInt(sig - 1))) continue;
       this.sig.pending.delete(sig);
@@ -1881,7 +1946,7 @@ class Process {
         if (table) {
           try { table.get(h.ptr)(sig); this.sigDelivered = true;
             if (!(h.flags & 0x10000000)) this.sigAllRestart = false; // !SA_RESTART
-            continue; }
+            ran = true; break; }
           catch (e) { post(`[host] signal handler trap pid ${this.pid} sig ${sig}: ${e}\n`, 2); }
         } else if (!this.warnedNoTable) { this.warnedNoTable = true;
           post(`[host] pid ${this.pid} (${(this.argv||[]).slice(0,2).join(' ')}): handler set for signal ${sig} but binary lacks --export-table; default action\n`, 2); }
@@ -1894,6 +1959,7 @@ class Process {
       if (this.inChild()) return this.parkChild({ exited: 128 + sig });
       throw new ExitError(128 + sig);
     }
+    if (!ran) break; }
     return null;
   }
   // Async delivery: run the handler in the guest worker (callGuest), where it sits on
@@ -1903,6 +1969,7 @@ class Process {
   // handler; a guest whose binary lacks --export-table takes the default action.
   async predeliverAsync() {
     if (!this.sig.pending.size) return null;
+    for (let rescan = 0; rescan < 64; rescan++) { let ran = false;   // see predeliver
     for (const sig of [...this.sig.pending]) {
       if (this.sig.mask & (1n << BigInt(sig - 1))) continue;
       this.sig.pending.delete(sig);
@@ -1925,7 +1992,7 @@ class Process {
           this.sig.mask |= (1n << BigInt(sig - 1)) | BigInt(h.mask || 0n);
           try { await this.callGuest(h.ptr, sig); this.sigDelivered = true;
             if (!(h.flags & 0x10000000)) this.sigAllRestart = false;
-            continue; }
+            ran = true; break; }
           catch (e) { if (e instanceof ExitError) throw e;
             post(`[host] signal handler trap pid ${this.pid} sig ${sig}: ${e}\n`, 2); }
           finally { this.sig.mask = savedMask; }
@@ -1956,6 +2023,7 @@ class Process {
       if (this.inChild()) return this.parkChild({ exited: 128 + sig });
       throw new ExitError(128 + sig);
     }
+    if (!ran) break; }
     return null;
   }
   async onSigWakeAsync(restartable) {   // deliver pending signals (handlers run in the guest worker), then EINTR or restart
@@ -2019,7 +2087,7 @@ class Process {
     if (forWrite) return true;                            // pipes/sockets buffer unboundedly here
     if (h.std === 0) return stdinChunks.length > 0 || stdinEOF;
     if (h.std !== undefined) return true;
-    if (h.fifo) return h.fifo.chunks.length > 0 || h.fifo.writers <= 0;
+    if (h.fifo) return h.fifo.chunks.length > 0 || fifoEOF(h.fifo);
     if (h.spair) return h.spair.rd.chunks.length > 0 || h.spair.rd.writers <= 0;
     // A listening socket is "readable" when a connection is waiting, which is how a
     // poll/select-driven server (rather than a blocking-accept one) learns to accept.
@@ -2063,7 +2131,7 @@ class Process {
     return { rd, wr, tmo, commit };
   }
   allocFd() { let g = 0; while (this.fds.has(g)) g++; return g; } // POSIX lowest-free fd
-  bumpFifo(h) { if (h && h.fifo) { if (h.end === 'w') h.fifo.writers++; else if (h.end === 'r') h.fifo.readers++; } else if (h && h.spair) { h.spair.wr.writers++; h.spair.rd.readers++; } }
+  bumpFifo(h) { if (h && h.fifo) { if (h.end === 'w') h.fifo.writers++; else if (h.end === 'r') { h.fifo.readers++; if (h.alsoW) h.fifo.writers++; } } else if (h && h.spair) { h.spair.wr.writers++; h.spair.rd.readers++; } }
   refresh() { const buf = this.memory.buffer; if (this.membuf !== buf || (this.u8 && this.u8.byteLength !== buf.byteLength)) { this.membuf = buf; this.u8 = new Uint8Array(buf); this.dv = new DataView(buf); } }
   cstr(p) { this.refresh(); let e = p; while (this.u8[e] !== 0) e++; return td.decode(this.u8.slice(p, e)); }
   wbytes(p, b) { this.refresh(); this.u8.set(b, p); }
@@ -2097,6 +2165,9 @@ class Process {
     if (s.startsWith('/')) p = norm(s, '/');
     else if ((dirfd | 0) === -100) p = norm(s, this.cwd.p);
     else { const h = this.fds.get(dirfd); p = norm(s, h && h.path && dirs.has(h.path) ? h.path : this.cwd.p); }
+    // A trailing slash names the DIRECTORY, so a final symlink is followed even by lstat
+    // (POSIX path resolution): `stat link/`, `ls -ld link/` see the directory.
+    if (s.length > 1 && s.endsWith('/')) return this.follow(p);
     return this.followDir(p);
   }
   // ---- wasm dynamic linking: load a CPython C-extension .so (a PIC wasm side module) ----
@@ -2411,8 +2482,17 @@ class Process {
       const acc = flags & 3, want = (acc !== 1 ? 4 : 0) | (acc !== 0 ? 2 : 0);
       if (!this.mayAccess(f, want)) return err(E.ACCES);
     }
+    if (f && f.fnode) {               // a named pipe: an end of its shared pipe (see fifoOpen)
+      const g = this.allocFd();
+      this.fds.set(g, { ...fifoOpen(f, flags & 3), cloexec: ce, nonblock: !!(flags & 0o4000) });
+      return BigInt(g);
+    }
     if (!f) {
       if (!(flags & O_CREAT)) return err(E.NOENT);
+      // The parent directory must exist: O_CREAT makes the file, never its directories (addFile
+      // would mkdir -p them). mkstemp("nodir/tXXXXXX") succeeded instead of ENOENT (t0070).
+      { const par = path2.slice(0, path2.lastIndexOf('/')) || '/'; opfsFault(par);
+        if (!dirs.has(par)) return err(files.has(par) ? E.NOTDIR : E.NOENT); }
       addFile(path2, new Uint8Array(0), 0o100000 | ((mode || 0o666) & ~this.umask & 0o7777));
       f = files.get(path2);
       f.uid = this.cred.euid; f.gid = this.cred.egid;
@@ -2483,7 +2563,7 @@ class Process {
         if (h.file && h.acc === 1) return err(E.BADF);   // O_WRONLY
         if (h.std !== undefined) { if (h.std !== 0) return err(E.BADF);
           const b = drainStdinAsync(a[2]); if (b === null) return h.nonblock ? err(E.AGAIN) : 0n; S.wbytes(a[1], b); return BigInt(b.length); }
-        if (h.fifo) { if (!h.fifo.chunks.length && h.nonblock && h.fifo.writers > 0) return err(E.AGAIN); const b = pipeRead(h.fifo, a[2]); S.wbytes(a[1], b); return BigInt(b.length); }
+        if (h.fifo) { if (!h.fifo.chunks.length && h.nonblock && !fifoEOF(h.fifo)) return err(E.AGAIN); const b = pipeRead(h.fifo, a[2]); S.wbytes(a[1], b); return BigInt(b.length); }
         if (h.spair) { if (!h.spair.rd.chunks.length && h.nonblock && h.spair.rd.writers > 0) return err(E.AGAIN); const b = pipeRead(h.spair.rd, a[2]); S.wbytes(a[1], b); return BigInt(b.length); }
         if (h.hostcall) { if (!h.hostcall.chunks.length) return err(E.AGAIN); const b = pipeRead(h.hostcall, a[2]); S.wbytes(a[1], b); return BigInt(b.length); }   // a blocking read waits in sysAsync
         if (h.devnull) return 0n;
@@ -2509,7 +2589,7 @@ class Process {
         S.refresh();
         if (h.std !== undefined) { const sfd = h.std === 0 ? 1 : h.std; post(stdDec(sfd).decode(S.u8.slice(a[1], a[1] + a[2]), { stream: true }), sfd); return BigInt(a[2]); }
         if (h.snapdev) { const why = pySnapCapture(S, a[0], td.decode(S.u8.slice(a[1], a[1] + a[2]))); if (why) { if (pySnapDebug(S)) post('[snapshot] refused: ' + why + '\n', 2); return err(E.INVAL); } return BigInt(a[2]); }
-        if (h.fifo) { if (h.fifo.readers <= 0) { postSignal(S, SIG.PIPE); return err(E.PIPE); } // no reader will ever come back: SIGPIPE (dfl kills) + EPIPE
+        if (h.fifo) { if (fifoNoReader(h.fifo)) { postSignal(S, SIG.PIPE); return err(E.PIPE); } // no reader will ever come back: SIGPIPE (dfl kills) + EPIPE
           // POSIX: a 0-length write to a pipe transfers nothing and has no effect.
           // Pushing an empty chunk woke the reader, which read 0 bytes and took it
           // for EOF -- a writer that probed with write(fd, p, 0) silently killed its
@@ -2555,7 +2635,7 @@ class Process {
       case 'open': return S.openAt(S.atPath(-100, S.cstr(a[0])), a[1], a[2]);
       case 'openat': return S.openAt(S.atPath(a[0], S.cstr(a[1])), a[2], a[3]);
       case 'close': { const h = S.fds.get(a[0]); if (!h) return err(E.BADF);
-        if (h.fifo) { if (h.end === 'w') { if (--h.fifo.writers <= 0) wakePipe(h.fifo); } else if (h.end === 'r') h.fifo.readers--; S.fds.delete(a[0]); return 0n; }
+        if (h.fifo) { fifoDrop(h); if (h.alsoW) fifoDrop({ fifo: h.fifo, end: 'w' }); S.fds.delete(a[0]); return 0n; }
         if (h.spair) { if (--h.spair.wr.writers <= 0) wakePipe(h.spair.wr); h.spair.rd.readers--; S.fds.delete(a[0]); return 0n; }
         if (h.tfd) { if (h.tfd.to) clearTimeout(h.tfd.to); const w = h.tfd.waiters; h.tfd.waiters = []; for (const f of w) f('t'); S.fds.delete(a[0]); return 0n; }
         // a dup'd/forked socket fd shares ONE wisp stream — only an unshared close may
@@ -2564,6 +2644,7 @@ class Process {
         // (this time genuine) EADDRINUSE from a listener nobody can reach any more.
         if (h.sock && h.sock.local && h.sock.listener && !h.shared
             && localListeners.get(h.sock.local.port) === h.sock.local) localListeners.delete(h.sock.local.port);
+        else if (h.sock && h.sock.listener) { S.fds.delete(a[0]); listenerSweepSoon(); }   // shared: free it once nobody holds it
         if (h.sock && h.sock.id && !h.shared) initWisp().call(initWisp().OP.CLOSE, h.sock.id, 0, 0);
         S.fds.delete(a[0]); S.dirState.delete(a[0]);
         if (h.file && lockTab.has(h.file)) { const f0 = h.file, me = S.selfPid, ofd = h.off;
@@ -2624,9 +2705,13 @@ class Process {
           return 0n; // devices exist (scripts' `test -e`)
         { const m = p.match(/^\/dev\/pts\/(\d+)$/); if (m) return ptys.has(+m[1]) ? 0n : err(E.NOENT); }
         opfsFault(p); const pf = S.follow(p);
-        const want = (name === 'access' ? (a[1] | 0) : (a[2] | 0)) & 6; // X not enforced
+        const want = (name === 'access' ? (a[1] | 0) : (a[2] | 0)) & 7;
         if (dirs.has(pf)) return 0n;
         const f = files.get(pf); if (!f) return err(E.NOENT);
+        // X_OK on a regular file needs an execute bit -- for root too (Linux: root passes X_OK
+        // only if SOME x bit is set). git skips a hook that is not executable ("hook was ignored
+        // because it's not set as executable"); with X_OK always true it ran it (t7503, t7504).
+        if ((want & 1) && f.sym === undefined && !((f.mode ?? 0o100644) & 0o111)) return err(E.ACCES);
         return (!want || S.mayAccess(f, want)) ? 0n : err(E.ACCES); }
       case 'readlink': case 'readlinkat': { const p = S.atPath(name === 'readlink' ? -100 : a[0], S.cstr(name === 'readlink' ? a[0] : a[1]));
         const lbuf = name === 'readlink' ? a[1] : a[2], llen = name === 'readlink' ? a[2] : a[3];
@@ -2649,6 +2734,27 @@ class Process {
       // Python's shutil.rmtree deletes through it (os.unlink/os.rmdir with dir_fd): every
       // rmtree failed -- pip's temp-dir cleanup printed "Function not implemented" tracebacks.
       case 'unlinkat': { const p = S.atPath(a[0], S.cstr(a[1])); return (a[2] & 0x200) ? rmdirPath(S, p) : unlinkPath(S, p); }
+      case 'mknod': case 'mknodat': {
+        // mkfifo(3) is mknod(path, S_IFIFO|mode, 0). Named pipes live in the kernel's file
+        // table only (on the mount too: OPFS cannot hold one; a fresh kernel does not see it).
+        // A type-less mode makes a regular file, as POSIX says; devices are EPERM, as for a
+        // process without CAP_MKNOD.
+        const p = name === 'mknod' ? S.atPath(-100, S.cstr(a[0])) : S.atPath(a[0], S.cstr(a[1]));
+        const mode = (name === 'mknod' ? a[1] : a[2]) | 0, fmt = mode & 0o170000;
+        if (fmt !== 0o010000 && fmt !== 0 && fmt !== 0o100000) return err(E.PERM);
+        const par = p.slice(0, p.lastIndexOf('/')) || '/'; opfsFault(par); opfsFault(p);
+        if (!dirs.has(par)) return err(files.has(par) ? E.NOTDIR : E.NOENT);
+        if (files.has(p) || dirs.has(p)) return err(E.EXIST);
+        const perm = mode & 0o7777 & ~S.umask;
+        if (fmt === 0o010000) {
+          addFile(p, new Uint8Array(0), 0o010000 | perm);
+          const nf = files.get(p); nf.fnode = { pipe: null }; nf.uid = S.cred.euid; nf.gid = S.cred.egid;
+          return 0n;
+        }
+        // regular file: the ordinary create path (OPFS-backed on the mount)
+        const fd = S.openAt(p, 0o100 | 0o200 | 1, perm);
+        if (fd < 0n) return fd;
+        S.sys('close', [Number(fd)]); return 0n; }
       // mkdirat: rsync's receiver makes every directory with it (it was ENOSYS, so `rsync -a`
       // of a tree failed on each subdirectory). Same semantics, relative to a dirfd.
       case 'mkdir': case 'mkdirat': { const p = name === 'mkdir' ? S.atPath(-100, S.cstr(a[0])) : S.atPath(a[0], S.cstr(a[1])); opfsFault(p);
@@ -2726,7 +2832,12 @@ class Process {
           if (n.kind === 'dir') { S.cwd.p = n.path; return 0n; }
           if (n.kind !== 'redirect') return err(E.NOTDIR);
           p = n.path; }                  // cd /proc/self/cwd: into the real directory
-        opfsFault(p); if (!dirs.has(p)) return err(E.NOTDIR); S.cwd.p = p; return 0n; }
+        // chdir FOLLOWS the final component too: `cd link` with link -> a directory enters that
+        // directory, and the cwd (getcwd, `pwd -P`) is the resolved path, as on Linux. Only the
+        // parents were resolved, so every cd into a symlinked directory failed ENOTDIR (git's
+        // t2300 cd_to_toplevel; any repo reached through a link).
+        p = S.follow(p);
+        opfsFault(p); if (!dirs.has(p)) return err(files.has(p) ? E.NOTDIR : E.NOENT); S.cwd.p = p; return 0n; }
       case 'fchdir': { const h = S.fds.get(a[0]); if (!h || !h.dir) return err(E.BADF); S.cwd.p = h.path; return 0n; }
       case 'getcwd': { if (te.encode(S.cwd.p).length + 1 > (a[1] >>> 0)) return err(34);   // ERANGE: was silently truncated
         return BigInt(S.wstr(a[0], S.cwd.p, a[1]) + 1); }
@@ -2761,8 +2872,29 @@ class Process {
         const pa = S.follow(S.atPath(name === 'link' ? -100 : a[0], S.cstr(a[oi])));
         const pb = S.atPath(name === 'link' ? -100 : a[2], S.cstr(a[ni]));
         opfsFault(pa); const f = files.get(pa); if (!f) return err(E.NOENT);
-        if (f.br !== undefined) return err(E.PERM); // OPFS-backed: a hard link would double-delete the store file
+        if (dirs.has(pa)) return err(E.PERM);                       // no links to directories
+        opfsFault(pb);
         if (files.has(pb) || dirs.has(pb)) return err(E.EXIST);
+        if ((f.br !== undefined) !== inOpfs(pb)) return err(E.XDEV); // RAM <-> the mount: two filesystems
+        if (f.br !== undefined) {
+          // On the mount: OPFS has no hard links, so the bridge makes a COPY under the new
+          // name, mode and mtime included (opfs-worker OP.LINK). git's clone --local and its pack
+          // tmp files link objects that never change, which is what this serves; writes through
+          // one name are not seen through the other. A bridge without the op (the desktop folder
+          // one) answers EINVAL: EPERM then, as a filesystem without links.
+          const parent = pb.slice(0, pb.lastIndexOf('/')) || '/';
+          opfsFault(parent); if (!dirs.has(parent)) return err(E.NOENT);
+          const br = initOpfs(); if (!br) return err(E.IO);
+          const pbb = te.encode(opfsRel(pa) + '\0' + opfsRel(pb));
+          const r = br.call(OFS.LINK, pbb.length, 0, 0, pbb);
+          if (r.res < 0) return err(r.res === -E.INVAL ? E.PERM : ioErrno(r.res));
+          dirs.get(parent).add(pb.slice(pb.lastIndexOf('/') + 1));
+          // Same inode as the source, in this kernel: git's clone --local checks a fresh link by
+          // comparing st_ino/mode/size/uid with the source ("hardlink different from source").
+          files.set(pb, { br: opfsRel(pb), size: auxBig(r) || f.size, mtimeMs: f.mtimeMs, opfsM: undefined, data: null, mode: f.mode,
+                          linkIno: inoOf(f), ...(f.uid !== undefined ? { uid: f.uid, gid: f.gid } : {}) });
+          return 0n;
+        }
         const parent = pb.slice(0, pb.lastIndexOf('/')) || '/'; mkdirp(parent);
         dirs.get(parent).add(pb.slice(pb.lastIndexOf('/') + 1));
         files.set(pb, f); return 0n; } // same object: a real hard link
@@ -2805,7 +2937,18 @@ class Process {
           else { const ns = S.tsNs(tp + 16);                                                         // timespec[1] = mtime
             if (ns === UTIME_OMIT) return 0n;
             if (ns !== UTIME_NOW) mt = Number(S.r64(tp + 16)) * 1000 + ns / 1e6; } }
-        f.mtimeMs = mt; return 0n; }
+        f.mtimeMs = mt;
+        // On the mount the time must outlive this kernel's memory: OPFS keeps its own
+        // lastModified, which the next listing reported instead (git's cruft packs, prune and
+        // repack read object mtimes a test set with chmtime; tar x / touch -d / make stamps).
+        // The bridge records it beside the file (opfs-worker MT_KEY); listings then report it,
+        // so opfsM -- what this kernel expects the next listing to say -- is that value.
+        if (f.br !== undefined && f.sym === undefined) {
+          const br = initOpfs();
+          if (br) { const ms = Math.max(0, Math.round(mt)), pb = te.encode(f.br);
+            try { const r = br.call(OFS.SETMTIME, pb.length, Math.floor(ms / 1000) | 0, ms % 1000, pb); if (r.res >= 0) { f.opfsM = ms; f.ownWrite = false; } } catch (_) {} }
+        }
+        return 0n; }
       case 'statfs': case 'fstatfs': { const sp2 = a[1]; S.refresh();
         S.u8.fill(0, sp2, sp2 + 120);
         S.i64(sp2, 0x858458f6n); S.i64(sp2 + 8, 4096n); S.i64(sp2 + 16, 1n << 20n);
@@ -2814,7 +2957,7 @@ class Process {
       case 'dup': { const h = S.fds.get(a[0]); if (!h) return err(E.BADF); h.shared = true; const g = S.allocFd(); S.fds.set(g, { ...h, cloexec: false }); S.bumpFifo(h); return BigInt(g); }
       case 'dup2': case 'dup3': { const h = S.fds.get(a[0]); if (!h) return err(E.BADF); h.shared = true;
         if (a[0] !== a[1]) { const old = S.fds.get(a[1]);
-          if (old && old.fifo) { if (old.end === 'w') { if (--old.fifo.writers <= 0) wakePipe(old.fifo); } else old.fifo.readers--; }
+          if (old && old.fifo) { fifoDrop(old); if (old.alsoW) fifoDrop({ fifo: old.fifo, end: 'w' }); }
           else if (old && old.spair) { if (--old.spair.wr.writers <= 0) wakePipe(old.spair.wr); old.spair.rd.readers--; }
           S.fds.set(a[1], { ...h, cloexec: name === 'dup3' && !!(a[2] & 0o2000000) }); S.bumpFifo(h); } return BigInt(a[1]); }
       case 'pipe': case 'pipe2': {
@@ -3376,7 +3519,7 @@ class Process {
         if (h && h.pty !== undefined && !h.nonblock) { const p = ptys.get(h.pty); const q = () => h.master ? p.toMaster : p.toSlave; const wl = h.master ? p.masterWaiters : p.slaveWaiters;
           while (!q().length && !(!h.master && p.slaveEof)) {             const w = await S.sigRace(res => wl.push(() => res('ev')));
             if (w === 'sig') { const v = await (back(), S).onSigWakeAsync(true); if (v !== null) return v; } } return (back(), S).sys(name, a); }
-        if (h && h.fifo && !h.nonblock) { while (!h.fifo.chunks.length && h.fifo.writers > 0) {           const w = await S.sigRace(res => h.fifo.readWaiters.push(() => res('ev')));
+        if (h && h.fifo && !h.nonblock) { while (!h.fifo.chunks.length && !fifoEOF(h.fifo)) {           const w = await S.sigRace(res => h.fifo.readWaiters.push(() => res('ev')));
           if (w === 'sig') { const v = await (back(), S).onSigWakeAsync(true); if (v !== null) return v; } } return (back(), S).sys(name, a); }
         if (h && h.spair && !h.nonblock) { while (!h.spair.rd.chunks.length && h.spair.rd.writers > 0) {           const w = await S.sigRace(res => h.spair.rd.readWaiters.push(() => res('ev')));
           if (w === 'sig') { const v = await (back(), S).onSigWakeAsync(true); if (v !== null) return v; } } return (back(), S).sys(name, a); }
@@ -3529,7 +3672,7 @@ class Process {
     if (h.std === 0) { while (!stdinChunks.length && !stdinEOF) await race((f) => stdinWaiters.push(f)); return; }
     if (h.pty !== undefined) { const p = ptys.get(h.pty); const q = () => h.master ? p.toMaster : p.toSlave; const wl = h.master ? p.masterWaiters : p.slaveWaiters;
       while (!q().length && !(!h.master && p.slaveEof)) await race((f) => wl.push(f)); return; }
-    if (h.fifo) { while (!h.fifo.chunks.length && h.fifo.writers > 0) await race((f) => h.fifo.readWaiters.push(f)); return; }
+    if (h.fifo) { while (!h.fifo.chunks.length && !fifoEOF(h.fifo)) await race((f) => h.fifo.readWaiters.push(f)); return; }
     if (h.hostcall) { while (!h.hostcall.chunks.length) await race((f) => h.hostcall.waiters.push(f)); return; }
   }
   async wait4Async(a) {
@@ -3567,7 +3710,7 @@ class Process {
         const fd = S.r32(a[0] + i * 8), ev = S.dv.getInt16(a[0] + i * 8 + 4, true);
         const h = S.fds.get(fd); let re = 0;
         if (h && h.std === 0) { const rdy = stdinChunks.length || stdinEOF; if ((ev & 1) && rdy) re |= 1; if (ev & 4) re |= 4; if (!rdy) waitStdin = true; }
-        else if (h && h.fifo) { const rdy = h.fifo.chunks.length || h.fifo.writers <= 0; if ((ev & 1) && rdy) re |= 1; if (ev & 4) re |= 4; if (!rdy) waitFifos.push(h.fifo); }
+        else if (h && h.fifo) { const rdy = h.fifo.chunks.length || fifoEOF(h.fifo); if ((ev & 1) && rdy) re |= 1; if (ev & 4) re |= 4; if (!rdy) waitFifos.push(h.fifo); }
         else if (h && h.spair) { const rdy = h.spair.rd.chunks.length || h.spair.rd.writers <= 0; if ((ev & 1) && rdy) re |= 1; if (ev & 4) re |= 4; if (!rdy) waitFifos.push(h.spair.rd); }
         else if (h && h.sock && h.sock.id) { const pk = initWisp().call(initWisp().OP.POLL, h.sock.id, 0, 0); if ((ev & 1) && pk.res > 0) re |= 1; else if (ev & 1) waitSock = true; if (ev & 4) re |= 4; }
         else if (h && h.pty !== undefined) { const p = ptys.get(h.pty); const q = h.master ? p.toMaster : p.toSlave; const rdy = q.length || (!h.master && p.slaveEof); if ((ev & 1) && rdy) re |= 1; if (ev & 4) re |= 4; if (!rdy) waitPtys.push(h.master ? p.masterWaiters : p.slaveWaiters); }
@@ -3980,7 +4123,7 @@ class Process {
     }
     this._bulk = bulk;
     const ctl = spare ? spare.ctl : new SharedArrayBuffer(KCTL.BYTES);
-    const w = spare ? spare.w : new Worker(NODE_STUB_RE.test(this.modKey) ? NODE_WORKER_URL : 'wali-proc-worker.js?v=snap3');
+    const w = spare ? spare.w : new Worker(NODE_STUB_RE.test(this.modKey) ? NODE_WORKER_URL : 'wali-proc-worker.js?v=tfork4');
     this.procWorker = w;
     const st = { exit: null };
     const ready = spare ? spare.ready : new Promise((res) => { this._procReady = res; });
@@ -4025,7 +4168,7 @@ class Process {
       }
       new Uint8Array(this.memory.buffer).set(src.subarray(0, hw));
       if (opts.onForkReady) opts.onForkReady();
-      w.postMessage({ t: 'rewind', asyncifyBuf: opts.asyncifyBuf, sp: opts.sp, tls: opts.tls });
+      w.postMessage({ t: 'rewind', asyncifyBuf: opts.asyncifyBuf, sp: opts.sp, tls: opts.tls, thread: opts.thread || null });
     } else if (pick) {
       // Start from a Python snapshot (see pySnapPick): the guest half in the worker
       // (driveRestore in wali-proc-worker.js), then the kernel half here -- only once the
@@ -4092,7 +4235,7 @@ class Process {
     const tid = this._nextTid = (this._nextTid || 1) + 1;
     if (this.sig.masks) this.sig.masks.set(tid, this.sig.mask);   // a new thread starts with its creator's mask
     const ctl = new SharedArrayBuffer(KCTL.BYTES);
-    const w = new Worker('wali-proc-worker.js?v=snap3');
+    const w = new Worker('wali-proc-worker.js?v=tfork4');
     (this._threads = this._threads || []).push(w);
     const st = { exit: null };
     const ready = new Promise((res) => {
@@ -4253,16 +4396,26 @@ class Process {
     for (;;) {
       const state = Atomics.load(i32, 0);
       if (state === KCTL.DONE) break;
-      if (state === KCTL.FORKED && isMain) {
+      if (state === KCTL.FORKED) {
         // The guest has unwound and wants a child. Build it, boot its worker and copy the
         // snapshot BEFORE replying -- the parent must not resume until the copy is taken.
+        // From ANY thread: git starts its filters, parallel-checkout workers and other async
+        // helpers from a pthread, which forks and execs. That fork's unwind used to end the
+        // thread silently (only the main thread had the handshake) and the main thread then
+        // waited forever on the pipe the helper should have fed -- every clean/smudge filter
+        // (git-lfs too) hung. The child, like on Linux, is a copy of just the calling thread;
+        // it rewinds through that thread's entry instead of _start (proc worker driveThread).
+        if (!isMain) this.curTid = tid;   // the child inherits THIS thread's signal mask
         const childPid = nextPid++;
         const child = this.spawnForkChildMeta(childPid);
         const buf = Number(i64[KCTL.RET >> 3]);
         const sp = Number(i64[KCTL.ARGS >> 3]), tls = Number(i64[(KCTL.ARGS >> 3) + 1]);   // parent's stack pointer / TLS base (-1: not exported)
+        const tEntry = Number(i64[(KCTL.ARGS >> 3) + 2]);   // 0: main (_start); 1 wasi_thread_start; 2 __wasm_thread_start_libc
+        const thread = tEntry > 0 ? { entry: tEntry === 1 ? 'wasi_thread_start' : '__wasm_thread_start_libc',
+          tid: Number(i64[(KCTL.ARGS >> 3) + 3]), startArg: Number(i64[(KCTL.ARGS >> 3) + 4]) } : null;
         let started;
         const boot = new Promise((res) => { started = res; });
-        const task = child.runInWorker({ forkFrom: this, asyncifyBuf: buf, sp, tls, onForkReady: started })
+        const task = child.runInWorker({ forkFrom: this, asyncifyBuf: buf, sp, tls, thread, onForkReady: started })
           .then((code) => {
             this.reaped.set(childPid, code);
             if (STRACE) stracePost(`[strace ${childPid}] exited ${code} (fork child of ${this.pid})\n`, 2);
@@ -4320,7 +4473,7 @@ class Process {
         // The await let other threads run and they move curTid, which is what fds keys
         // on (see the execve handler for what that cost the last time).
         this.curTid = tid;
-        if (!target) { reply(BigInt(-E.NOENT)); continue; }
+        if (!target || target.eacces) { reply(BigInt(-(target ? E.ACCES : E.NOENT))); continue; }
         let childFds;
         try { childFds = spawnFdTable(this.fds, spec); }
         catch (e) { reply(BigInt(-(e && e.badf ? E.BADF : E.INVAL))); continue; }
@@ -4364,7 +4517,7 @@ class Process {
         // is: with a sideband thread busy during index-pack's spawn, the vfork child's exec
         // was taken for the parent's and git fetch turned into index-pack.
         this.curTid = tid;
-        if (!target) { reply(BigInt(-E.NOENT)); continue; }
+        if (!target || target.eacces) { reply(BigInt(-(target ? E.ACCES : E.NOENT))); continue; }
         const fdsnap = execDropCloexec(this.fds);
         if (this.inChild()) {
           // vfork protocol (see sys 'fork'): the guest is in the child branch, so this
@@ -4755,7 +4908,7 @@ class Process {
     try { path = this.cstr(a0); av = this.rPtrArray(a1); ev = a2 ? this.rPtrArray(a2) : []; } catch (_) {}
     if (STRACE) stracePost(`[strace ${this.pid}${this.inChild() ? '>' + this.childStack[this.childStack.length - 1].pid : ''}] execve(${JSON.stringify(path)}) ...\n`, 2);
     const target = await resolveExec(path, av, this.cwd.p, this.modKey, 0);
-    if (!target) return err(E.NOENT);
+    if (!target || target.eacces) return err(target ? E.ACCES : E.NOENT);
     const fdsnap = execDropCloexec(this.fds);
     if (this.inChild()) {
       // vfork protocol (see sys 'fork'): the guest is in the child branch, so this execve
@@ -4789,7 +4942,7 @@ class Process {
       for (let k = 0; k < (a4 & 0xffff); k++) spec.push([this.r32(a3 + k * 8), this.r32(a3 + k * 8 + 4)]);
     } catch (_) { return err(E.INVAL); }
     const target = await resolveExec(path, av, this.cwd.p, this.modKey, 0);
-    if (!target) return err(E.NOENT);
+    if (!target || target.eacces) return err(target ? E.ACCES : E.NOENT);
     let childFds;
     try { childFds = spawnFdTable(this.fds, spec); }
     catch (e) { return err(e && e.badf ? E.BADF : E.INVAL); }
@@ -4923,8 +5076,11 @@ function resolveExecKey(p, cwd, selfKey) {
 // path appended (what make/configure/libtool need); an executable file without a
 // shebang runs as a shell script (the kernel-ENOEXEC fallback shells implement).
 // Manifest names win (checked by the callers) so /bin stubs never reach this.
-function scriptExecRewrite(p, argv, cwd) {
+// `given`: the script's name as execve got it -- what the interpreter receives as its file
+// argument, so the script's $0 is "hooks/update", not an absolute path (git's t1416 compares).
+function scriptExecRewrite(p, argv, cwd, given) {
   const vp = p.startsWith('/') ? norm(p, '/') : norm(p, cwd);
+  const name = given || vp;
   opfsFault(vp);
   const f = files.get(vp);
   if (!f || f.sym !== undefined || f.data === undefined && f.br === undefined) return null;
@@ -4938,9 +5094,9 @@ function scriptExecRewrite(p, argv, cwd) {
     const sp = line.search(/\s/);
     const interp = sp < 0 ? line : line.slice(0, sp);
     const arg = sp < 0 ? '' : line.slice(sp + 1).trim();
-    return { path: interp, argv: [interp.split('/').pop(), ...(arg ? [arg] : []), vp, ...argv.slice(1)] };
+    return { path: interp, argv: [interp.split('/').pop(), ...(arg ? [arg] : []), name, ...argv.slice(1)] };
   }
-  if (f.mode & 0o111) return { path: '/bin/sh', argv: ['sh', vp, ...argv.slice(1)] }; // ENOEXEC fallback
+  if (f.mode & 0o111) return { path: '/bin/sh', argv: ['sh', name, ...argv.slice(1)] }; // ENOEXEC fallback
   return null;
 }
 
@@ -4992,16 +5148,25 @@ function vfsFollow(p, depth = 0) {
   return p;
 }
 async function resolveExec(p, argv, cwd, selfKey, depth) {
+  let given = p;   // the name a "#!" interpreter receives: the path as execve got it (Linux)
   if (p.includes('/') && !resolveModuleKey(p, selfKey)) {
     const vp = vfsFollow(p.startsWith('/') ? norm(p, '/') : norm(p, cwd));
     if (vp !== (p.startsWith('/') ? norm(p, '/') : norm(p, cwd))) p = vp;
   }
   if (!resolveModuleKey(p, selfKey)) {
     const onPath = pathSearch(p, cwd);
-    if (onPath) p = onPath;
+    if (onPath) { p = onPath; given = onPath; }
+  }
+  if (!resolveModuleKey(p, selfKey)) {
+    // A file with no execute bit at all is EACCES, as on Linux -- it ran anyway (git's
+    // run_command must report EACCES for a non-executable script, t0061). Manifest programs
+    // never get here; their /bin stubs are 0755.
+    const vp = p.startsWith('/') ? norm(p, '/') : norm(p, cwd);
+    opfsFault(vp); const xf = files.get(vp);
+    if (xf && xf.sym === undefined && !((xf.mode ?? 0o100755) & 0o111)) return { eacces: true };
   }
   if (!resolveModuleKey(p, selfKey) && (depth || 0) < 4) {
-    const sc = scriptExecRewrite(p, argv, cwd);
+    const sc = scriptExecRewrite(p, argv, cwd, given);
     if (sc) return resolveExec(sc.path, sc.argv, cwd, selfKey, (depth || 0) + 1);
   }
   let key = resolveExecKey(p, cwd, selfKey);
@@ -5021,7 +5186,7 @@ async function resolveExec(p, argv, cwd, selfKey, depth) {
 // exits. Getting this wrong does not fail loudly -- the reader simply never sees EOF.
 function retainFd(h) {
   if (!h) return h;
-  if (h.fifo) { if (h.end === 'w') h.fifo.writers++; else if (h.end === 'r') h.fifo.readers++; }
+  if (h.fifo) { if (h.end === 'w') h.fifo.writers++; else if (h.end === 'r') { h.fifo.readers++; if (h.alsoW) h.fifo.writers++; } }
   else if (h.spair) { h.spair.wr.writers++; h.spair.rd.readers++; }
   return h;
 }
@@ -5482,7 +5647,7 @@ function startProcess(target, envp, fdTable, cwd, cred, asPid, umask) {
 
 async function runProgramInWorker(p, argv, envp, fdTable, cwd, selfKey, cred, asPid) {
   const target = await resolveExec(p, argv, cwd, selfKey, 0);
-  if (!target) return null;
+  if (!target || target.eacces) return null;
   return await startProcess(target, envp, fdTable, cwd, cred, asPid);
 }
 

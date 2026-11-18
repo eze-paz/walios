@@ -86,16 +86,18 @@ ls -la "$OUT/git-asyncfork.wasm"
 # git's other programs, where a Linux install puts them (git 2.45 `make install`, prefix=/usr):
 # scalar and git-shell in /usr/bin (git-shell also in the exec-path), git-http-backend and
 # git-daemon in /usr/libexec/git-core. Same tree and flags as git; each forks, so each gets
-# the Asyncify pass too. In git-core.tar.gz with the scripted commands.
+# the Asyncify pass too. Their own git-extras.tar.gz (~3 MB): sandpie mounts it when git first
+# runs, so the boot-time git-core.tar.gz (scripts, iconv) stays small.
 EXTRA="scalar git-shell git-http-backend git-daemon"
 make -j"$(nproc)" "${MAKEVARS[@]}" prefix=/usr CFLAGS="-O2 -I$PWD/../zinst/include -D__WALI_ASYNCIFY_FORK" $EXTRA
-mkdir -p ../gc/usr/bin
+mkdir -p ../gx/usr/bin ../gx/usr/libexec/git-core
 for b in $EXTRA; do
-  case $b in scalar|git-shell) dst=../gc/usr/bin/$b ;; *) dst=../gc/usr/libexec/git-core/$b ;; esac
+  case $b in scalar|git-shell) dst=../gx/usr/bin/$b ;; *) dst=../gx/usr/libexec/git-core/$b ;; esac
   "$TC/binaryen/bin/wasm-opt" --asyncify --pass-arg=asyncify-imports@wali.SYS_fork -O2 "$b" -o "$dst"
   chmod 755 "$dst"; ls -la "$dst"
 done
-cp ../gc/usr/bin/git-shell ../gc/usr/libexec/git-core/git-shell
+cp ../gx/usr/bin/git-shell ../gx/usr/libexec/git-core/git-shell
+tar czf "$OUT/git-extras-$GITV.tar.gz" -C ../gx usr
 # iconv(1) (iconv.c, on musl's iconv(3)): Linux has the command, busybox has no applet, and
 # git's tests pipe through it (t7102). Ships in git-core.tar.gz at /usr/bin/iconv. Built here,
 # after the libc env patch, so it reads the NUL-separated environment like the git above.
