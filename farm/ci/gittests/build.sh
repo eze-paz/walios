@@ -34,7 +34,12 @@ MAKEVARS=(
   NO_TCLTK=YesPlease NO_PERL=YesPlease NO_PYTHON=YesPlease NO_GITWEB=YesPlease NO_REGEX=YesPlease
   NO_UNIX_SOCKETS=YesPlease NO_INSTALL_HARDLINKS=YesPlease HAVE_ALLOCA_H=YesPlease
   NO_MMAP= NO_PTHREADS=
-  ZLIB_PATH="$PWD/../zinst" CFLAGS="-O2 -I$PWD/../zinst/include" LDFLAGS="-L$PWD/../zinst/lib"
+  # --export=__stack_pointer / __tls_base: a forked child rewinds on a fresh instance and the
+  # kernel hands it the parent's values through these (runtimes/busybox/build.sh, same reason).
+  # Without them the child ran on the MAIN thread's TLS: a fork from a thread (git's filters
+  # and async helpers run on a pthread) saw pthread_self() as the wrong thread and musl's
+  # fork() looped forever walking the thread list.
+  ZLIB_PATH="$PWD/../zinst" CFLAGS="-O2 -I$PWD/../zinst/include" LDFLAGS="-L$PWD/../zinst/lib -Wl,--export=__stack_pointer -Wl,--export-if-defined=__tls_base"
   SHELL_PATH=/bin/sh TAR=tar
 )
 make -j"$(nproc)" "${MAKEVARS[@]}" t/helper/test-tool t/helper/test-fake-ssh GIT-BUILD-OPTIONS
