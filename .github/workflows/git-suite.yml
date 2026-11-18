@@ -67,11 +67,13 @@ jobs:
           cp browser/rootfs.tar.gz rt/
           ls -la rt
       - name: Run
+        # (a step timeout under the job's: the upload below still runs with what was saved)
+        timeout-minutes: 335
         run: |
           N=$(node -e "console.log(JSON.parse(process.env.REQ).shards || 20)")
           ONLY=$(node -e "console.log(JSON.parse(process.env.REQ).only || '')")
           TO=$(node -e "console.log(JSON.parse(process.env.REQ).timeout || 1800)")
-          node farm/ci/gittests/suite.mjs --rt rt --kernel farm/e2e/kernel ${ONLY:+--only "$ONLY"} --timeout "$TO" \
+          node farm/ci/gittests/suite.mjs --rt rt --kernel farm/e2e/kernel ${ONLY:+--only "$ONLY"} --timeout "$TO" --deadline 320 \
             --shard ${{ matrix.shard }}/$N --out gittests-${{ matrix.shard }}.json
       - uses: actions/upload-artifact@v4
         if: always()

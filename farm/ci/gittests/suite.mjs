@@ -123,7 +123,12 @@ const fresh = async () => {
 };
 await fresh();
 const results = {}, t0 = Date.now();
+// --deadline <minutes>: start no script after this (the job's own timeout would kill the shard
+// and its results with it). The results file is rewritten after every script either way.
+const DEADLINE = arg('deadline') ? t0 + +arg('deadline') * 60000 : Infinity;
+const save = () => fs.writeFileSync(OUT, JSON.stringify({ shard: `${SHARD}/${NSHARD}`, secs: Math.round((Date.now() - t0) / 1000), results }, null, 1));
 for (const name of scripts) {
+  if (Date.now() + Math.min(TIMEOUT_S, 600) * 1000 > DEADLINE) { results[name] = { status: 'not-run', pass: 0, fail: 0, skip: 0, known: 0, failures: [], host: [], secs: 0 }; continue; }
   const t = Date.now();
   let r;
   try { r = await page.evaluate(([m, ms]) => {
@@ -137,11 +142,12 @@ for (const name of scripts) {
   const row = results[name] = { ...judge(name, r), secs: Math.round((Date.now() - t) / 1000) };
   console.log(`${row.status.padEnd(7)} ${name.padEnd(44)} pass ${String(row.pass).padStart(4)} fail ${String(row.fail).padStart(3)} skip ${String(row.skip).padStart(3)}${row.known ? ' todo ' + row.known : ''} ${row.secs}s`
     + (row.failures.length ? '\n          ' + row.failures.slice(0, 5).join('\n          ') : ''));
+  save();
   // A fresh page every 25 scripts: OPFS handles and worker garbage do not pile up.
   if (Object.keys(results).length % 25 === 0) await fresh();
 }
 await browser.close(); server.close();
-fs.writeFileSync(OUT, JSON.stringify({ shard: `${SHARD}/${NSHARD}`, secs: Math.round((Date.now() - t0) / 1000), results }, null, 1));
+save();
 const tot = { pass: 0, fail: 0, skip: 0, known: 0 }, by = {};
 for (const r of Object.values(results)) { for (const k of Object.keys(tot)) tot[k] += r[k]; by[r.status] = (by[r.status] || 0) + 1; }
 console.log(`shard ${SHARD}/${NSHARD}: ${scripts.length} scripts`, JSON.stringify(by), JSON.stringify(tot));
