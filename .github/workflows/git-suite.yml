@@ -92,13 +92,6 @@ jobs:
         with: { pattern: 'gittests-*', path: shards }
       - name: Merge
         run: node farm/ci/gittests/suite-merge.mjs shards out && cat out/summary.md >> "$GITHUB_STEP_SUMMARY"
-      - name: Release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          TAG=gitsuite-$(date -u +%F)-${{ github.run_number }}
-          for t in $(seq 1 20); do
-            gh release create "$TAG" -R "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease --title "$TAG" \
-              --notes "git 2.45.3 test suite in walios, run ${{ github.run_id }}. Inputs: $REQ" out/* && exit 0
-            gh release delete "$TAG" -R "$GITHUB_REPOSITORY" -y --cleanup-tag 2>/dev/null; sleep 60
-          done; exit 1
+      # (a gitsuite release was refused: HTTP 403 for this token; the merged results are an artifact)
+      - uses: actions/upload-artifact@v4
+        with: { name: gitsuite-results, path: out/*, retention-days: 30 }
