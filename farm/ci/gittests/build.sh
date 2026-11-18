@@ -65,8 +65,21 @@ ls -la "$OUT"
 # then wasm-opt --asyncify on SYS_fork. Published as git-asyncfork.wasm for sandpie to A/B.
 cd "$OLDPWD" 2>/dev/null || true
 cd "$(dirname "$OUT")/work/git-$GITV"
+# libc: the walios env reader (musl-patches/src/env/initenv.c: NUL-separated environment from
+# __get_init_envfile0, so values may contain newlines) swapped into this job's libc.a -- the
+# sysroot release predates it. The git built below imports __get_init_envfile0.
+REPO=$(cd "$HERE/../../.." && pwd)
+mkdir -p ../envpatch
+curl -sSfL --retry 6 -o ../envpatch/init_env.h https://raw.githubusercontent.com/arjunr2/wali-musl/243ec00c3ffb910375db487d7eb24ea76d1e2c9f/arch/wasm32/init_env.h
+LIBC="$WALI_SYSROOT/lib/libc.a"
+MEM=$("$WALI_LLVM/llvm-ar" t "$LIBC" | grep -E '^initenv\.l?o$' | head -1)
+[ -n "$MEM" ] || { echo "!! no initenv member in libc.a"; "$WALI_LLVM/llvm-ar" t "$LIBC" | grep -i env | head; exit 1; }
+"$CC" -c -O2 -I../envpatch "$REPO/musl-patches/src/env/initenv.c" -o "../envpatch/$MEM"
+( cd ../envpatch && "$WALI_LLVM/llvm-ar" r "$LIBC" "$MEM" )
+echo "libc.a: replaced $MEM"
 make "${MAKEVARS[@]}" prefix=/usr CFLAGS="-O2 -I$PWD/../zinst/include -D__WALI_ASYNCIFY_FORK" clean-obj >/dev/null 2>&1 || make "${MAKEVARS[@]}" clean >/dev/null 2>&1 || true
 # prefix=/usr: its exec-path is /usr/libexec/git-core (where walios installs git-core.tar.gz)
 make -j"$(nproc)" "${MAKEVARS[@]}" prefix=/usr CFLAGS="-O2 -I$PWD/../zinst/include -D__WALI_ASYNCIFY_FORK" git
 "$TC/binaryen/bin/wasm-opt" --asyncify --pass-arg=asyncify-imports@wali.SYS_fork -O2 git -o "$OUT/git-asyncfork.wasm"
+node -e 'const m=new WebAssembly.Module(require("fs").readFileSync(process.argv[1])); const i=WebAssembly.Module.imports(m).map(x=>x.name); console.log("env import:", i.filter(n=>/init_envfile/.test(n)).join(","))' "$OUT/git-asyncfork.wasm"
 ls -la "$OUT/git-asyncfork.wasm"

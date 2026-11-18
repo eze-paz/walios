@@ -1620,6 +1620,14 @@ class Process {
       }
       const name = im.name;
       if (name === '__init' || name === '__deinit') wali[name] = () => 0;
+      else if (name === '__get_init_envfile0') wali[name] = (buf, sz) => {
+        // walios libc (musl-patches/src/env/initenv.c): NUL-separated, so values may contain
+        // newlines. Older binaries import __get_init_envfile (below).
+        if (!S.env.length) return 0;
+        const f = path.join(require('os').tmpdir(), `wali_env0_${process.pid}_${S.pid}`);
+        fs.writeFileSync(f, Buffer.from(S.env.map((e) => e + '\0').join(''), 'utf8'));
+        S.wstr(buf, f, sz); return 1;
+      };
       else if (name === '__get_init_envfile') wali[name] = (buf, sz) => {
         if (!S.env.length) return 0;
         // The env file is newline-separated (wali-musl's init_env), so a value containing a
