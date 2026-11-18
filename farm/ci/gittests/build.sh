@@ -65,7 +65,8 @@ ls -la "$OUT"
 # then wasm-opt --asyncify on SYS_fork. Published as git-asyncfork.wasm for sandpie to A/B.
 cd "$OLDPWD" 2>/dev/null || true
 cd "$(dirname "$OUT")/work/git-$GITV"
-make "${MAKEVARS[@]}" CFLAGS="-O2 -I$PWD/../zinst/include -D__WALI_ASYNCIFY_FORK" clean-obj >/dev/null 2>&1 || make "${MAKEVARS[@]}" clean >/dev/null 2>&1 || true
-make -j"$(nproc)" "${MAKEVARS[@]}" CFLAGS="-O2 -I$PWD/../zinst/include -D__WALI_ASYNCIFY_FORK" git
+make "${MAKEVARS[@]}" prefix=/usr CFLAGS="-O2 -I$PWD/../zinst/include -D__WALI_ASYNCIFY_FORK" clean-obj >/dev/null 2>&1 || make "${MAKEVARS[@]}" clean >/dev/null 2>&1 || true
+# prefix=/usr: its exec-path is /usr/libexec/git-core (where walios installs git-core.tar.gz)
+make -j"$(nproc)" "${MAKEVARS[@]}" prefix=/usr CFLAGS="-O2 -I$PWD/../zinst/include -D__WALI_ASYNCIFY_FORK" git
 "$TC/binaryen/bin/wasm-opt" --asyncify --pass-arg=asyncify-imports@wali.SYS_fork -O2 git -o "$OUT/git-asyncfork.wasm"
 ls -la "$OUT/git-asyncfork.wasm"
