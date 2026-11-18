@@ -25,6 +25,7 @@
 //   i32[1]  import index into `names`
 //   i32[2]  argc
 //   i32[3]  exit code, when state is 3
+//   i32[8]  set by the kernel when it has just snapshotted this process (KSNAP)
 //   i64[ARGS/8 + k]  argument k  (byte offset 64, 16 slots -- WASI path_open takes 9)
 //   i64[RET/8]       return value (byte offset 192)
 'use strict';
@@ -32,6 +33,14 @@
 const ARGS = 64, RET = 192, MAXARGS = 16;
 const ST_IDLE = 0, ST_REQ = 1, ST_REPLY = 2, ST_DONE = 3, ST_DIE = 4, ST_FORKED = 5;
 const ST_SIGNAL = 6, ST_SIGDONE = 7;
+// CPU accounting (the kernel's walios monitor reads it live): f64 slot CPU_ACC = ms this
+// worker spent running guest code, CPU_SINCE = epoch ms it last started running (0 while it
+// waits on the kernel). Epoch, not performance.now(): each worker has its own time origin.
+const CPU_ACC = 32, CPU_SINCE = 33;   // bytes 256 / 264 of the control block
+let f64 = null;
+const nowE = () => performance.timeOrigin + performance.now();
+function cpuGo() { if (f64) f64[CPU_SINCE] = nowE(); }
+function cpuPark() { if (f64) { const s0 = f64[CPU_SINCE]; if (s0 > 0) { f64[CPU_ACC] += nowE() - s0; f64[CPU_SINCE] = 0; } } }
 const ASYNC_PAGES = 16, PAGE = 65536;   // 1MB Asyncify unwind buffer, as in the kernel
 
 let inst = null, ctl = null, i32 = null, i64 = null, names = null, sigs = null;
@@ -89,7 +98,7 @@ function waliFfiImports(exp, jspi) {
   };
   return {
     __wali_ffi_call: call,
-    __wali_ffi_table_alloc: () => (freeIdx.length ? freeIdx.pop() : tbl().grow(1)),
+    __wali_ffi_table_alloc: () => { snapUnsafe = snapUnsafe || 'libffi closure'; return freeIdx.length ? freeIdx.pop() : tbl().grow(1); },
     __wali_ffi_closure: closure,
     __wali_ffi_closure_free: (idx) => { tbl().set(idx, null); freeIdx.push(idx); },
   };
@@ -97,6 +106,17 @@ function waliFfiImports(exp, jspi) {
 
 const dlHandles = [];
 let forkState = 'none', forkRet = 0n, asyncifyBuf = 0;
+
+// ---- process snapshot (python3 starts from a saved, already-imported interpreter) ----
+// What the loader did, so a restored instance can be re-linked to the SAME addresses:
+// each side module with its memory/table/TLS bases and GOT.func slots, and every table slot
+// funcIdx() handed out (GOT.func, dlsym) with the export it holds. A libffi closure puts a
+// JS function in the table that cannot be re-created, so it makes the process unsnapshotable.
+const dlRecs = [];                 // [{ mod, memBase, tableBase, tlsBase, gotFunc: {name: idx} }]
+const tableLog = new Map();        // idx -> { h: side handle (-1 = main), name }
+let snapUnsafe = '';
+let gMemory = null;                // the imported shared memory (init's m.memory)
+const KSNAP = 8;                   // ctl i32 slot: the kernel sets it when it captured this process
 
 // Thrown when the kernel says this process is finished; unwinds the guest out of _start.
 class ProcExit { constructor(code) { this.code = code; } }
@@ -112,6 +132,7 @@ function hostCall(idx, args) {
     const a = args[k];
     i64[(ARGS >> 3) + k] = (typeof a === 'bigint') ? a : BigInt(Math.trunc(a));
   }
+  cpuPark();
   Atomics.store(i32, 2, n);
   Atomics.store(i32, 1, idx);
   Atomics.store(i32, 0, ST_REQ);
@@ -160,7 +181,19 @@ function hostCall(idx, args) {
   }
   const ret = i64[RET >> 3];
   Atomics.store(i32, 0, ST_IDLE);
+  cpuGo();
+  // The kernel just copied this process's memory (a write to /dev/walios-snapshot): send what
+  // only this thread knows -- the side modules and table slots -- as of that same moment.
+  if (Atomics.load(i32, KSNAP)) { Atomics.store(i32, KSNAP, 0); sendSnapLog(); }
   return ret;
+}
+function sendSnapLog() {
+  try {
+    const table = inst.exports.__indirect_function_table;
+    self.postMessage({ t: 'snap-dl', unsafe: snapUnsafe, tableLen: table ? table.length : 0,
+      dl: dlRecs.map((r) => ({ mod: r.mod, memBase: r.memBase, memSize: r.memSize, tableBase: r.tableBase, tlsBase: r.tlsBase, tlsSize: r.tlsSize, gotFunc: r.gotFunc })),
+      table: [...tableLog] });
+  } catch (e) { self.postMessage({ t: 'snap-dl', unsafe: 'log: ' + ((e && e.message) || e) }); }
 }
 
 // dlopen has to run HERE. It reaches into the instance for the memory, the indirect
@@ -190,10 +223,12 @@ function cstr(ptr) {
   return new TextDecoder().decode(u8.slice(ptr, e));
 }
 
-function funcIdx(fn) {
+function funcIdx(fn, desc) {
   if (typeof fn !== 'function') return 0;
   const table = inst.exports.__indirect_function_table;
-  const idx = table.length; table.grow(1); table.set(idx, fn); return idx;
+  const idx = table.length; table.grow(1); table.set(idx, fn);
+  if (desc) tableLog.set(idx, desc); else snapUnsafe = snapUnsafe || 'table slot of unknown origin';
+  return idx;
 }
 
 function warn(msg) { try { self.postMessage({ t: 'warn', s: msg }); } catch (_) {} }
@@ -257,7 +292,7 @@ function dlopen(pathPtr) {
         gotMem[im.name] = new WebAssembly.Global({ value: 'i32', mutable: true },
                                                  (sym && sym.value !== undefined) ? sym.value : Number(sym || 0));
       } else if (im.module === 'GOT.func') {
-        gotFunc[im.name] = new WebAssembly.Global({ value: 'i32', mutable: true }, funcIdx(exp[im.name]));
+        gotFunc[im.name] = new WebAssembly.Global({ value: 'i32', mutable: true }, funcIdx(exp[im.name], { h: -1, name: im.name }));
       }
     }
     const waliProxy = new Proxy(waliBag || {}, { get: (t, n) => t[n] || (typeof n !== 'string' ? undefined
@@ -268,11 +303,12 @@ function dlopen(pathPtr) {
     // memory (PyMethodDef ml_meth pointers, type slots), so a 0 left here becomes a
     // permanent null function pointer and the first call_indirect traps.
     for (const k in gotMem) { const e = sideInst.exports[k]; if (e && e.value !== undefined) gotMem[k].value = memBase + e.value; }
-    for (const k in gotFunc) { if (gotFunc[k].value === 0) { const e = sideInst.exports[k]; if (typeof e === 'function') gotFunc[k].value = funcIdx(e); } }
+    for (const k in gotFunc) { if (gotFunc[k].value === 0) { const e = sideInst.exports[k]; if (typeof e === 'function') gotFunc[k].value = funcIdx(e, { h: dlHandles.length, name: k }); } }
     ph = 'apply_data_relocs';
     if (sideInst.exports.__wasm_apply_data_relocs) sideInst.exports.__wasm_apply_data_relocs();
     // Thread-locals (C++ EH's __wasm_lpad_context, ...): the .so has its own __tls_base, 0 until
     // __wasm_init_tls points it at a block, and a TLS access at 0 silently corrupts low memory.
+    let tlsBase = -1, tlsSize = 0;
     if (typeof sideInst.exports.__wasm_init_tls === 'function') {
       ph = 'init_tls';
       const ts = sideInst.exports.__tls_size ? sideInst.exports.__tls_size.value : 0;
@@ -282,9 +318,12 @@ function dlopen(pathPtr) {
       const tb = (raw + ta - 1) & ~(ta - 1);
       new Uint8Array(exp.memory.buffer).fill(0, tb, tb + ts);
       sideInst.exports.__wasm_init_tls(tb);
+      tlsBase = tb; tlsSize = ts;
     }
     ph = 'call_ctors';
     if (sideInst.exports.__wasm_call_ctors) sideInst.exports.__wasm_call_ctors();
+    { const gf = {}; for (const k in gotFunc) gf[k] = gotFunc[k].value;
+      dlRecs.push({ mod, memBase, memSize: info.memsize || 0, tableBase, tlsBase, tlsSize, gotFunc: gf }); }
     dlHandles.push({ inst: sideInst, symCache: new Map() });
     return dlHandles.length - 1;
   } catch (e) {
@@ -298,7 +337,7 @@ function dlsym(handle, symPtr) {
   const sym = cstr(symPtr);
   if (h.symCache.has(sym)) return h.symCache.get(sym);
   const fn = h.inst.exports[sym]; if (typeof fn !== 'function') return -1;
-  const idx = funcIdx(fn); h.symCache.set(sym, idx); return idx;
+  const idx = funcIdx(fn, { h: handle, name: sym }); h.symCache.set(sym, idx); return idx;
 }
 
 self.onmessage = async (ev) => {
@@ -309,6 +348,7 @@ self.onmessage = async (ev) => {
     bulkOp = names.indexOf('@.dlbytes');
     i32 = new Int32Array(ctl);
     i64 = new BigInt64Array(ctl);
+    f64 = new Float64Array(ctl);
     const imports = {};
     for (let i = 0; i < names.length; i++) {
       const full = names[i], dot = full.indexOf('.');
@@ -365,11 +405,11 @@ self.onmessage = async (ev) => {
     // shared memory and sent it along. (Its `wasi.thread-spawn` import needs nothing
     // special here: it is proxied like every other import, and the kernel answers it by
     // starting another worker of this same script in thread mode -- see 'run' below.)
-    if (m.memory) (imports.env = imports.env || {}).memory = m.memory;
+    if (m.memory) { (imports.env = imports.env || {}).memory = m.memory; gMemory = m.memory; }
     try {
       inst = await WebAssembly.instantiate(m.mod, imports);
     } catch (e) {
-      self.postMessage({ t: 'ready', ok: false, error: String((e && e.stack) || e) });
+      self.postMessage({ t: 'ready', ok: false, error: errText(e) });
       return;
     }
     const memory = inst.exports.memory || m.memory;
@@ -397,7 +437,108 @@ self.onmessage = async (ev) => {
   }
 
   if (m.t === 'run') { if (m.mode === 'thread') driveThread(m.entry || 'wasi_thread_start', m.tid, m.startArg); else drive(); }
+
+  if (m.t === 'restore') { driveRestore(m.snap, m.code, m.testFail); return; }
 };
+
+// Start this (never-run) instance as a copy of a snapshotted python3 (the kernel's pySnapPick).
+// The instance was built on a fresh memory. The snapshot's side modules are re-linked at their
+// recorded bases -- their data segments and TLS images land in memory, and then the snapshot
+// is copied over them, so neither __wasm_apply_data_relocs nor any constructor runs again:
+// their effects ARE the snapshot. The table slots funcIdx handed out are refilled with the
+// same exports. Then the guest continues through the C API, not _start: Python is already
+// initialized in that memory.
+//
+// Only the snapshot's non-zero pages are copied (the rest of a fresh memory is zero already),
+// plus everything instantiation itself wrote: the main module's initial memory and each side
+// module's data and TLS blocks.
+//
+// 'restored' goes to the kernel BEFORE the guest runs (its first syscall needs the kernel
+// serving it); a failure before that point is 'restore-failed' and the kernel starts the
+// process cold instead -- this worker is then thrown away.
+function driveRestore(snap, code, testFail) {
+  let rc = 0;
+  const t0 = performance.now();
+  let tLink = 0, tCopy = 0, started = false;
+  try {
+    const exp = inst.exports, table = exp.__indirect_function_table;
+    const mem = gMemory || exp.memory;
+    const initLen = mem.buffer.byteLength;
+    const need = snap.len - initLen;
+    if (need > 0) mem.grow(Math.ceil(need / PAGE));
+    if (table.length < snap.tableLen) table.grow(snap.tableLen - table.length);
+    const Gi = (v) => new WebAssembly.Global({ value: 'i32', mutable: false }, v >>> 0);
+    const BASE = new Set(['memory', '__indirect_function_table', '__stack_pointer', '__memory_base', '__table_base']);
+    for (const r of snap.dl) {
+      const env = { memory: mem, __indirect_function_table: table, __stack_pointer: exp.__stack_pointer,
+                    __memory_base: Gi(r.memBase), __table_base: Gi(r.tableBase) };
+      const gotMem = {}, gotFunc = {};
+      let sideInst = null;
+      for (const im of WebAssembly.Module.imports(r.mod)) {
+        if (im.module === 'env') {
+          if (BASE.has(im.name)) continue;
+          const sym = exp[im.name];
+          env[im.name] = (sym !== undefined) ? sym : ((...a) => {
+            const own = sideInst && sideInst.exports[im.name];
+            if (typeof own === 'function') return own(...a);
+            const alt = dlHandles.map((h) => h.inst.exports[im.name]).find((f) => typeof f === 'function');
+            if (alt) return alt(...a);
+            throw new Error('unresolved dynamic fn: ' + im.name);
+          });
+        } else if (im.module === 'GOT.mem') {
+          const sym = exp[im.name];
+          gotMem[im.name] = new WebAssembly.Global({ value: 'i32', mutable: true }, (sym && sym.value !== undefined) ? sym.value : Number(sym || 0));
+        } else if (im.module === 'GOT.func') {
+          gotFunc[im.name] = new WebAssembly.Global({ value: 'i32', mutable: true }, (r.gotFunc[im.name] || 0) >>> 0);
+        }
+      }
+      const waliProxy = new Proxy(waliBag || {}, { get: (t, n) => t[n] || (typeof n !== 'string' ? undefined
+                                  : (() => { throw new Error('unresolved wali import from side module: ' + n); })) });
+      sideInst = new WebAssembly.Instance(r.mod, { env, wali: waliProxy, 'GOT.mem': gotMem, 'GOT.func': gotFunc });
+      for (const k in gotMem) { const e = sideInst.exports[k]; if (e && e.value !== undefined) gotMem[k].value = r.memBase + e.value; }
+      if (r.tlsBase >= 0 && typeof sideInst.exports.__wasm_init_tls === 'function') sideInst.exports.__wasm_init_tls(r.tlsBase);
+      dlHandles.push({ inst: sideInst, symCache: new Map() });
+      dlRecs.push(r);
+    }
+    for (const [idx, d] of snap.table) {
+      const fn = d.h < 0 ? exp[d.name] : dlHandles[d.h].inst.exports[d.name];
+      if (typeof fn !== 'function') throw new Error('table slot ' + idx + ': no export ' + d.name);
+      table.set(idx, fn); tableLog.set(idx, d);
+    }
+    tLink = performance.now() - t0;
+    if (testFail) throw new Error('test failure (WALIOS_SNAPSHOT_TEST_FAIL)');
+    const src = new Uint8Array(snap.mem, 0, snap.len), dst = new Uint8Array(mem.buffer);
+    const put = (a, b) => { a = Math.max(0, a); b = Math.min(b, snap.len); if (b > a) dst.set(src.subarray(a, b), a); };
+    put(0, initLen);
+    for (const r of snap.dl) { put(r.memBase, r.memBase + (r.memSize || 0)); if (r.tlsBase >= 0) put(r.tlsBase, r.tlsBase + (r.tlsSize || 0)); }
+    for (const [a, b] of snap.ranges) put(a, b);
+    tCopy = performance.now() - t0 - tLink;
+  } catch (e) {
+    self.postMessage({ t: 'restore-failed', error: String((e && e.message) || e).slice(0, 300) });
+    return;
+  }
+  try {
+    started = true;
+    cpuGo();
+    self.postMessage({ t: 'restored', ms: { link: Math.round(tLink), copy: Math.round(tCopy) } });
+    const exp = inst.exports, mem = gMemory || exp.memory;
+    // The snapshot was taken inside os.write, which had released the GIL: take it back for
+    // this thread (its thread state is found through the TSS key in that memory) and run.
+    const bytes = new TextEncoder().encode(code);
+    const p = exp.malloc(bytes.length + 1);
+    const u8 = new Uint8Array(mem.buffer); u8.set(bytes, p); u8[p + bytes.length] = 0;
+    exp.PyGILState_Ensure();
+    const r = exp.PyRun_SimpleString(p);
+    // The resume code ends in sys.exit(), which finalizes and exits (ProcExit); landing here
+    // means it could not even start.
+    rc = r === 0 ? 0 : 1;
+    exp.exit(rc);
+  } catch (e) {
+    if (e instanceof ProcExit) rc = e.code;
+    else { rc = 139; self.postMessage({ t: 'trap', error: 'restored python: ' + errText(e).slice(0, 600) }); }
+  }
+  if (started) finish(rc);
+}
 
 // This worker is ONE THREAD of a process whose main thread runs on another worker over
 // the same shared memory. `entry` is the module's thread trampoline -- wasi-threads
@@ -407,10 +548,11 @@ self.onmessage = async (ev) => {
 // drive()'s protocol applies.
 function driveThread(entry, tid, startArg) {
   let code = 0;
+  cpuGo();
   try { inst.exports[entry](tid, startArg); }
   catch (e) {
     if (e instanceof ProcExit) code = e.code;
-    else { code = 139; self.postMessage({ t: 'trap', error: String((e && e.stack) || e).slice(0, 400) }); }
+    else { code = 139; self.postMessage({ t: 'trap', error: errText(e).slice(0, 400) }); }
   }
   finish(code);
 }
@@ -418,6 +560,7 @@ function driveThread(entry, tid, startArg) {
 // Run the guest until it exits, servicing every fork() unwind on the way.
 function drive() {
   let code = 0;
+  cpuGo();
   try {
     for (;;) {
       inst.exports._start();
@@ -436,6 +579,7 @@ function drive() {
       const spg = inst.exports.__stack_pointer, tlsg = inst.exports.__tls_base;
       i64[(ARGS >> 3) + 0] = spg ? BigInt(spg.value) : -1n;
       i64[(ARGS >> 3) + 1] = tlsg ? BigInt(tlsg.value) : -1n;
+      cpuPark();
       Atomics.store(i32, 0, ST_FORKED);
       Atomics.notify(i32, 0);
       for (;;) { const st = Atomics.load(i32, 0);
@@ -444,19 +588,28 @@ function drive() {
         Atomics.wait(i32, 0, st); }
       forkRet = i64[RET >> 3];
       Atomics.store(i32, 0, ST_IDLE);
+      cpuGo();
       forkState = 'rewinding';
       inst.exports.asyncify_start_rewind(asyncifyBuf);
     }
   } catch (e) {
     if (e instanceof ProcExit) code = e.code;
-    else { code = 139; self.postMessage({ t: 'trap', error: String((e && e.stack) || e).slice(0, 400) }); }
+    else { code = 139; self.postMessage({ t: 'trap', error: errText(e).slice(0, 400) }); }
   }
   finish(code);
 }
 
 function finish(code) {
+  cpuPark();
   Atomics.store(i32, 3, code | 0);
   Atomics.store(i32, 0, ST_DONE);
   Atomics.notify(i32, 0);
   self.postMessage({ t: 'exit', code });
+}
+
+// WebKit's e.stack is only the frames ("instantiate@[native code]") -- the message is not in
+// it, so a Safari failure arrived with no reason at all. Always lead with String(e).
+function errText(e) {
+  const head = String(e), st = e && e.stack ? String(e.stack) : '';
+  return st && !st.includes(head) ? head + '\n' + st : (st || head);
 }

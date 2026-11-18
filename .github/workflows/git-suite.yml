@@ -1,0 +1,102 @@
+# git's whole test suite (1007 scripts, git 2.45.3) in the real walios kernel: headless Chromium,
+# the per-process engine, one fresh kernel per script (farm/ci/gittests/suite.mjs), sharded.
+# Results: a gitsuite-<run> release (results.json, summary.md, failures.log) + the job summary.
+name: git-suite
+on:
+  # A commit that changes farm/ci/gittests/suite-request.json runs this with the inputs in it:
+  #   { "gittests": "gittests-2.45.3-9", "runtimes": "runtimes-wali-...", "shards": 20,
+  #     "only": "t0000-basic,...", "timeout": 1800 }
+  # gittests: git (git-asyncfork.wasm), git-core and the suite package; runtimes: busybox + perl.
+  push:
+    branches: [main]
+    paths: ['farm/ci/gittests/suite-request.json']
+
+permissions:
+  contents: write
+
+concurrency:
+  group: git-suite
+  cancel-in-progress: true
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    outputs:
+      req: ${{ steps.in.outputs.req }}
+      shards: ${{ steps.in.outputs.shards }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { sparse-checkout: farm/ci/gittests }
+      - id: in
+        run: |
+          node -e '
+            const r = require("./farm/ci/gittests/suite-request.json"), n = r.shards || 20;
+            for (const k of ["gittests", "runtimes"]) if (!r[k]) throw new Error("suite-request.json: " + k);
+            require("fs").appendFileSync(process.env.GITHUB_OUTPUT, `req=${JSON.stringify(r)}\nshards=${JSON.stringify([...Array(n).keys()])}\n`);
+            console.log(r);'
+
+  shard:
+    needs: plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.plan.outputs.shards) }}
+    env:
+      REQ: ${{ needs.plan.outputs.req }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { sparse-checkout: "farm\nbrowser" }
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - name: Playwright
+        run: |
+          cd farm/ci/gittests && npm init -y >/dev/null && npm i --no-save playwright@1.63.0 >/dev/null
+          npx playwright install --with-deps chromium >/dev/null
+      - name: Inputs
+        run: |
+          T() { node -e "console.log(JSON.parse(process.env.REQ)['$1'] || '')"; }
+          REL="https://github.com/${{ github.repository }}/releases/download"
+          get() { curl -fsSL --retry 5 --retry-delay 5 -o "rt/$3" "$REL/$1/$2"; }
+          mkdir -p rt
+          get "$(T gittests)" git-asyncfork.wasm git.wasm
+          get "$(T gittests)" git-core-2.45.3.tar.gz git-core.tar.gz
+          get "$(T gittests)" git-tests-2.45.3.tar.gz git-tests.tar.gz
+          for f in busybox.wasm busybox.links perl.wasm perllib.tar.gz; do get "$(T runtimes)" $f $f; done
+          cp browser/rootfs.tar.gz rt/
+          ls -la rt
+      - name: Run
+        run: |
+          N=$(node -e "console.log(JSON.parse(process.env.REQ).shards || 20)")
+          ONLY=$(node -e "console.log(JSON.parse(process.env.REQ).only || '')")
+          TO=$(node -e "console.log(JSON.parse(process.env.REQ).timeout || 1800)")
+          node farm/ci/gittests/suite.mjs --rt rt --kernel farm/e2e/kernel ${ONLY:+--only "$ONLY"} --timeout "$TO" \
+            --shard ${{ matrix.shard }}/$N --out gittests-${{ matrix.shard }}.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: 'gittests-${{ matrix.shard }}', path: 'gittests-${{ matrix.shard }}.json', if-no-files-found: ignore, retention-days: 14 }
+
+  merge:
+    needs: [plan, shard]
+    if: always() && needs.plan.result == 'success'
+    runs-on: ubuntu-24.04
+    env:
+      REQ: ${{ needs.plan.outputs.req }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { sparse-checkout: farm/ci/gittests }
+      - uses: actions/download-artifact@v4
+        with: { pattern: 'gittests-*', path: shards }
+      - name: Merge
+        run: node farm/ci/gittests/suite-merge.mjs shards out && cat out/summary.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG=gitsuite-$(date -u +%F)-${{ github.run_number }}
+          for t in $(seq 1 20); do
+            gh release create "$TAG" -R "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease --title "$TAG" \
+              --notes "git 2.45.3 test suite in walios, run ${{ github.run_id }}. Inputs: $REQ" out/* && exit 0
+            gh release delete "$TAG" -R "$GITHUB_REPOSITORY" -y --cleanup-tag 2>/dev/null; sleep 60
+          done; exit 1

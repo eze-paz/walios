@@ -7,7 +7,9 @@
 const PAGE = 65536;
 const CHILD_DONE = 0x7e57n;
 try { self.addEventListener('unhandledrejection', (e) => { try { self.postMessage({ t: 'out', fd: 2, s: '[host] UNHANDLED: ' + ((e.reason && e.reason.stack) || e.reason) + '\n' }); } catch {} }); } catch {}
-const E = { PERM:1, NOENT:2, SRCH:3, INTR:4, IO:5, BADF:9, CHILD:10, AGAIN:11, NOMEM:12, ACCES:13, EXIST:17, XDEV:18, NOTDIR:20, ISDIR:21, INVAL:22, NOTTY:25, SPIPE:29, PIPE:32, NOSPC:28, NOSYS:38, NOTEMPTY:39,
+// (NXIO: open("/dev/tty") with no controlling terminal -- it was missing, so err(undefined)
+// trapped every program that probes /dev/tty first: bash in the in-process engine.)
+const E = { PERM:1, NOENT:2, SRCH:3, INTR:4, IO:5, NXIO:6, BADF:9, CHILD:10, AGAIN:11, NOMEM:12, ACCES:13, EXIST:17, XDEV:18, NOTDIR:20, ISDIR:21, INVAL:22, NOTTY:25, SPIPE:29, PIPE:32, NOSPC:28, NOSYS:38, NOTEMPTY:39,
             ADDRINUSE:98, ADDRNOTAVAIL:99, CONNREFUSED:111, TIMEDOUT:110 };
 
 // LOOPBACK TCP, entirely inside this kernel.
@@ -35,6 +37,40 @@ const isLocalBindIp = (ip) => !ip || ip === '0.0.0.0' || ip === '::' || ip === '
   || (typeof ip === 'string' && (ip.startsWith('127.') || ip === '::1'));
 const err = (e) => BigInt(-e);
 const td = new TextDecoder(), te = new TextEncoder();
+// argv and environment strings are BYTES on Linux, not UTF-8: `git commit -m "$(printf
+// 'a\370b')"` must store byte 0xF8 (git's t4201 does exactly that). The kernel keeps them as
+// JS strings, so bytes that are not valid UTF-8 travel as lone surrogates U+DC80..U+DCFF
+// (Python's "surrogateescape"), which valid UTF-8 can never produce: bdec/benc round-trip
+// any byte string. td/te would turn each such byte into U+FFFD for good.
+const tdStrict = new TextDecoder('utf-8', { fatal: true });
+function bdec(u8) {
+  try { return tdStrict.decode(u8); } catch (_) {}
+  let s = '', i = 0;
+  while (i < u8.length) {
+    const b = u8[i];
+    let n = b < 0x80 ? 1 : b >= 0xc2 && b <= 0xdf ? 2 : b >= 0xe0 && b <= 0xef ? 3 : b >= 0xf0 && b <= 0xf4 ? 4 : 0;
+    if (n > 1) {   // a well-formed sequence (no overlongs, no surrogates, <= U+10FFFF), else escape the lead byte
+      const c1 = u8[i + 1];
+      const lo = b === 0xe0 ? 0xa0 : b === 0xf0 ? 0x90 : 0x80, hi = b === 0xed ? 0x9f : b === 0xf4 ? 0x8f : 0xbf;
+      if (!(c1 >= lo && c1 <= hi)) n = 0;
+      for (let k = 2; n && k < n; k++) if (!(u8[i + k] >= 0x80 && u8[i + k] <= 0xbf)) n = 0;
+    }
+    if (n === 0) { s += String.fromCharCode(0xdc00 + b); i++; continue; }
+    s += td.decode(u8.subarray(i, i + n)); i += n;
+  }
+  return s;
+}
+const ESC_RE = /[\udc80-\udcff]/u;   // u flag: a lone low surrogate, never half of a valid pair
+function benc(s) {
+  if (!ESC_RE.test(s)) return te.encode(s);
+  const out = [];
+  for (const ch of s) {   // by code point
+    const c = ch.charCodeAt(0);
+    if (ch.length === 1 && c >= 0xdc80 && c <= 0xdcff) out.push(c - 0xdc00);
+    else for (const x of te.encode(ch)) out.push(x);
+  }
+  return Uint8Array.from(out);
+}
 
 // ================= VFS (global, shared by all processes) =================
 const files = new Map(), dirs = new Map([['/', new Set()]]);
@@ -108,26 +144,59 @@ function mkdirp(p) {
   mkdirp(parent);
   dirs.set(p, new Set());
   dirs.get(parent).add(p.slice(p.lastIndexOf('/') + 1));
+  dirTouch(p); dirTouch(parent);
 }
 // Stable, unique inodes. Every regular file used to report ino 1: LLVM's FileManager keys
 // its cache by (dev, ino), so <stddef.h> was "the same file" as the source that included
 // it -- "#include nested too deeply" -- and Python's os.path.samefile() / git's index have
 // the same need. Files carry theirs on the entry; directories are keyed by path.
 let inoSeq = 1000; const dirInos = new Map();
+// Files and directories on the OPFS mount get an inode HASHED from their path: the same in
+// every kernel, tab and boot. A per-kernel counter gave the same file 1024 in one tab and 1010
+// in another, and git's index (which stores st_ino) then saw every file as changed in each
+// fresh kernel and re-read them all. 52 bits from two FNV-1a passes, offset past the counter.
+// (Deviation: a rename changes the number; Linux keeps it. Cross-kernel stability won.)
+function pathIno(s) {
+  let h1 = 0x811c9dc5, h2 = 0x01000193 ^ 0x5bd1e995;
+  for (let i = 0; i < s.length; i++) { const c = s.charCodeAt(i); h1 = Math.imul(h1 ^ c, 16777619); h2 = Math.imul(h2 ^ c, 0x01000193) ^ (h2 >>> 13); }
+  return 2 ** 40 + (h1 >>> 0) * 2 ** 12 + ((h2 >>> 0) & 0xfff);
+}
 function inoOf(x) {
-  if (typeof x === 'string') { let n = dirInos.get(x); if (!n) dirInos.set(x, n = ++inoSeq); return n; }
+  if (typeof x === 'string') {
+    if (inOpfs(x)) return pathIno('d:' + opfsRel(x));
+    let n = dirInos.get(x); if (!n) dirInos.set(x, n = ++inoSeq); return n;
+  }
+  if (x.br !== undefined) return pathIno('f:' + x.br);
   if (!x.ino) x.ino = ++inoSeq; return x.ino;
+}
+// Directory mtimes: stable per kernel (first seen / last changed here), never "now" on every
+// stat -- statPath used to fall back to Date.now() for directories and symlinks.
+const dirMtimes = new Map();
+const dirTouch = (p) => dirMtimes.set(p, Date.now());
+// Directory owners. stat reported every directory as uid/gid 1000 (putStat's fallback) while
+// files and processes are uid 0: git's safe.directory check (owner of the repo dir == euid)
+// then refused every repository whose config did not list it -- "detected dubious ownership",
+// and git ignored the repo. Directories default to root like files; mkdir/chown record.
+const dirOwners = new Map();          // path -> { uid, gid }
+// Directory permission bits: stat said 0755 for every directory and chmod on one was a no-op,
+// so umask, `git init --shared` (setgid + group bits) and restricted dirs were invisible. On
+// the OPFS mount they persist through the bridge's mode sidecar like a file's.
+const dirModes = new Map();           // path -> permission bits (0o7777)
+function dirSetMode(p, bits) {
+  dirModes.set(p, bits & 0o7777);
+  if (inOpfs(p) && p !== opfsMount) { const br = initOpfs(); if (br) { try { const pb = te.encode(opfsRel(p)); br.call(OFS.SETMODE, pb.length, bits & 0o7777, 0, pb); } catch (_) {} } }
 }
 function addFile(p, data, mode = 0o100644) {
   const parent = p.slice(0, p.lastIndexOf('/')) || '/';
   mkdirp(parent);
   dirs.get(parent).add(p.slice(p.lastIndexOf('/') + 1));
   files.set(p, { data, size: data.length, mode, mtimeMs: Date.now() });
+  dirTouch(parent);
 }
 function rmEntry(p) {
   const parent = p.slice(0, p.lastIndexOf('/')) || '/';
-  files.delete(p); dirs.delete(p);
-  const d = dirs.get(parent); if (d) d.delete(p.slice(p.lastIndexOf('/') + 1));
+  files.delete(p); dirs.delete(p); dirMtimes.delete(p); dirOwners.delete(p); dirModes.delete(p);
+  const d = dirs.get(parent); if (d) { d.delete(p.slice(p.lastIndexOf('/') + 1)); dirTouch(parent); }
 }
 // Package CDN fallback (walios-backend.js PKG_BASE). The run message maps each CDN url to
 // this server's own copy; a CDN error, non-2xx or no response headers within 8s fetches the
@@ -136,7 +205,37 @@ function rmEntry(p) {
 // site) fetch the url as-is.
 let artFallback = {};
 let artCdnDown = false;
+// Versioned assets (a url with ?v=, which the server marks immutable) are kept in Cache
+// Storage, not only the browser's HTTP cache. The Android app's WebView did not keep them:
+// one user's phone downloaded pylib.tar.gz (8.9MB) 47 times in a day (2026-11-07), every
+// Python start, over mobile data. Cache Storage is the page's own store (the LibreOffice
+// engine already lives there), so a bundle is downloaded once per version. Older versions of
+// the same file are dropped when a new one is stored. Unversioned urls, blob: urls and
+// errors go to the network as before.
+const ASSET_CACHE = 'walios-assets-v1';
 async function fetchArt(url) {
+  let c = null, abs = null;
+  try {
+    if (typeof caches !== 'undefined' && /[?&]v=/.test(url) && !/^blob:/.test(url)) {
+      abs = new URL(url, self.location.href).href;
+      c = await caches.open(ASSET_CACHE);
+      const hit = await c.match(abs);
+      if (hit) return hit;
+    }
+  } catch (_) { c = null; }
+  const resp = await fetchArtNet(url);
+  if (c && resp && resp.status === 200) {
+    try {
+      const copy = resp.clone();
+      c.put(abs, copy).then(async () => {
+        const base = abs.replace(/\?.*$/, '');
+        for (const req of await c.keys()) if (req.url !== abs && req.url.replace(/\?.*$/, '') === base) c.delete(req);
+      }).catch(() => {});
+    } catch (_) {}
+  }
+  return resp;
+}
+async function fetchArtNet(url) {
   const alt = artFallback[url];
   if (!alt) return fetch(url);
   if (!artCdnDown) {
@@ -151,18 +250,19 @@ async function fetchArt(url) {
   }
   return fetch(alt);
 }
-async function loadTar(url, prefix) {
+async function loadTar(url, prefix, onPath) {
   const resp = await fetchArt(url);
   if (!resp.ok) throw new Error(`HTTP ${resp.status} for ${url}`);
   const ds = new DecompressionStream('gzip');
-  installTar(new Uint8Array(await new Response(resp.body.pipeThrough(ds)).arrayBuffer()), prefix);
+  installTar(new Uint8Array(await new Response(resp.body.pipeThrough(ds)).arrayBuffer()), prefix, onPath);
+  mountedTars.set(url, prefix);
 }
 // Split out of loadTar so a bundle that arrived by another route can be installed too. (The
 // guest is parked in Atomics.wait ON THIS THREAD, so this thread can no longer run its own
 // message handler and the fetch half can never happen here -- the host does fetch+gunzip on
 // its thread and hands the plain tar bytes over a SAB; the guest parses them with this,
 // rather than a second copy of the parser.
-function installTar(buf, prefix) {
+function installTar(buf, prefix, onPath) {
   let off = 0;
   while (off + 512 <= buf.length) {
     const hdr = buf.subarray(off, off + 512);
@@ -174,10 +274,72 @@ function installTar(buf, prefix) {
     const tmode = parseInt(td.decode(hdr.subarray(100, 108)).trim(), 8) || 0o644; // preserve perms (sshd checks host-key 0600)
     const type = String.fromCharCode(hdr[156] || 48);
     off += 512;
-    if (type === '0' || type === '\0') addFile(norm(prefix + '/' + name, '/'), buf.slice(off, off + size), 0o100000 | (tmode & 0o7777));
+    if (type === '0' || type === '\0') { const fp = norm(prefix + '/' + name, '/'); addFile(fp, buf.slice(off, off + size), 0o100000 | (tmode & 0o7777)); if (onPath) onPath(fp); }
     else if (type === '5') mkdirp(norm(prefix + '/' + name, '/'));
+    else if (type === '2') {
+      const lp = norm(prefix + '/' + name, '/');
+      if (!files.has(lp) && !dirs.has(lp)) { addFile(lp, new Uint8Array(0), 0o120777); files.get(lp).sym = td.decode(hdr.subarray(157, 257)).replace(/\0.*$/, ''); }
+    }
     off += Math.ceil(size / 512) * 512;
   }
+}
+// ---- per-conversation VM state (host: sandpie-worker.js _waliosVm*) ----
+// A conversation's kernel is dropped after its idle timeout, and everything it held in RAM
+// went with it: /tmp, a `make install` into /usr/local, /opt, packages added with `apk add`.
+// The host asks for this snapshot after runs, stores it locally (IndexedDB, never synced) and
+// hands it back as an extra boot tar of the conversation's NEXT kernel, so the VM carries on.
+// Only RAM files: OPFS-backed ones (f.br) are the workspace and already persist. Regular
+// files, symlinks and directories; anything else (fifos, sockets, devices) is skipped.
+function vmSnapshot(roots, max) {
+  const parts = []; let bytes = 0, nfiles = 0, skipped = 0, tooBig = false;
+  const oct = (n, w) => n.toString(8).padStart(w - 1, '0') + '\0';
+  const header = (name, size, mode, type, link, mtime) => {
+    let nm = name, pfx = '';
+    if (te.encode(nm).length > 100) {             // ustar: split into prefix (155) + name (100) at a '/'
+      let cut = -1;
+      for (let i = nm.indexOf('/'); i > 0; i = nm.indexOf('/', i + 1)) { if (i <= 155 && te.encode(nm.slice(i + 1)).length <= 100) { cut = i; break; } }
+      if (cut < 0) return null;
+      pfx = nm.slice(0, cut); nm = nm.slice(cut + 1);
+    }
+    const h = new Uint8Array(512);
+    const put = (str, off, len) => { const b = te.encode(str); h.set(b.subarray(0, len), off); };
+    put(nm, 0, 100); put(oct(mode & 0o7777, 8), 100, 8); put(oct(0, 8), 108, 8); put(oct(0, 8), 116, 8);
+    put(oct(size, 12), 124, 12); put(oct(Math.floor((mtime || Date.now()) / 1000), 12), 136, 12);
+    h.fill(32, 148, 156); h[156] = type.charCodeAt(0); if (link) put(link, 157, 100);
+    put('ustar\0', 257, 6); put('00', 263, 2); if (pfx) put(pfx, 345, 155);
+    let sum = 0; for (let i = 0; i < 512; i++) sum += h[i];
+    put(sum.toString(8).padStart(6, '0') + '\0 ', 148, 8);
+    return h;
+  };
+  const add = (h, data) => {
+    if (!h) { skipped++; return; }
+    parts.push(h); bytes += 512;
+    if (data && data.length) { parts.push(data); const pad = (512 - (data.length % 512)) % 512; if (pad) parts.push(new Uint8Array(pad)); bytes += data.length + pad; }
+  };
+  const walk = (dir) => {
+    if (tooBig) return;
+    const kids = dirs.get(dir); if (!kids) return;
+    if (dir !== '/') add(header(dir.slice(1) + '/', 0, 0o755, '5', '', Date.now()));
+    for (const n of [...kids].sort()) {
+      if (tooBig) return;
+      const p = dir === '/' ? '/' + n : dir + '/' + n;
+      if (dirs.has(p)) { walk(p); continue; }
+      const f0 = files.get(p);
+      if (!f0 || f0.br !== undefined || f0.brId) continue;      // OPFS-backed: the workspace, already persistent
+      const type = f0.mode & 0o170000;
+      if (type === 0o120000) { add(header(p.slice(1), 0, 0o777, '2', String(f0.sym || ''), f0.mtimeMs)); nfiles++; }
+      else if (type === 0o100000 && f0.data) {
+        const data = f0.data.subarray(0, f0.size);
+        if (bytes + data.length > max) { tooBig = true; return; }
+        add(header(p.slice(1), data.length, f0.mode, '0', '', f0.mtimeMs), data); nfiles++;
+      } else skipped++;
+    }
+  };
+  for (const r of roots) { const rp = norm(r, '/'); if (dirs.has(rp)) walk(rp); }
+  if (tooBig) return { tooBig: true, bytes };
+  parts.push(new Uint8Array(1024)); bytes += 1024;
+  const buf = new Uint8Array(bytes); let o = 0; for (const x of parts) { buf.set(x, o); o += x.length; }
+  return { buf, files: nfiles, skipped, bytes };
 }
 // ---- lazy OPFS mount (the riscv-vm ?p9lazy model): a sibling opfs-worker
 // (spawned by the page, SAB set via the 'opfs-sab' message) owns every OPFS
@@ -228,7 +390,7 @@ function protectedDelete(S, p) {
   }
   return true;
 }
-const OFS = { READDIR: 1, OPEN: 2, READ: 3, WRITE: 4, TRUNC: 5, CLOSE: 6, UNLINK: 7, MKDIR: 8, RMDIR: 9, RENAME: 10, RELEASE: 11, SETMODE: 12 };
+const OFS = { READDIR: 1, OPEN: 2, READ: 3, WRITE: 4, TRUNC: 5, CLOSE: 6, UNLINK: 7, MKDIR: 8, RMDIR: 9, RENAME: 10, RELEASE: 11, SETMODE: 12, FSYNC: 13, SYMLINK: 14, RENAMEDIR: 15, STAT: 16, LOCK: 17, UNLOCK: 18 };
 // ---- bridges without SharedArrayBuffer (in-process engine) ----
 // The OPFS and WISP workers answer over a MessagePort here (sandpie-worker.js wires
 // one when the page has no SAB; the 'opfs-port' / 'wisp-port' messages). The VFS and
@@ -242,6 +404,10 @@ const OFS = { READDIR: 1, OPEN: 2, READ: 3, WRITE: 4, TRUNC: 5, CLOSE: 6, UNLINK
 // Ops whose result the kernel never needs (writes, closes, path changes it already
 // applied to its own tree) are posted and answered at once; the worker still performs
 // them in order, before any later read.
+// 64-bit offsets/sizes over the bridges' Int32 slots (see opfs-worker finishNow): hi32 of an
+// argument rides alongside it, a size answer's high word comes back as auxh.
+const hi32 = (v) => (typeof v === 'number' && v >= 2147483648) ? Math.floor(v / 4294967296) : 0;
+const auxBig = (r) => r.auxh ? (r.aux >>> 0) + r.auxh * 4294967296 : r.aux;
 class NeedAsync extends Error { constructor(promise) { super('need-async'); this.promise = promise; } }
 const bridgeCache = new Map();          // key -> { res, aux, data }, consumed by the retry that finds it
 let bridgeSeq = 0;
@@ -263,18 +429,36 @@ function bridgeKey(name, op, a0, a1, a2, bytes) {
 // the same socket (RECV, ACCEPT) consumes what the probe saw, so its answer is dropped.
 function portBridge(port, name, fireAndForget, probes) {
   const pending = new Map();
+  const ffErr = new Map();    // opfs handle id -> errno of a fire-and-forget op that failed (see call)
   const probed = new Map();   // key -> { res, aux, data, at, inflight }
   const PROBE_FRESH_MS = 10;
   port.onmessage = (ev) => { const m = ev.data; if (!m || m.t !== 'reply') return; const p = pending.get(m.id); if (!p) return; pending.delete(m.id); p(m); };
   const send = (op, a0, a1, a2, bytes) => new Promise((res) => {
     const id = ++bridgeSeq; pending.set(id, res);
     const copy = bytes ? bytes.slice() : null;
-    port.postMessage({ t: 'call', id, op, a0: a0 | 0, a1: a1 | 0, a2: a2 | 0, bytes: copy ? copy.buffer : null }, copy ? [copy.buffer] : []);
+    port.postMessage({ t: 'call', id, op, a0: a0 | 0, a1: a1 | 0, a1h: hi32(a1), a2: a2 | 0, bytes: copy ? copy.buffer : null }, copy ? [copy.buffer] : []);
   });
-  const unpack = (m) => ({ res: m.res | 0, aux: m.aux | 0, data: m.data ? new Uint8Array(m.data) : EMPTY_U8 });
+  const unpack = (m) => ({ res: m.res | 0, aux: m.aux | 0, auxh: m.auxh | 0, data: m.data ? new Uint8Array(m.data) : EMPTY_U8 });
   const call = (op, a0, a1, a2, bytes) => {
     const ff = fireAndForget[op];
-    if (ff !== undefined) { send(op, a0, a1, a2, bytes); return { res: typeof ff === 'function' ? ff(a0, a1, a2, bytes) : ff, aux: 0, data: EMPTY_U8 }; }
+    if (ff !== undefined) {
+      // Answered at once (the syscall cannot wait here), so a failure only shows up when the
+      // reply arrives. It used to be dropped, and a write that failed (quota, a lock, a stalled
+      // bridge) read as success: the data was silently lost (confirmed 2026-11-07, Android).
+      // Now a failed reply is remembered per open file: the next write/truncate/close on that
+      // file returns the error (close() reporting a deferred write error is what Linux does on
+      // network filesystems), and the guest's stderr gets one loud line at once.
+      const handleOp = name === 'opfs' && (op === OFS.WRITE || op === OFS.TRUNC || op === OFS.CLOSE);
+      if (handleOp && ffErr.has(a0)) { const e = ffErr.get(a0); ffErr.delete(a0); return { res: e, aux: 0, data: EMPTY_U8 }; }
+      send(op, a0, a1, a2, bytes).then((m) => {
+        const r = m.res | 0;
+        if (r >= 0 || name !== 'opfs') return;
+        if (handleOp && op !== OFS.CLOSE) ffErr.set(a0, r);
+        ffFailed(op, a0, r);
+      });
+      if (handleOp && op === OFS.CLOSE) ffErr.delete(a0);
+      return { res: typeof ff === 'function' ? ff(a0, a1, a2, bytes) : ff, aux: 0, data: EMPTY_U8 };
+    }
     const key = bridgeKey(name, op, a0, a1, a2, bytes);
     if (probes && probes[op] !== undefined) {
       let e = probed.get(key);
@@ -296,10 +480,23 @@ function portBridge(port, name, fireAndForget, probes) {
   // No SAB window: a read asks for the whole range in one call (a retry must find the
   // one answer it is waiting for, not the first of several chunks). `port` tells the
   // socket code the same about a multi-buffer receive.
-  return { call, max: 1 << 30, port: true };
+  // takeErr: the deferred error of a fire-and-forget op on this handle, consumed (fsync
+  // reports it: an fsync that said 0 after a lost write would be a false "durable").
+  const takeErr = (id) => { const e = ffErr.get(id); if (e === undefined) return 0; ffErr.delete(id); return e; };
+  return { call, max: 1 << 30, port: true, takeErr };
+}
+const ERRNO_NAME = { [-1]: 'EPERM', [-2]: 'ENOENT', [-5]: 'EIO', [-9]: 'EBADF', [-13]: 'EACCES', [-16]: 'EBUSY', [-17]: 'EEXIST', [-22]: 'EINVAL', [-28]: 'ENOSPC', [-39]: 'ENOTEMPTY' };
+const ffWarned = new Set();
+function ffFailed(op, a0, r) {
+  let where = '';
+  if (op === OFS.WRITE || op === OFS.TRUNC || op === OFS.CLOSE) { for (const [p, fo] of files) if (fo && fo.brId === a0) { where = p; break; } }
+  const what = op === OFS.WRITE ? 'a write to' : op === OFS.TRUNC ? 'truncating' : op === OFS.CLOSE ? 'closing' : 'a change in';
+  const key = op + '|' + (where || a0) + '|' + r;
+  if (ffWarned.has(key)) return; ffWarned.add(key);
+  post('[host] ' + what + ' ' + (where || 'the workspace') + ' FAILED (' + (ERRNO_NAME[r] || ('errno ' + (-r))) + '): the data was NOT saved\n', 2);
 }
 const OPFS_FF = { [OFS.WRITE]: (a0, a1, a2) => a2, [OFS.TRUNC]: 0, [OFS.CLOSE]: 0, [OFS.UNLINK]: 0, [OFS.MKDIR]: 0,
-                  [OFS.RMDIR]: 0, [OFS.RENAME]: 0, [OFS.RELEASE]: 0, [OFS.SETMODE]: 0 };
+                  [OFS.RMDIR]: 0, [OFS.RENAME]: 0, [OFS.RELEASE]: 0, [OFS.SETMODE]: 0, [OFS.UNLOCK]: 0 };
 // ---- modes for OPFS-backed files ------------------------------------------
 // OPFS has no modes. The bridge (opfs-worker.js) keeps a sidecar of the ones the
 // guest set explicitly and hands them back with each listing; anything without a
@@ -317,7 +514,18 @@ function opfsGuessMode(rel) {
 function opfsSaveMode(f) {
   if (!f || f.br === undefined || f.br === '') return;
   const br = initOpfs(); if (!br) return;
-  try { const pb = te.encode(f.br); br.call(OFS.SETMODE, pb.length, f.mode & 0o7777, 0, pb); } catch (_) {}
+  try { const pb = te.encode(f.br); br.call(OFS.SETMODE, pb.length, f.sym !== undefined ? 0o120777 : (f.mode & 0o7777), 0, pb); } catch (_) {}
+}
+// A symlink on the OPFS mount: OPFS has no symlinks, so the bridge stores a small file holding
+// the target and marks it S_IFLNK in its mode sidecar (it lists back with `l` = target). It
+// used to live in RAM only: gone on the next boot and invisible to other tabs, so a git
+// checkout with symlinks lost them. -> errno (0 = ok). The RAM entry is made by the caller.
+function opfsSymlink(lp, tgt) {
+  opfsFault(lp.slice(0, lp.lastIndexOf('/')) || '/');
+  const br = initOpfs(); if (!br) return E.IO;
+  const pb = te.encode(opfsRel(lp) + '\0' + tgt);
+  const r = br.call(OFS.SYMLINK, pb.length, 0, 0, pb);
+  return r.res < 0 ? ioErrno(r.res) : 0;
 }
 function initOpfs() {
   if (opfsBr) return opfsBr;
@@ -326,7 +534,7 @@ function initOpfs() {
   const ctl = new Int32Array(opfsSab, 0, 8), bdata = new Uint8Array(opfsSab, 32);
   const call = (op, a0, a1, a2, bytes) => {
     if (bytes) bdata.set(bytes, 0);
-    ctl[2] = op; ctl[3] = a0 | 0; ctl[4] = a1 | 0; ctl[5] = a2 | 0;
+    ctl[2] = op; ctl[3] = a0 | 0; ctl[4] = a1 | 0; ctl[5] = a2 | 0; ctl[7] = hi32(a1);
     if (opfsDead) return { res: -E.IO, aux: 0, data: bdata };
     const prev = Atomics.load(ctl, 1);
     Atomics.add(ctl, 0, 1); Atomics.notify(ctl, 0);
@@ -341,12 +549,19 @@ function initOpfs() {
     const SLOW_MARK = 0x7ea7, start = Date.now(); let warned = false;
     while (Atomics.load(ctl, 1) === prev) {
       const waited = Date.now() - start, pickedUp = Atomics.load(ctl, 5) === SLOW_MARK;
-      if (!pickedUp && waited >= 20000) { opfsDead = true; post('[host] the OPFS bridge did not answer in 20s; /' + (opfsMount || 'root').replace(/^\//, '') + ' is unavailable (EIO) from now on\n', 2); return { res: -E.IO, aux: 0, data: bdata }; }
+      if (!pickedUp && waited >= 20000) {
+        opfsDead = true; post('[host] the OPFS bridge did not answer in 20s; /' + (opfsMount || 'root').replace(/^\//, '') + ' is unavailable (EIO) from now on\n', 2);
+        // Tell the host: opfsDead is permanent for this kernel, and a warm kernel (the Python
+        // REPL, the walios() tool's) used to stay EIO on every /root access until it was reaped.
+        // The host retires it like a bridge that reported 'stuck' (sandpie-worker.js k.sick).
+        try { self.postMessage({ t: 'bridge-dead', bridge: 'opfs', ms: waited }); } catch {}
+        return { res: -E.IO, aux: 0, data: bdata };
+      }
       if (pickedUp && waited >= 600000) { post('[host] an OPFS operation did not finish in 10 minutes (a cloud-only file that would not download?); EIO for this file only\n', 2); return { res: -E.IO, aux: 0, data: bdata }; }
       if (pickedUp && !warned && waited >= 20000) { warned = true; post('[host] still waiting on the OPFS bridge (downloading a cloud-only file from Dropbox?)\n', 2); }
       Atomics.wait(ctl, 1, prev, 1000);
     }
-    return { res: ctl[6], aux: ctl[7], data: bdata };
+    return { res: ctl[6], aux: ctl[7], auxh: ctl[2], data: bdata };
   };
   opfsBr = { call, max: bdata.length };
   return opfsBr;
@@ -362,9 +577,39 @@ function opfsPathOp(op, rel, rel2) {
 // warm kernel still sees what other kernels, the host app and the sync changed between
 // runs. Within a run, refresh=false keeps a listing that still answers the lookup.
 let opfsEpoch = 0;
-function opfsLoadDir(p, refresh = true) {   // merge one directory's OPFS listing
+// Drop a directory that is gone from OPFS from the VFS, with everything under it. The prune
+// below used to drop a vanished directory only when it was EMPTY here, so a directory the
+// host, the sync or another kernel deleted stayed listed -- children, files and all -- for
+// the life of this kernel (`find` kept printing dc/a/b/c/f after `rm -rf dc/a/b` elsewhere,
+// and opening it failed). Kept, as for single files: a file a process still has open (its
+// handle keeps the bytes, as on Linux) and RAM-only entries; a directory stays while
+// anything under it is kept. Returns true when something was kept.
+// May the VFS drop an OPFS file the store no longer lists? Yes, unless a process has it open AND
+// the bridge never opened it: a file created here and not written yet is not in the store until
+// its first write. One the bridge HAS opened was there, so another kernel (or tab, or the sync)
+// deleted or renamed it: the PATH goes, as on Linux -- open fds keep their file object, and its
+// bridge id follows a rename / answers an error after a delete. Keeping the path used to leave a
+// moved file listed under its old name, and re-opening that name reused the id of the moved file.
+const opfsGone = (f) => f.br !== undefined && (!!f.brId || !opfsFileInUse(f));
+function opfsDropTree(c) {
+  let kept = false;
+  const kids = dirs.get(c);
+  if (kids) for (const n of [...kids]) {
+    const cc = c + '/' + n, f = files.get(cc);
+    if (f) { if (opfsGone(f)) { files.delete(cc); kids.delete(n); } else kept = true; }
+    else if (dirs.has(cc)) { if (opfsDropTree(cc)) kept = true; else kids.delete(n); }
+    else kids.delete(n);
+  }
+  if (!kept) { dirs.delete(c); opfsLoaded.delete(c); }
+  return kept;
+}
+// force: re-read even a fresh listing, AS a refresh (getdents at the start of every
+// enumeration). It used to clear the listing's stamp instead, which made the re-read look
+// like a first listing -- and a first listing prunes nothing, so a file deleted mid-run
+// kept showing in `ls` and still passed `[ -e ]`.
+function opfsLoadDir(p, refresh = true, force = false) {   // merge one directory's OPFS listing
   const now = Date.now(), at = opfsLoaded.get(p);
-  if (at !== undefined && at >= opfsEpoch && (!refresh || now - at < OPFS_LIST_TTL)) return; opfsLoaded.set(p, now);
+  if (!force && at !== undefined && at >= opfsEpoch && (!refresh || now - at < OPFS_LIST_TTL)) return; opfsLoaded.set(p, now);
   const br = initOpfs(); if (!br) return;
   const pb = te.encode(opfsRel(p));
   let r;
@@ -375,6 +620,14 @@ function opfsLoadDir(p, refresh = true) {   // merge one directory's OPFS listin
   // problem gets misread as missing data. The realistic cause is the bridge's fixed
   // buffer: opfs-worker answers EINVAL when the JSON listing does not fit (~1MB, so
   // roughly 20k entries), and any OPFS error lands here too. Say so.
+  if (r.res === -E.NOENT && p !== opfsMount) {
+    // The directory is gone (not local, not in the cloud index). It used to stay in the
+    // VFS as it was last seen, with a "will look empty but may not be" warning -- and
+    // everything under it kept listing. Drop it like the prune does.
+    if (!opfsDropTree(p)) { const parent = p.slice(0, p.lastIndexOf('/')) || '/'; const pd = dirs.get(parent); if (pd) pd.delete(p.slice(p.lastIndexOf('/') + 1)); }
+    else opfsLoaded.delete(p);
+    return;
+  }
   if (r.res < 0) {
     // Deliberately NOT prefixed '[host]': the terminal routes those to console.debug,
     // which Chrome hides unless Verbose is enabled, so the one message that explains an
@@ -400,13 +653,37 @@ function opfsLoadDir(p, refresh = true) {   // merge one directory's OPFS listin
   const seen = new Set();
   for (const e of JSON.parse(td.decode(r.data.slice(0, r.res)))) { // slice: TextDecoder rejects SAB views
     const child = p + '/' + e.n; seen.add(e.n);
-    if (e.d) mkdirp(child);
-    else { const f = files.get(child);
+    // The entry changed KIND since we last looked (rm -rf x && echo > x elsewhere, or the
+    // reverse): drop the stale one first, or the VFS held both and the directory won --
+    // `cat x` said "Is a directory" about a file. Anything still open stays (see opfsDropTree).
+    if (e.d) {
+      if (e.p !== undefined) dirModes.set(child, e.p & 0o7777);
+      const f = files.get(child);
+      if (f && opfsGone(f)) files.delete(child);
+      if (!files.has(child)) mkdirp(child);
+    } else if (!files.has(child) && dirs.has(child) && opfsDropTree(child)) {
+      continue;                        // a process still uses something under the old directory
+    }
+    if (e.d) continue;
+    { const f = files.get(child);
       if (!f) {
         dirs.get(p).add(e.n);
-        files.set(child, { br: opfsRel(child), size: e.s, mtimeMs: e.m, data: null,
+        if (e.l !== undefined && e.p !== undefined && (e.p & 0o170000) === 0o120000) {   // a symlink (see opfsSymlink)
+          files.set(child, { br: opfsRel(child), size: te.encode(e.l).length, mtimeMs: e.m, data: null, mode: 0o120777, sym: e.l });
+          continue;
+        }
+        files.set(child, { br: opfsRel(child), size: e.s, mtimeMs: e.m, opfsM: e.m, data: null,
                            mode: e.p !== undefined ? (0o100000 | (e.p & 0o7777)) : opfsGuessMode(opfsRel(child)) });
-      } else if (f.br !== undefined && !f.brId && e.s !== undefined) { f.size = e.s; f.mtimeMs = e.m; }   // rewritten by another kernel
+      } else if (f.br !== undefined && !f.brId && e.s !== undefined) {
+        // A file's stat must not change without a write: git's rm/checkout compare stat data
+        // without re-reading content. So this kernel's own write keeps the mtime it gave the file
+        // (the next listing only RECORDS the lastModified that write produced); a lastModified
+        // other than the recorded one means another kernel, the app or the sync rewrote it.
+        // (It used to adopt lastModified on every re-listing: `git add f && git rm --cached f`
+        // failed 'staged content different' when a listing fell in between.)
+        if (f.ownWrite) { f.opfsM = e.m; f.ownWrite = false; if (e.s !== f.size) f.size = e.s; }
+        else if (e.m !== f.opfsM || e.s !== f.size) { f.size = e.s; f.mtimeMs = e.m; f.opfsM = e.m; }   // rewritten elsewhere
+      }
     }
   }
   // A refresh (not the first listing): entries that are gone from OPFS -- deleted by another
@@ -415,8 +692,8 @@ function opfsLoadDir(p, refresh = true) {   // merge one directory's OPFS listin
   if (at !== undefined) for (const n of [...dirs.get(p)]) {
     if (seen.has(n)) continue;
     const c = p + '/' + n, f = files.get(c);
-    if (f) { if (f.br !== undefined && !f.brId && !opfsFileInUse(f)) { files.delete(c); dirs.get(p).delete(n); } }
-    else if (dirs.has(c) && dirs.get(c).size === 0) { dirs.delete(c); dirs.get(p).delete(n); opfsLoaded.delete(c); }
+    if (f) { if (opfsGone(f)) { files.delete(c); dirs.get(p).delete(n); } }
+    else if (dirs.has(c)) { if (!opfsDropTree(c)) dirs.get(p).delete(n); }
   }
 }
 // Fault in listings along p (and p itself if it is a dir). A listing older than
@@ -443,25 +720,48 @@ const opfsOpenFailed = new Set();
 // by the read/write syscalls, which turn it into EIO -- a short read of zero bytes
 // is indistinguishable from an empty file, and that is exactly how "my data is
 // gone" gets reported when the data is merely unreachable.
-let fileIoError = false;
-const ioFailed = () => { const v = fileIoError; fileIoError = false; return v; };
+//
+// It carries the bridge's real errno (0 = no error), not just "failed": everything used to
+// reach the guest as EIO, so a file another worker had locked (EBUSY), one that vanished
+// (ENOENT) and a full disk (ENOSPC) all read "OSError: [Errno 5] Input/output error" in
+// Python, and the model retried the same call instead of acting on the cause.
+let fileIoError = 0;
+const ioFailed = () => { const v = fileIoError; fileIoError = 0; return v; };
+// A bridge answer as the errno the guest sees. EBADF from the bridge means ITS id is gone
+// (the file was unlinked/renamed under an open fd); the guest's fd is still valid, so EIO.
+const ioErrno = (res) => (res < 0 && res !== -E.BADF) ? -res : E.IO;
 const opfsCloudWarned = new Set();   // dirs we have already reported as holding unreachable cloud files
-function opfsHandle(f, create) { // lazily open the per-file bridge handle
+let opfsOpenErr = 0;                 // errno of the last failed opfsHandle (see fileIoError)
+let opfsQuotaWarned = 0;             // when the download-budget note (EDQUOT) was last printed
+function opfsHandle(f, create, excl) { // lazily open the per-file bridge handle
   if (f.brId) return f.brId;
-  const br = initOpfs(); if (!br) return 0;
+  const br = initOpfs(); if (!br) { opfsOpenErr = E.IO; return 0; }
   const pb = te.encode(f.br);
-  const r = br.call(OFS.OPEN, pb.length, create ? 1 : 0, 0, pb);
+  const r = br.call(OFS.OPEN, pb.length, (create ? 1 : 0) | (excl ? 2 : 0), 0, pb);
   if (r.res <= 0) {
+    opfsOpenErr = ioErrno(r.res);
+    // EEXIST on an exclusive create is an ANSWER, not a failure: someone holds the lock
+    // (git's index.lock in another tab). The caller returns EEXIST and git says so itself.
+    if (excl && r.res === -E.EXIST) return 0;
     // A failed open used to read back as ZERO BYTES -- `cat` printed nothing and
     // looked like an empty file. The realistic cause is a file that is still only
     // in the user's Dropbox (listed from the cloud index) whose download failed:
     // no token in this tab, an expired one, or no network. Say which file.
+    // EDQUOT: the host's per-command download budget (>>> lean, shellfs) is spent -- grep -r or
+    // find -exec over a Dropbox tree opens every file, and each cloud-only one is a download.
+    // Said once per command (not once per file), naming the way that downloads nothing.
+    if (r.res === -122) {
+      if (Date.now() - opfsQuotaWarned > 10000) post('walios: stopped downloading Dropbox files for this command (it opened too many cloud-only files: grep -r / find over Dropbox downloads every file it reads). Use dbxsearch WORDS [FOLDER] to search names and contents without downloading, then open just the files you need.\n', 2);
+      opfsQuotaWarned = Date.now();
+      return 0;
+    }
     if (!opfsOpenFailed.has(f.br)) {
       opfsOpenFailed.add(f.br);
-      // EBUSY: the file is LOCAL and intact but another OPFS handle holds it -- the bridge
-      // of a run the host killed mid-write and never released. That used to print the
-      // cloud message below, and a whole git repo "became not a repository" over it.
-      if (r.res === -16) post('walios: /' + f.br + ' is locked by another OPFS handle (a previous run killed before it released its files?) - EBUSY; the host must terminate that run\'s bridge worker\n', 2);
+      // EBUSY: the file is LOCAL and intact but a handle outside this tab's bridge holds it
+      // (another tab, the app's own writer) and it is too big to work on a private copy of.
+      // That used to print the cloud message below, and a whole git repo "became not a
+      // repository" over it.
+      if (r.res === -16) post('walios: /' + f.br + ' is locked (open in another tab or by the app) - EBUSY; retry once it is closed there\n', 2);
       else post('walios: /' + f.br + ' is in Dropbox but could not be downloaded (errno '
            + (-r.res) + ') - it is NOT empty; open sandpie in this browser to refresh the connection\n', 2);
     }
@@ -472,7 +772,7 @@ function opfsHandle(f, create) { // lazily open the per-file bridge handle
   // The bridge reports the file's CURRENT size with the handle. Another kernel (the
   // terminal, the REPL, another conversation's walios()) may have rewritten the file since
   // this one listed the directory, and a read is bounded by the cached size.
-  if (r.aux >= 0 && r.aux !== f.size) f.size = r.aux;
+  { const sz = auxBig(r); if (sz >= 0 && sz !== f.size) f.size = sz; if (sz >= 0) f.sizeAt = Date.now(); }
   return f.brId;
 }
 // Drop the bridge handle -- the EXCLUSIVE OPFS lock -- once no fd in any process refers to
@@ -482,6 +782,141 @@ function opfsHandle(f, create) { // lazily open the per-file bridge handle
 // which git reports as "not a git repository" or "unable to read <object>". A short grace
 // keeps git's open/close/open churn on one object from paying a createSyncAccessHandle per
 // touch, and a file reopened inside it keeps its handle (see opfsHandle).
+
+// ---- advisory locks: fcntl record locks (POSIX + OFD) and flock ----------------
+// fcntl F_SETLK/F_SETLKW/F_GETLK used to fall through to "return 0": every lock was granted,
+// so nothing that relied on them (sqlite, pip/filelock, make -j jobservers, lockf in
+// scripts) was ever mutually exclusive -- worse than an error. Now:
+//   POSIX record locks: byte ranges, owned by the PROCESS, released when it closes ANY fd of
+//     the file or exits (Linux semantics, gotchas included).
+//   OFD locks (F_OFD_*) and flock(): owned by the open file description (h.off, shared by
+//     dup and fork), released by LOCK_UN / F_UNLCK or when the last fd of it closes.
+//   flock and fcntl locks are independent, as on Linux.
+// Exact within this kernel (all its processes). Across tabs, each kernel's aggregate lock on
+// an OPFS file is a Web Lock in the bridge (OFS.LOCK): whole-file, so conservative.
+// Blocking variants (F_SETLKW, flock without LOCK_NB) wait in sysAsync, interruptible.
+const lockTab = new Map();          // file object -> [{ kind: 'posix'|'ofd'|'flock', owner, w, start, end }]
+const lockWaiters = new Set();      // resolvers woken on any unlock in this kernel
+function lockWake() { const w = [...lockWaiters]; lockWaiters.clear(); for (const f of w) f('wake'); }
+const lkOverlap = (a, s, e) => a.start < e && s < a.end;
+// The conflicting lock for a request, or null. Same owner never conflicts; flock and fcntl
+// never conflict with each other.
+function lockConflict(f, kind, owner, w, s, e) {
+  const L = lockTab.get(f); if (!L) return null;
+  const fam = kind === 'flock' ? 'flock' : 'rec';
+  for (const l of L) {
+    if ((l.kind === 'flock' ? 'flock' : 'rec') !== fam) continue;
+    if (l.owner === owner && l.kind === kind) continue;
+    if (!(w || l.w)) continue;
+    if (fam === 'flock' || lkOverlap(l, s, e)) return l;
+  }
+  return null;
+}
+// The kernel's aggregate lock on f: 2 any write lock, 1 only read locks, 0 none.
+const lockAgg = (f) => { const L = lockTab.get(f); if (!L || !L.length) return 0; return L.some((l) => l.w) ? 2 : 1; };
+// Tell the bridge when the aggregate changes (OPFS files only). -> errno (0 = ok)
+function lockSync(f, before, after) {
+  if (before === after || f.br === undefined) return 0;
+  const br = initOpfs(); if (!br) return 0;
+  const pb = te.encode(f.br);
+  if (!after) { br.call(OFS.UNLOCK, pb.length, 0, 0, pb); return 0; }
+  const r = br.call(OFS.LOCK, pb.length, after, 0, pb);
+  return r.res < 0 ? -r.res : 0;
+}
+// Apply a lock/unlock for an owner over [s, e). Returns errno (0 = ok, EAGAIN = busy).
+function lockSet(f, kind, owner, type, s, e, pid) {
+  const w = type === 1, un = type === 2;
+  if (!un && lockConflict(f, kind, owner, w, s, e)) return E.AGAIN;
+  const L = lockTab.get(f) || [];
+  // Remove this owner's locks of this kind over [s, e), splitting partial overlaps.
+  const next = [];
+  for (const l of L) {
+    if (l.owner !== owner || l.kind !== kind || (kind !== 'flock' && !lkOverlap(l, s, e))) { next.push(l); continue; }
+    if (kind === 'flock') continue;
+    if (l.start < s) next.push({ ...l, end: s });
+    if (l.end > e) next.push({ ...l, start: e });
+  }
+  if (!un) next.push({ kind, owner, w, start: s, end: e, pid });
+  const before = lockAgg(f);
+  const after = next.length ? (next.some((l) => l.w) ? 2 : 1) : 0;
+  const err2 = lockSync(f, before, after);
+  if (err2) return err2 === E.AGAIN || err2 === 11 ? E.AGAIN : err2;
+  if (next.length) lockTab.set(f, next); else lockTab.delete(f);
+  if (un || L.length !== next.length - (un ? 0 : 1)) lockWake();
+  return 0;
+}
+// Drop locks matching pred (close / exit). Never fails (the bridge unlock is fire-and-forget).
+function lockDrop(pred) {
+  let woke = false;
+  for (const [f, L] of [...lockTab]) {
+    const keep = L.filter((l) => !pred(f, l));
+    if (keep.length === L.length) continue;
+    const before = lockAgg(f);
+    if (keep.length) lockTab.set(f, keep); else lockTab.delete(f);
+    lockSync(f, before, lockAgg(f));
+    woke = true;
+  }
+  if (woke) lockWake();
+}
+// Is this open file description still referenced by an fd of any process?
+function ofdLive(ofd) { for (const p of procs.values()) for (const h of p.fds.values()) if (h && h.off === ofd) return true; return false; }
+// struct flock (musl, 64-bit off_t): short l_type @0, short l_whence @2, off_t l_start @8,
+// off_t l_len @16, pid_t l_pid @24. -> { type, s, e } in absolute bytes, or null (EINVAL).
+function readFlock(S, ptr, h) {
+  S.refresh();
+  const type = S.dv.getInt16(ptr, true), whence = S.dv.getInt16(ptr + 2, true);
+  const start = Number(S.dv.getBigInt64(ptr + 8, true)), len = Number(S.dv.getBigInt64(ptr + 16, true));
+  if (type < 0 || type > 2) return null;
+  const base = whence === 0 ? 0 : whence === 1 ? ((h.off && h.off.v) || 0) : whence === 2 ? (h.file ? h.file.size : 0) : NaN;
+  if (Number.isNaN(base)) return null;
+  let s = base + start, e = len === 0 ? Infinity : s + len;
+  if (len < 0) { e = s; s = s + len; }
+  if (s < 0) return null;
+  return { type, s, e };
+}
+function writeFlock(S, ptr, l) {
+  S.refresh();
+  if (!l) { S.dv.setInt16(ptr, 2, true); return; }                   // F_UNLCK: nothing in the way
+  S.dv.setInt16(ptr, l.w ? 1 : 0, true); S.dv.setInt16(ptr + 2, 0, true);
+  S.dv.setBigInt64(ptr + 8, BigInt(l.start), true);
+  S.dv.setBigInt64(ptr + 16, l.end === Infinity ? 0n : BigInt(l.end - l.start), true);
+  S.dv.setInt32(ptr + 24, l.kind === 'posix' ? l.pid : -1, true);
+}
+// One non-blocking attempt of a lock syscall. -> BigInt result (err on failure).
+function lockTry(S, name, a) {
+  const h = S.fds.get(a[0]); if (!h) return err(E.BADF);
+  if (!h.file) return err(E.INVAL);
+  const f = h.file;
+  if (name === 'flock') {
+    const op = a[1] | 0, nb = op & 4, base = op & ~4;
+    if (base !== 1 && base !== 2 && base !== 8) return err(E.INVAL);
+    const ofd = (h.off ??= { v: 0 });
+    const r = lockSet(f, 'flock', ofd, base === 8 ? 2 : base === 2 ? 1 : 0, 0, Infinity, S.selfPid);
+    return r ? err(r) : 0n;
+  }
+  const cmd = a[1] | 0, ofdCmd = cmd >= 36 && cmd <= 38;
+  const rq = readFlock(S, Number(a[2]), h); if (!rq) return err(E.INVAL);
+  const kind = ofdCmd ? 'ofd' : 'posix', owner = ofdCmd ? (h.off ??= { v: 0 }) : S.selfPid;
+  if (cmd === 5 || cmd === 36) {                                     // F_GETLK / F_OFD_GETLK
+    writeFlock(S, Number(a[2]), rq.type === 2 ? null : lockConflict(f, kind, owner, rq.type === 1, rq.s, rq.e));
+    return 0n;
+  }
+  const r = lockSet(f, kind, owner, rq.type, rq.s, rq.e, S.selfPid);
+  return r ? err(r) : 0n;
+}
+// An OPFS-backed file this kernel wrote reports a kernel-clock mtime until it is settled from
+// OPFS's own lastModified -- the value every other kernel lists. Done on the first stat once no
+// fd holds the file: through the open bridge id (STAT, settle: the bridge closes its writer so
+// lastModified is final), or, after the id was released, by re-listing the parent.
+function opfsSettleMtime(f, path) {
+  if (!f || !f.mtimeDirty || f.br === undefined || f.sym !== undefined || f.brId || opfsFileInUse(f)) return;
+  // Still held by the bridge (inside the release grace): keep the kernel's time for now. Settling
+  // through the open id (closing the writer to read a final lastModified) made every write+stat
+  // pair reopen a sync handle: git status/commit ran 50-80% slower (perf-git-ab).
+  if (f.brId) return;
+  const parent = path.slice(0, path.lastIndexOf('/')) || '/';
+  if (inOpfs(parent)) opfsLoadDir(parent, true, true);
+}
 function opfsFileInUse(f) { for (const p of procs.values()) for (const h of p.fds.values()) if (h && h.file === f) return true; return false; }
 function opfsMaybeRelease(f) {
   if (!f || !f.brId || f.brRel) return;
@@ -494,32 +929,57 @@ function opfsMaybeRelease(f) {
 }
 function fileRead(f, pos, n) {
   if (f.br !== undefined) {
-    const br = initOpfs(), id = opfsHandle(f); if (!id) { fileIoError = true; return new Uint8Array(0); }
-    const want = Math.min(n, Math.max(0, f.size - pos)), out = new Uint8Array(want);
-    let got = 0;
-    while (got < want) {
-      const chunk = Math.min(want - got, br.max);
-      const r = br.call(OFS.READ, id, pos + got, chunk, null);
-      if (r.res <= 0) break;
+    fileIoError = 0;   // only THIS call's failure: a caller that never checks (exec, mmap) must not leak one into the next read()
+    const br = initOpfs(), id = opfsHandle(f); if (!id) { fileIoError = opfsOpenErr || E.IO; return new Uint8Array(0); }
+    // Ask for what the caller wants, not just up to the size THIS kernel last saw: other kernels
+    // (and tabs) can write a file this one holds open, so that size goes stale -- a re-read
+    // after the shell rewrote a file Python had open came back cut to the old length. The
+    // bridge answers each READ with the file's real size (aux = size + 1; 0 = unknown), which
+    // becomes f.size once the read is done (not before: in the in-process engine a bridge call
+    // can restart this syscall, and the state it computed `lim` from must not have moved).
+    // `want` starts at what this kernel believes is left and follows the size the bridge
+    // reports; at the believed EOF one small probe asks whether the file grew. Nothing is
+    // allocated beyond what actually comes back (a 1MB-per-read buffer made 600 small reads
+    // churn 1.2GB and slowed down run after run).
+    let want = Math.min(n, Math.max(0, f.size - pos)), got = 0, size = -1, out = null;
+    for (;;) {
+      const ask = Math.min(want > got ? want - got : Math.min(n - got, 65536), br.max);
+      if (ask <= 0) break;
+      const r = br.call(OFS.READ, id, pos + got, ask, null);
+      // A failed READ used to end the loop like EOF: the guest got a short or EMPTY read and
+      // no error. Nothing read yet -> the error; something read -> that much (POSIX short read).
+      if (r.res < 0) { if (!got) fileIoError = ioErrno(r.res); break; }
+      { const ab = auxBig(r); if (ab > 0) { size = ab - 1; want = Math.min(n, Math.max(0, size - pos)); f.sizeAt = Date.now(); } }
+      if (r.res === 0) break;
       // (a short read is not EOF: stopping there handed dlopen a truncated .so, which
       // lost its wali.abi marker at the end and was refused as the other ABI)
+      if (!out) out = new Uint8Array(Math.max(want, r.res));
+      else if (got + r.res > out.length) { const nb = new Uint8Array(Math.max(got + r.res, want)); nb.set(out.subarray(0, got)); out = nb; }
       out.set(r.data.subarray(0, r.res), got); got += r.res;
+      if (got >= want && size >= 0) break;   // the bridge's size says there is no more
     }
-    return out.subarray(0, got);
+    if (size >= 0) f.size = size;
+    return out ? out.subarray(0, got) : new Uint8Array(0);
   }
   return f.data.subarray(pos, Math.min(pos + n, f.size));
 }
 function fileWrite(f, pos, bytes) {
   if (f.br !== undefined) {
-    const br = initOpfs(), id = opfsHandle(f, true); if (!id) { fileIoError = true; return 0; }
+    fileIoError = 0;
+    const br = initOpfs(), id = opfsHandle(f, true); if (!id) { fileIoError = opfsOpenErr || E.IO; return 0; }
     let done = 0;
     while (done < bytes.length) {
       const chunk = Math.min(bytes.length - done, br.max);
       const r = br.call(OFS.WRITE, id, pos + done, chunk, bytes.subarray(done, done + chunk));
-      if (r.res <= 0) break;
+      if (r.res < 0) { if (!done) fileIoError = ioErrno(r.res); break; }   // was: a silent 0-byte write
+      if (r.res === 0) break;
       done += r.res;
     }
-    f.size = Math.max(f.size, pos + done); f.mtimeMs = Date.now();
+    // (No 'settle to OPFS lastModified' afterwards: a stat that changes with no write in between
+    // breaks git -- rm/checkout compare stat data WITHOUT re-reading content, so `git add f &&
+    // git rm --cached f` failed 'staged content different' once the mtime moved. A file keeps
+    // the mtime this kernel gave it; another tab may see OPFS's and re-read it: slower, correct.)
+    f.size = Math.max(f.size, pos + done); f.mtimeMs = Date.now(); f.ownWrite = true;
     return done;
   }
   if (pos + bytes.length > f.data.length) {
@@ -532,6 +992,43 @@ function fileWrite(f, pos, bytes) {
 
 // ================= global kernel state =================
 let nextPid = 100, syscallTotal = 0, procCount = 0;
+// ---- walios monitor (stats every second while a run is live; the page draws it) ----
+// CPU: every process worker keeps its own guest-running time in its control block (see
+// CPU_ACC in wali-proc-worker.js); cpuLive holds the blocks being served right now, and a
+// finished one is folded into P.cpuMs. kBusyMs: time this kernel thread spent inside
+// syscall handlers -- one thread serves every process, so when it saturates they all slow.
+const cpuLive = new Set();
+let kBusyMs = 0, vfsBytesCache = 0, vfsBytesAt = 0;
+const KCPU_ACC = 32, KCPU_SINCE = 33;   // f64 slots of the control block (bytes 256/264)
+const nowEpoch = () => performance.timeOrigin + performance.now();
+function cpuOfRec(r) { const since = r.f64[KCPU_SINCE]; return r.f64[KCPU_ACC] + (since > 0 ? Math.max(0, nowEpoch() - since) : 0); }
+function vfsBytes() {
+  if (Date.now() - vfsBytesAt < 5000) return vfsBytesCache;
+  let n = 0; for (const f of files.values()) { const d = f.data; if (d && d.byteLength) n += d.byteLength; }
+  vfsBytesAt = Date.now(); return (vfsBytesCache = n);
+}
+function statsSnapshot(t0) {
+  const per = new Map();   // P -> { cpu, running }
+  for (const r of cpuLive) {
+    const e = per.get(r.P) || { cpu: 0, running: 0 };
+    e.cpu += cpuOfRec(r); if (r.f64[KCPU_SINCE] > 0) e.running++;
+    per.set(r.P, e);
+  }
+  const seen = new Set(); let mem = 0, running = 0, threads = 0;
+  const list = [];
+  for (const P of procs.values()) {
+    const e = per.get(P) || { cpu: 0, running: 0 };
+    const pm = procMemBytes(P);
+    try { if (P.memory && !seen.has(P.memory)) { seen.add(P.memory); mem += pm; } } catch (_) {}
+    running += e.running; threads += 1 + ((P._threads && P._threads.length) || 0);
+    list.push({ pid: P.pid, comm: procComm(P), mem: pm, cpu: Math.round((P.cpuMs || 0) + e.cpu), run: e.running });
+  }
+  let cpuLiveMs = 0; for (const r of cpuLive) cpuLiveMs += cpuOfRec(r);
+  return { t: 'stats', mem, procs: procs.size, syscalls: syscallTotal, ms: performance.now() - t0,
+           engine: INPROC ? 'inproc' : 'workers', cores: (self.navigator && navigator.hardwareConcurrency) || 0,
+           cpuMs: cpuDoneMs + cpuLiveMs, kBusyMs, running, threads, vfs: vfsBytes(), list };
+}
+let cpuDoneMs = 0;
 let STRACE = false;
 // strace lines are BATCHED (flushed every 50ms and before the exit message): posting one
 // message per syscall slowed the kernel enough to hide timing-dependent bugs -- a clone
@@ -550,45 +1047,53 @@ const unknownSyscalls = new Set();
 const __waliWarned = new Set();
 function WARN(m) { if (__waliWarned.has(m)) return; __waliWarned.add(m); post('[host] ' + m + '\n', 2); }
 const modCache = new Map();   // key -> WebAssembly.Module
-// A WARM SPARE per module. Measured: starting a process costs ~20-45ms, and nearly all of
-// it is WebAssembly.instantiate INSIDE the worker -- `new Worker` itself is ~1ms, so a pool
-// of blank workers would buy nothing. What costs is instantiating THIS module, so the spare
-// is module-keyed and already past `init`: worker created, module instantiated, sitting on
-// its 'ready'. Taking one turns process start into a postMessage.
+// WARM SPARES per module. Measured (2026-11-03): starting a process costs 8-13ms, and
+// nearly all of it is the WORKER starting -- instantiating busybox inside it is 0.1-0.2ms.
+// A spare is a worker already past `init`: created, module instantiated, sitting on its
+// 'ready'. Taking one turns process start into a postMessage.
 //
-// ONLY for modules that DEFINE their own memory (busybox and the WALI binaries -- the shell
-// and its forks, i.e. most of the process count). A module that IMPORTS memory (clang) has
-// that memory created per-process by makeImports, and fork additionally needs the parent's
-// memory copied into it before the guest runs, so those keep the cold path. Never used for
-// a fork child for the same reason.
-const spares = new Map();          // modKey -> { w, ctl, bulk, ready } | 'pending'
-const SPARE_OK = (plan, opts) => !plan.memory && !(opts && opts.forkFrom);
+// A module that IMPORTS its memory (busybox, python and the other WALI binaries linked
+// with --import-memory -- nearly every process) gets a fresh shared memory with its spare,
+// made exactly as getSharedMemory() makes one, and the process adopts it (runInWorker).
+// These spares used to be for modules that DEFINE their memory only, which since the
+// --import-memory relinks was none of them: every process started cold.
+// Fork children take spares too: the parent's memory is copied over the child's before it
+// rewinds, and a spare's instance has never run, so it is the same as a cold one.
+// Up to two per module, because a fork+exec takes two in a row, faster than one warms.
+// A module with a big initial memory (clang) gets none: an idle spare would pin it.
+const SPARE_POOL = (lim) => (!lim || lim.initial <= 160 ? 2 : 1);   // 160 pages = 10MB
+const SPARE_MAX_PAGES = 512;
+const spares = new Map();          // modKey -> [{ w, ctl, bulk, memory, ready, settle }]
 function takeSpare(modKey) {
-  const sp = spares.get(modKey);
-  if (!sp || sp === 'pending') return null;
-  spares.delete(modKey);
-  return sp;
+  const list = spares.get(modKey);
+  return list && list.length ? list.shift() : null;
 }
 function prepareSpare(modKey, plan) {
-  if (spares.has(modKey) || !plan || plan.memory) return;
-  spares.set(modKey, 'pending');
-  try {
-    const mod = modCache.get(modKey);
-    if (!mod) { spares.delete(modKey); return; }
-    let bulk;
-    try { bulk = new SharedArrayBuffer(1 << 20, { maxByteLength: 64 << 20 }); }
-    catch (_) { bulk = new SharedArrayBuffer(32 << 20); }
-    const ctl = new SharedArrayBuffer(KCTL.BYTES);
-    const w = new Worker(NODE_STUB_RE.test(modKey) ? NODE_WORKER_URL : 'wali-proc-worker.js?v=tls1');
-    let settle;
-    const ready = new Promise((res) => { settle = res; });
-    const sp = { w, ctl, bulk, ready, settle: (m) => settle(m) };
-    // The worker is silent after 'ready' until it is told to run, so buffering one message is enough.
-    w.onmessage = (ev) => { if (ev.data && ev.data.t === 'ready') settle(ev.data); };
-    w.onerror = () => { settle({ ok: false, error: 'spare worker failed' }); spares.delete(modKey); };
-    w.postMessage({ t: 'init', mod, ctl, names: plan.names, sigs: plan.sigv, bulk, memory: null });
-    spares.set(modKey, sp);
-  } catch (_) { spares.delete(modKey); }
+  if (!plan || NODE_STUB_RE.test(modKey)) return;
+  const mod = modCache.get(modKey);
+  if (!mod) return;
+  const lim = plan.memory ? (modSharedMem.get(modKey) || { initial: 256, maximum: 16384 }) : null;
+  if (lim && lim.initial > SPARE_MAX_PAGES) return;
+  const list = spares.get(modKey) || [];
+  spares.set(modKey, list);
+  while (list.length < SPARE_POOL(lim)) {
+    try {
+      const memory = lim ? new WebAssembly.Memory({ initial: lim.initial, maximum: lim.maximum, shared: true }) : null;
+      let bulk;
+      try { bulk = new SharedArrayBuffer(1 << 20, { maxByteLength: 64 << 20 }); }
+      catch (_) { bulk = new SharedArrayBuffer(32 << 20); }
+      const ctl = new SharedArrayBuffer(KCTL.BYTES);
+      const w = new Worker('wali-proc-worker.js?v=snap3');
+      let settle;
+      const ready = new Promise((res) => { settle = res; });
+      const sp = { w, ctl, bulk, memory, ready, settle: (m) => settle(m) };
+      // The worker is silent after 'ready' until it is told to run, so buffering one message is enough.
+      w.onmessage = (ev) => { if (ev.data && ev.data.t === 'ready') settle(ev.data); };
+      w.onerror = () => { settle({ ok: false, error: 'spare worker failed' }); const i = list.indexOf(sp); if (i >= 0) list.splice(i, 1); };
+      w.postMessage({ t: 'init', mod, ctl, names: plan.names, sigs: plan.sigv, bulk, memory });
+      list.push(sp);
+    } catch (_) { return; }
+  }
 }
 const modSharedMem = new Map(); // key -> {initial, maximum} for a shared env.memory import (wasi-threads)
 // walios-node: a process whose USERSPACE is JavaScript on the page's own V8 rather
@@ -794,6 +1299,13 @@ function compileGuest(key, bytes) {
 // kernel -- are gone.)
 const KSPIN_MS = 0.02;   // _serve: poll this long for a process's next request before waitAsync (see there)
 const BLOCKING = new Set(['read', 'readv', 'wait4', 'poll', 'ppoll', 'select', 'pselect6', 'epoll_wait', 'epoll_pwait', 'nanosleep', 'clock_nanosleep', 'execve', 'recvmsg', 'recvfrom', 'pause', 'sigsuspend', 'rt_sigsuspend', 'accept', 'accept4', 'futex']);
+// fcntl/flock park only when they wait for a lock (F_SETLKW / F_OFD_SETLKW, flock without
+// LOCK_NB). Routing EVERY fcntl through sysAsync cost git ~10% (it calls F_GETFD/F_SETFD on
+// nearly every open): measured with tests/walios/perf-git-ab.mjs.
+const argI32 = (x) => Number(typeof x === 'bigint' ? BigInt.asIntN(32, x) : x) | 0;
+const lockWaits = (name, a) => name === 'fcntl' ? (argI32(a[1]) === 7 || argI32(a[1]) === 38)
+  : name === 'flock' ? ((argI32(a[1]) & 4) === 0 && (argI32(a[1]) & ~4) !== 8) : false;
+const isBlocking = (name, a) => BLOCKING.has(name) || ((name === 'fcntl' || name === 'flock') && lockWaits(name, a));
 // Binaries linked against the OLDER wali-musl, whose fork() is plain musl _Fork(): it
 // expects the syscall itself to return twice, which only Asyncify can do here. Without
 // it the vfork protocol below would hand such a binary a pid it never treats as "run
@@ -826,6 +1338,8 @@ function pushStdin(u8) { stdinChunks.push(u8); const w = stdinWaiters; stdinWait
 function concatU8(arr) { let n = 0; for (const a of arr) n += a.length; const o = new Uint8Array(n); let k = 0; for (const a of arr) { o.set(a, k); k += a.length; } return o; }
 function drainStdinAsync(max) { if (stdinChunks.length) { let b = concatU8(stdinChunks); const take = b.subarray(0, max); const rest = b.subarray(take.length); stdinChunks = rest.length ? [rest.slice()] : []; return take.slice(); } if (stdinEOF) return new Uint8Array(0); return null; }
 let manifest = {};            // basename -> module key (url)
+const pkgAdded = new Set();
+const pkgAddedMsgs = new Map();   // name -> the add-pkg message, so a VM snapshot can bring the package back (vm-snapshot)   // names `apk add` registered mid-session: they outrank a busybox applet (see resolveExec)
 function resolveModuleKey(p, selfKey) {
   if (p === '/proc/self/exe') return selfKey;
   const base = p.slice(p.lastIndexOf('/') + 1);
@@ -932,6 +1446,129 @@ const procs = new Map();             // live pid -> Process (kill routing)
 // pid -> { ppid, pgid }; cleared by wait4 and, like init reaping orphans, when the parent
 // itself exits. A parent ignoring SIGCHLD gets none (Linux auto-reaps those).
 const zombies = new Map();
+// ---- /proc ------------------------------------------------------------------------
+// A read-only view of THIS kernel's process table, generated at open/stat time; nothing
+// is stored in the VFS. There was no /proc at all, so busybox ps/pgrep/pkill/top had
+// nothing to read and printed empty tables. What it holds, per process: stat, status,
+// cmdline, comm, environ, statm, cwd/exe links and fd/; plus the global uptime, loadavg,
+// meminfo (the same numbers sysinfo reports), cpuinfo, stat, version, mounts.
+// Honest gaps: CPU times are 0 (a guest runs on its own worker; the kernel cannot measure
+// its CPU), every process but the caller reads as sleeping, zombies are not listed.
+const KSTART = Date.now();                    // kernel boot (uptime, process start times)
+const isProcPath = (p) => p === '/proc' || p.startsWith('/proc/');
+const PROC_PID_FILES = ['cmdline', 'comm', 'environ', 'stat', 'statm', 'status'];
+const PROC_FILES = ['cpuinfo', 'loadavg', 'meminfo', 'mounts', 'stat', 'uptime', 'version'];
+const procComm = (P) => P.comm || String((P.argv && P.argv[0]) || '?').split('/').pop().slice(0, 15);   // comm: prctl(PR_SET_NAME)
+// The CPU count is what sched_getaffinity reports (1), so nproc, os.cpu_count() and
+// /proc/cpuinfo agree. Raising it would make `make -j$(nproc)` start one clang per core.
+const PROC_CPUS = 1;
+const procUid = (P) => (P.cred && P.cred.euid) || 0;
+function procFdTarget(h) {
+  return h.pty !== undefined ? (h.master ? '/dev/ptmx' : '/dev/pts/' + h.pty) : h.path ? h.path : h.std !== undefined ? '/dev/tty'
+       : (h.fifo || h.spair) ? 'pipe:[' + inoOf(h.fifo || h.spair) + ']' : h.sock ? 'socket:[' + inoOf(h.sock) + ']' : '/dev/null';
+}
+function procMemBytes(P) { try { return P.memory ? P.memory.buffer.byteLength : 0; } catch (_) { return 0; } }
+function procText(S, P, name) {
+  const pid = P.pid, mem = procMemBytes(P), ticks = (ms) => Math.max(0, Math.round((ms - KSTART) / 10));   // HZ = 100
+  const state = P === S ? 'R' : 'S', comm = procComm(P), uid = procUid(P), gid = (P.cred && P.cred.egid) || 0;
+  switch (name) {
+    case 'stat': return `${pid} (${comm}) ${state} ${P.ppid || 0} ${P.pgid || pid} ${P.sid || pid} 0 -1 4194560 0 0 0 0 0 0 0 0 20 0 1 0 ${ticks(P.startMs || KSTART)} ${mem} ${Math.ceil(mem / 4096)} 18446744073709551615 0 0 0 0 0 0 0 0 0 0 0 0 17 0 0 0 0 0 0\n`;
+    case 'statm': { const pg = Math.ceil(mem / 4096); return `${pg} ${pg} 0 0 0 ${pg} 0\n`; }
+    case 'status': return `Name:\t${comm}\nUmask:\t${('000' + (P.umask ?? 0o22).toString(8)).slice(-4)}\nState:\t${state === 'R' ? 'R (running)' : 'S (sleeping)'}\n`
+      + `Tgid:\t${pid}\nPid:\t${pid}\nPPid:\t${P.ppid || 0}\nTracerPid:\t0\nUid:\t${uid}\t${uid}\t${uid}\t${uid}\nGid:\t${gid}\t${gid}\t${gid}\t${gid}\n`
+      + `FDSize:\t${Math.max(64, P.nextFd || 0)}\nVmSize:\t${mem >> 10} kB\nVmRSS:\t${mem >> 10} kB\nThreads:\t${1 + ((P._threads && P._threads.length) || 0)}\n`;
+    case 'cmdline': return (P.argv || []).map((a) => a + '\0').join('');
+    case 'comm': return comm + '\n';
+    case 'environ': return (P.env || []).map((e) => e + '\0').join('');
+  }
+  return '';
+}
+function procGlobalText(name) {
+  const up = (Date.now() - KSTART) / 1000, n = procs.size, cpus = PROC_CPUS;
+  switch (name) {
+    case 'uptime': return `${up.toFixed(2)} ${(up * cpus).toFixed(2)}\n`;
+    case 'loadavg': return `0.00 0.00 0.00 1/${n} ${nextPid - 1}\n`;
+    case 'meminfo': return 'MemTotal:        4194304 kB\nMemFree:         2097152 kB\nMemAvailable:    2097152 kB\nBuffers:               0 kB\nCached:                0 kB\nSwapTotal:             0 kB\nSwapFree:              0 kB\n';
+    case 'cpuinfo': return Array.from({ length: cpus }, (_, i) => `processor\t: ${i}\nmodel name\t: WebAssembly (walios)\ncpu MHz\t\t: 0.000\nbogomips\t: 0.00\n\n`).join('');
+    case 'stat': return `cpu  0 0 0 0 0 0 0 0 0 0\n${Array.from({ length: cpus }, (_, i) => `cpu${i} 0 0 0 0 0 0 0 0 0 0\n`).join('')}intr 0\nctxt 0\nbtime ${Math.floor(KSTART / 1000)}\nprocesses ${nextPid - 100}\nprocs_running 1\nprocs_blocked 0\n`;
+    case 'version': return 'Linux version 6.1.0-wali (walios) #1 WALI-browser\n';
+    case 'mounts': return 'rootfs / rootfs rw 0 0\nproc /proc proc ro 0 0\n'
+      + (opfsMount ? `opfs ${opfsMount} opfs rw 0 0\n` : '') ;
+  }
+  return '';
+}
+// Resolve a /proc path for process S. Returns null (no such entry) or one of
+//   { kind: 'dir', path, names: Map(name -> 'dir'|'file'|'link'), uid }
+//   { kind: 'file', path, text, uid }   { kind: 'link', path, target }
+//   { kind: 'redirect', path }          -- leaves /proc (cwd/... or a followed link): resolve normally
+function procNode(S, p, follow = true) {
+  const segs = p.split('/').filter(Boolean);
+  if (segs[0] !== 'proc') return null;
+  if (segs[1] === 'self' || segs[1] === 'thread-self') {
+    const target = '/proc/' + S.pid;
+    if (segs.length === 2 && !follow) return { kind: 'link', path: p, target: String(S.pid) };
+    return procNode(S, target + (segs.length > 2 ? '/' + segs.slice(2).join('/') : ''), follow);
+  }
+  if (segs.length === 1) {
+    const names = new Map([['self', 'link'], ['thread-self', 'link']]);
+    for (const pid of [...procs.keys()].sort((a, b) => a - b)) names.set(String(pid), 'dir');
+    for (const f of PROC_FILES) names.set(f, 'file');
+    return { kind: 'dir', path: '/proc', names, uid: 0 };
+  }
+  if (!/^\d+$/.test(segs[1])) {
+    if (segs.length === 2 && PROC_FILES.includes(segs[1])) return { kind: 'file', path: p, text: procGlobalText(segs[1]), uid: 0 };
+    return null;
+  }
+  const P = procs.get(+segs[1]); if (!P) return null;
+  const base = '/proc/' + P.pid, uid = procUid(P);
+  if (segs.length === 2) {
+    const names = new Map([['cwd', 'link'], ['exe', 'link'], ['fd', 'dir']]);
+    for (const f of PROC_PID_FILES) names.set(f, 'file');
+    return { kind: 'dir', path: base, names, uid };
+  }
+  const leaf = segs[2], rest = segs.slice(3);
+  const link = (target, more) => {
+    if (more.length) return target.startsWith('/') ? { kind: 'redirect', path: target.replace(/\/$/, '') + '/' + more.join('/') } : null;
+    if (!follow) return { kind: 'link', path: p, target };
+    return target.startsWith('/') ? (isProcPath(target) ? procNode(S, target, true) : { kind: 'redirect', path: target }) : null;   // pipe:[..] cannot be opened by path
+  };
+  if (PROC_PID_FILES.includes(leaf)) return rest.length ? null : { kind: 'file', path: p, text: procText(S, P, leaf), uid };
+  if (leaf === 'cwd') return link((P.cwd && P.cwd.p) || '/', rest);
+  if (leaf === 'exe') return rest.length ? null : link('/bin/' + String((P.argv && P.argv[0]) || 'wasm').split('/').pop(), []);
+  if (leaf === 'fd') {
+    const fds = P.fds;
+    if (!rest.length) { const names = new Map(); for (const k of [...fds.keys()].sort((a, b) => a - b)) names.set(String(k), 'link'); return { kind: 'dir', path: base + '/fd', names, uid }; }
+    const h = /^\d+$/.test(rest[0]) ? fds.get(+rest[0]) : null; if (!h) return null;
+    return link(procFdTarget(h), rest.slice(1));
+  }
+  return null;
+}
+function procStat(n) {
+  if (n.kind === 'dir') return { size: 0, mode: 0o040555, uid: n.uid, gid: n.uid, ino: inoOf(n.path), nlink: 2 };
+  if (n.kind === 'link') return { size: n.target.length, mode: 0o120777, uid: 0, gid: 0, ino: inoOf(n.path) };
+  return { size: 0, mode: 0o100444, uid: n.uid, gid: n.uid, ino: inoOf(n.path) };
+}
+// unlink / rmdir on a resolved path (the bodies of the syscalls; unlinkat shares them).
+function unlinkPath(S, p) {
+  pyTreeTouch(p);
+  if (isProcPath(p)) return err(E.ACCES);
+  // Linux: unlink() of a directory is EISDIR, not ENOENT (Python's os.remove, Git's
+  // remove-or-rmdir fallbacks all branch on it).
+  opfsFault(p); if (!files.has(p)) return err(dirs.has(p) ? E.ISDIR : E.NOENT);
+  if (protectedDelete(S, p)) return err(E.PERM);
+  const f = files.get(p);
+  if (f.br !== undefined) { const r = opfsPathOp(OFS.UNLINK, f.br); if (r < 0) return BigInt(r); f.brId = 0; }
+  rmEntry(p); return 0n;
+}
+function rmdirPath(S, p) {
+  pyTreeTouch(p);
+  if (isProcPath(p)) return err(E.ACCES);
+  opfsFault(p); if (!dirs.has(p)) return err(E.NOENT);
+  if (protectedDelete(S, p)) return err(E.PERM);
+  if (dirs.get(p).size) return err(E.NOTEMPTY);
+  if (inOpfs(p) && p !== opfsMount) { const r = opfsPathOp(OFS.RMDIR, opfsRel(p)); if (r < 0 && r !== -E.NOENT) return BigInt(r); }
+  rmEntry(p); return 0n;
+}
 function addZombie(pid, parent, pgid) {
   if (!parent || procs.get(parent.pid) !== parent) return;
   const h = parent.sig && parent.sig.handlers.get(SIG.CHLD);
@@ -976,6 +1613,10 @@ function pipeRead(fifo, n) {
 // means no ONLCR: a bare "\n" moved the cursor down but not back, and the next program
 // output was drawn from that column -- the "staircase" `ls` after a walios: warning.
 // Translate the way the pty would, and start on a fresh line.
+// stdout/stderr bytes -> text with a streaming decoder per fd: a UTF-8 character split across
+// two write() calls (× → é...) came out as two U+FFFD before (run_walios output, 2026-11-10).
+const _stdDec = new Map();
+function stdDec(fd) { let d = _stdDec.get(fd); if (!d) _stdDec.set(fd, d = new TextDecoder()); return d; }
 function post(s, fd) {
   if (termPty !== null && (fd === 2 || fd === 1)) s = '\r\n' + String(s).replace(/\r?\n/g, '\r\n').replace(/\r\n$/, '') + '\r\n';
   self.postMessage({ t: 'out', fd: fd || 1, s });
@@ -1148,6 +1789,7 @@ class Process {
       } }
     this.cwd = { p: cwd || '/' };
     this.pid = nextPid++;
+    this.startMs = Date.now();       // /proc/<pid>/stat starttime (execve keeps the old one: startProcess)
     this.heapBrk = 0;
     this.dlHandles = [];             // dlopen()'d side modules (wasm dynamic linking)
     this.mmapFree = [];              // recycled anon regions [{base,len}], address-sorted
@@ -1162,7 +1804,16 @@ class Process {
     this.asyncifyBuf = 0; this.forkRet = 0n;
     this.syscalls = 0;
     this.pgid = this.pid; this.sid = this.pid;
-    this.sig = { handlers: new Map(), mask: 0n, pending: new Set(), waiters: [] };
+    // Signal masks are PER THREAD (POSIX). This was one mask for the whole process, and musl's
+    // thread exit blocks every application signal in the exiting thread -- so after ANY thread
+    // ended, the main thread had 61 signals blocked: SIGPIPE stayed pending (git, with its
+    // preload-index threads, wrote on into a closed pipe and exited 0 instead of dying 141),
+    // and Ctrl-C / SIGCHLD went quiet in every threaded program. Unknown tids read the main
+    // thread's mask; threadSpawn gives a new thread its creator's.
+    const masks = new Map([[0, 0n]]), P = this;
+    this.sig = { handlers: new Map(), pending: new Set(), waiters: [], masks,
+      get mask() { const t = P.curTid || 0; return masks.has(t) ? masks.get(t) : masks.get(0); },
+      set mask(v) { masks.set(P.curTid || 0, v); } };
     this.timers = new Map();         // which(0=ITIMER_REAL) -> {deadline, intervalMs, to}
     this.stopped = 0; this.stopReported = false; this.contWaiters = [];
     this.cred = { uid: 0, euid: 0, suid: 0, gid: 0, egid: 0, sgid: 0, groups: [] }; // root by default
@@ -1173,6 +1824,8 @@ class Process {
     procs.set(this.pid, this);
   }
   retire() {
+    if (lockTab.size) { const me = this.pid; procs.delete(this.pid);
+      lockDrop((f, l) => (l.kind === 'posix' && l.owner === me) || (l.kind !== 'posix' && !ofdLive(l.owner))); }
     rmEntry(`/.wali_env_${this.pid}`); // else one env file per exec'd process accumulates in / forever
     procs.delete(this.pid);
     if (this.ppid && this.ppid !== this.pid) addZombie(this.pid, procs.get(this.ppid), this.pgid);
@@ -1415,6 +2068,9 @@ class Process {
   cstr(p) { this.refresh(); let e = p; while (this.u8[e] !== 0) e++; return td.decode(this.u8.slice(p, e)); }
   wbytes(p, b) { this.refresh(); this.u8.set(b, p); }
   wstr(p, s, max) { const b = te.encode(s); const n = max ? Math.min(b.length, max - 1) : b.length; this.wbytes(p, b.subarray(0, n)); this.u8[p + n] = 0; return n; }
+  // argv/env strings: bytes, not UTF-8 (bdec/benc)
+  cstrB(p) { this.refresh(); let e = p; while (this.u8[e] !== 0) e++; return bdec(this.u8.slice(p, e)); }
+  wstrB(p, s) { const b = benc(s); this.wbytes(p, b); this.u8[p + b.length] = 0; return b.length; }
   i64(p, v) { this.refresh(); this.dv.setBigInt64(p, BigInt(v), true); }
   i32(p, v) { this.refresh(); this.dv.setInt32(p, Number(v), true); }
   r32(p) { this.refresh(); return this.dv.getInt32(p, true); }
@@ -1430,11 +2086,18 @@ class Process {
   // struct msghdr / cmsghdr: 64-bit long pads msg_iovlen and msg_controllen to 8 bytes and the
   // cmsghdr header to 16; ILP32 has neither pad.
   get msgCtl() { return this.ilp32 ? { ctl: 16, ctllen: 20, flags: 24, hdr: 12 } : { ctl: 20, ctllen: 24, flags: 32, hdr: 16 }; }
-  rPtrArray(p) { const out = []; for (;;) { const q = this.r32(p); if (!q) break; out.push(this.cstr(q)); p += 4; } return out; }
+  rPtrArray(p) { const out = []; for (;;) { const q = this.r32(p); if (!q) break; out.push(this.cstrB(q)); p += 4; } return out; }
+  // A syscall's path, with symlinks in its PARENT components resolved (the last one is left for
+  // the caller: open/stat follow it, lstat/unlink/rename/mkdir do not) -- what Linux does for
+  // every path argument. mkdir/unlink/rmdir/rename took the path literally, so `mkdir
+  // there/sub` with `there` a symlink worked by accident in RAM and failed on the OPFS mount
+  // (git checkout-index --prefix=<symlinked dir>/: "cannot create directory ... Is a directory").
   atPath(dirfd, s) {
-    if (s.startsWith('/')) return norm(s, '/');
-    if ((dirfd | 0) === -100) return norm(s, this.cwd.p);
-    const h = this.fds.get(dirfd); return norm(s, h && h.path && dirs.has(h.path) ? h.path : this.cwd.p);
+    let p;
+    if (s.startsWith('/')) p = norm(s, '/');
+    else if ((dirfd | 0) === -100) p = norm(s, this.cwd.p);
+    else { const h = this.fds.get(dirfd); p = norm(s, h && h.path && dirs.has(h.path) ? h.path : this.cwd.p); }
+    return this.followDir(p);
   }
   // ---- wasm dynamic linking: load a CPython C-extension .so (a PIC wasm side module) ----
   // Shares the interpreter's linear memory + growable table; resolves env.<Py*> from the
@@ -1547,7 +2210,7 @@ class Process {
             throw new Error('[host] unresolved dynamic fn: ' + im.name);
           }); }
         else if (im.module === 'GOT.mem') { const s = exp[im.name]; gotMem[im.name] = new WebAssembly.Global({ value: 'i32', mutable: true }, (s && s.value !== undefined) ? s.value : Number(s || 0)); }
-        else if (im.module === 'GOT.func') { gotFunc[im.name] = new WebAssembly.Global({ value: 'i32', mutable: true }, this.funcIdx(exp[im.name])); }
+        else if (im.module === 'GOT.func') { gotFunc[im.name] = new WebAssembly.Global({ value: 'i32', mutable: true }, this.funcIdx(exp[im.name], { h: -1, name: im.name })); }
       }
       const waliProxy = new Proxy(this.wali || {}, { get: (t, n) => t[n] || (typeof n !== 'string' ? undefined : (() => { throw new Error('[host] unresolved wali import from side module: ' + n); })) });
       _ph = 'instantiate';
@@ -1558,12 +2221,13 @@ class Process {
       // function pointers, type slots) -> a 0 becomes a permanent null function pointer
       // and the first call_indirect traps. This is the Pillow/lxml encoder fix.
       for (const k in gotMem) { const e = inst.exports[k]; if (e && e.value !== undefined) gotMem[k].value = memBase + e.value; }
-      for (const k in gotFunc) { if (gotFunc[k].value === 0) { const e = inst.exports[k]; if (typeof e === 'function') gotFunc[k].value = this.funcIdx(e); } }
+      for (const k in gotFunc) { if (gotFunc[k].value === 0) { const e = inst.exports[k]; if (typeof e === 'function') gotFunc[k].value = this.funcIdx(e, { h: this.dlHandles.length, name: k }); } }
       _ph = 'apply_data_relocs';
       if (inst.exports.__wasm_apply_data_relocs) inst.exports.__wasm_apply_data_relocs();
       // Thread-locals (C++ EH's __wasm_lpad_context, ...): the .so has its own __tls_base, 0 until
       // __wasm_init_tls points it at a block, and a TLS access at 0 silently corrupts low memory.
       // The block is taken the same way as the data region above.
+      let tlsBase = -1, tlsSize = 0;
       if (typeof inst.exports.__wasm_init_tls === 'function') {
         _ph = 'init_tls';
         const ts = inst.exports.__tls_size ? inst.exports.__tls_size.value : 0;
@@ -1574,10 +2238,13 @@ class Process {
         const tb = (raw + ta - 1) & ~(ta - 1);
         this.refresh(); this.u8.fill(0, tb, tb + ts);
         inst.exports.__wasm_init_tls(tb);
+        tlsBase = tb; tlsSize = ts;
       }
       _ph = 'call_ctors';
       if (inst.exports.__wasm_call_ctors) inst.exports.__wasm_call_ctors();
       this.refresh();
+      { const gf = {}; for (const k in gotFunc) gf[k] = gotFunc[k].value;   // for a python snapshot (pySnapCapture)
+        (this.dlRecs = this.dlRecs || []).push({ mod, memBase, memSize: info.memsize || 0, tableBase, tlsBase, tlsSize, gotFunc: gf }); }
       this.dlHandles.push({ inst, symCache: new Map() });
       return this.dlHandles.length - 1;
     } catch (e) {
@@ -1589,12 +2256,17 @@ class Process {
     const h = this.dlHandles[handle]; if (!h) return -1;
     if (h.symCache.has(sym)) return h.symCache.get(sym);
     const fn = h.inst.exports[sym]; if (typeof fn !== 'function') return -1;
-    const idx = this.funcIdx(fn); h.symCache.set(sym, idx); return idx;
+    const idx = this.funcIdx(fn, { h: handle, name: sym }); h.symCache.set(sym, idx); return idx;
   }
-  funcIdx(fn) { // install a funcref into the shared table, return its index (dlsym / GOT.func)
+  // Install a funcref into the shared table, return its index (dlsym / GOT.func). `desc` says
+  // which export it is, so a python snapshot can refill the slot; a slot of unknown origin
+  // makes the process unsnapshotable.
+  funcIdx(fn, desc) {
     if (typeof fn !== 'function') return 0;
     const table = this.inst.exports.__indirect_function_table;
-    const idx = table.length; table.grow(1); table.set(idx, fn); return idx;
+    const idx = table.length; table.grow(1); table.set(idx, fn);
+    if (desc) (this.tableLog = this.tableLog || new Map()).set(idx, desc); else this.snapUnsafe = this.snapUnsafe || 'table slot of unknown origin';
+    return idx;
   }
   putStat(p, o) {
     this.refresh(); this.u8.fill(0, p, p + 144);
@@ -1640,20 +2312,30 @@ class Process {
   statPath(path2, sp, followLinks = true) {
     if (path2 === '/proc/self/exe') { this.putStat(sp, { size: 1, mode: 0o100755 }); return 0n; }
     if (path2 === '/dev/hostcall') { this.putStat(sp, { size: 0, mode: 0o020666 }); return 0n; }   // so `[ -e /dev/hostcall ]` and os.path.exists() say yes
+    if (path2 === '/dev/walios-snapshot') { this.putStat(sp, { size: 0, mode: 0o020222 }); return 0n; }
+    if (isProcPath(path2)) {
+      const n = procNode(this, path2, followLinks);
+      if (!n) return err(E.NOENT);
+      if (n.kind === 'redirect') return this.statPath(n.path, sp, followLinks);
+      this.putStat(sp, procStat(n)); return 0n;
+    }
     // lstat still resolves the PARENT components (only the final one is left alone), and
     // the OPFS fault-in has to happen on the resolved path -- `ls /files/` stats each
     // entry as /files/<name> with lstat, which used to miss everything behind the link.
     path2 = followLinks ? this.follow(path2) : this.followDir(path2);
     opfsFault(path2);
-    if (dirs.has(path2)) { this.putStat(sp, { size: 4096, mode: 0o040755, ino: inoOf(path2) }); return 0n; }
-    const f = files.get(path2); if (!f) return err(E.NOENT);
-    if (f.sym !== undefined) { this.putStat(sp, { size: f.sym.length, mode: 0o120777, ino: inoOf(f) }); return 0n; }
+    if (dirs.has(path2)) { if (!dirMtimes.has(path2)) dirTouch(path2); const ow = dirOwners.get(path2);
+      this.putStat(sp, { size: 4096, mode: 0o040000 | (dirModes.has(path2) ? dirModes.get(path2) : 0o755), ino: inoOf(path2), mtimeMs: dirMtimes.get(path2), uid: ow ? ow.uid : 0, gid: ow ? ow.gid : 0 }); return 0n; }
+    let f = files.get(path2); if (!f) return err(E.NOENT);
+    if (f.sym !== undefined) { this.putStat(sp, { size: f.sym.length, mode: 0o120777, ino: inoOf(f), mtimeMs: f.mtimeMs, uid: f.uid ?? 0, gid: f.gid ?? 0 }); return 0n; }
+    if (f.mtimeDirty) { opfsSettleMtime(f, path2); f = files.get(path2) || f; }
     this.putStat(sp, { size: f.size, mode: f.mode, mtimeMs: f.mtimeMs, uid: f.uid ?? 0, gid: f.gid ?? 0, ino: inoOf(f) });
     return 0n;
   }
   openAt(path2, flags, mode) {
     const O_CREAT = 0o100, O_TRUNC = 0o1000, O_APPEND = 0o2000, O_DIRECTORY = 0o200000, O_EXCL = 0o200;
     const ce = !!(flags & 0o2000000); // O_CLOEXEC: dropped from the fd table at execve
+    if ((flags & 3) || (flags & (O_CREAT | O_TRUNC))) pyTreeTouch(path2);
     if (path2 === '/proc/self/exe') { const g = this.allocFd(); this.fds.set(g, { exe: true, cloexec: ce }); return BigInt(g); }
     opfsFault(path2);
     if (path2 === '/dev/ptmx') { const id = newPty(); const g = this.allocFd(); this.fds.set(g, { pty: id, master: true, cloexec: ce }); return BigInt(g); }
@@ -1688,6 +2370,8 @@ class Process {
     // pipe and waited for a reply on stdin that went to the shell. Each open() is an
     // independent channel; write one request per line, read one reply line back.
     if (path2 === '/dev/hostcall') { const g = this.allocFd(); this.fds.set(g, { hostcall: { inbuf: '', chunks: [], waiters: [] }, cloexec: ce }); return BigInt(g); }
+    // A snapshot builder writes here to be copied (see pySnapCapture).
+    if (path2 === '/dev/walios-snapshot') { const g = this.allocFd(); this.fds.set(g, { snapdev: true, cloexec: ce }); return BigInt(g); }
     if (path2 === '/dev/urandom' || path2 === '/dev/random' || path2 === '/dev/hwrng') { const g = this.allocFd(); this.fds.set(g, { devrandom: true, cloexec: ce }); return BigInt(g); }
     // /dev/tty = the process's CONTROLLING terminal. ssh (and sudo, passwd, git) read
     // prompts here, NOT from stdin — so without this an unknown-host "yes/no" or a
@@ -1698,6 +2382,21 @@ class Process {
       if (ptyId !== undefined && ptyId !== null && ptys.has(ptyId)) { const g = this.allocFd(); this.fds.set(g, { pty: ptyId, master: false, cloexec: ce }); return BigInt(g); }
       return err(E.NXIO); }
     { const m = path2.match(/^\/dev\/pts\/(\d+)$/); if (m) { const id = +m[1]; if (!ptys.has(id)) return err(E.NOENT); ptys.get(id).fg = this; const g = this.allocFd(); this.fds.set(g, { pty: id, master: false, cloexec: ce }); return BigInt(g); } }
+    if (isProcPath(path2)) {      // read-only, generated now (see procNode)
+      const n = procNode(this, path2, true);
+      if (!n) return err((flags & O_CREAT) ? E.ACCES : E.NOENT);
+      if (n.kind === 'redirect') return this.openAt(n.path, flags, mode);
+      if ((flags & 3) || (flags & (O_CREAT | O_TRUNC))) return err(E.ACCES);
+      if (n.kind !== 'dir' && (flags & O_DIRECTORY)) return err(E.NOTDIR);
+      const g = this.allocFd();
+      if (n.kind === 'dir') { this.fds.set(g, { path: n.path, dir: true, proc: true, cloexec: ce }); return BigInt(g); }
+      const data = benc(n.text);   // /proc/<pid>/cmdline, environ: the argv/env bytes
+      this.fds.set(g, { path: n.path, file: { data, size: data.length, mode: 0o100444, uid: n.uid, gid: n.uid, mtimeMs: Date.now() }, off: { v: 0 }, append: false, cloexec: ce });
+      return BigInt(g);
+    }
+    // O_NOFOLLOW: a symlink as the LAST component is ELOOP (git opens .gitattributes, .gitignore and
+    // .mailmap that way so an in-tree symlink cannot point them outside the repo). It was followed.
+    if (flags & 0o400000) { const lp = this.followDir(path2); opfsFault(lp); const lf = files.get(lp); if (lf && lf.sym !== undefined) return err(40); }
     path2 = this.follow(path2);   // a symlink to a directory (/files -> /root) opens the directory it points at
     opfsFault(path2);             // ...and the fault-in must be on the RESOLVED path
     if (dirs.has(path2)) { const g = this.allocFd(); this.fds.set(g, { path: path2, dir: true, cloexec: ce }); return BigInt(g); }
@@ -1717,11 +2416,21 @@ class Process {
       addFile(path2, new Uint8Array(0), 0o100000 | ((mode || 0o666) & ~this.umask & 0o7777));
       f = files.get(path2);
       f.uid = this.cred.euid; f.gid = this.cred.egid;
-      if (inOpfs(path2)) { f.br = opfsRel(path2); f.data = null; opfsHandle(f, true); // new files under the mount persist
+      // In the in-process engine the bridge create below restarts this syscall (NeedAsync);
+      // the replay must not find the entry added just above, or O_CREAT|O_EXCL (mutool's
+      // output, mkstemp) fails EEXIST on its own file: take it back before the restart.
+      if (inOpfs(path2)) { f.br = opfsRel(path2); f.data = null;
+        // O_CREAT|O_EXCL is decided AT THE STORAGE LAYER: the worker answers EEXIST when the
+        // file is already there (its serialized request loop makes check-and-create atomic),
+        // so a lock file git took in another tab's kernel is honoured here too. The replay
+        // after NeedAsync consumes the SAME cached answer (same bridge key), so the worker
+        // sees the request exactly once.
+        try { if (!opfsHandle(f, true, !!(flags & O_EXCL)) && opfsOpenErr === E.EXIST) { rmEntry(path2); return err(E.EXIST); } }
+        catch (e) { if (e instanceof NeedAsync) rmEntry(path2); throw e; }   // new files under the mount persist
         if ((f.mode & 0o7777) !== (OPFS_DEFAULT_MODE & 0o7777)) opfsSaveMode(f); }   // ...and so does a 0600 asked for at create (ssh-keygen)
     } else if ((flags & O_CREAT) && (flags & O_EXCL)) return err(E.EXIST);
     if (flags & O_TRUNC) {
-      if (f.br !== undefined) { const id = opfsHandle(f, true); if (id) initOpfs().call(OFS.TRUNC, id, 0, 0, null); }
+      if (f.br !== undefined) { const id = opfsHandle(f, true); if (id) initOpfs().call(OFS.TRUNC, id, 0, 0, null); f.ownWrite = true; f.mtimeMs = Date.now(); }
       else f.data = new Uint8Array(0);
       f.size = 0;
     }
@@ -1730,7 +2439,7 @@ class Process {
     // fork copy the handle with `{...h}`, which copies `off` BY REFERENCE — so all those fds
     // share ONE file offset. Storing the offset as a bare number would give each a private copy,
     // which corrupts `{ echo a; cmd|cmd; echo b; } > file` (forked writers clobber each other).
-    this.fds.set(g, { path: path2, file: f, off: { v: (flags & O_APPEND) ? f.size : 0 }, append: !!(flags & O_APPEND), cloexec: ce });
+    this.fds.set(g, { path: path2, file: f, off: { v: (flags & O_APPEND) ? f.size : 0 }, append: !!(flags & O_APPEND), cloexec: ce, acc: flags & 3 });
     return BigInt(g);
   }
   // Only the thread that called fork() is "in the child": its fork() returned 0 and it is
@@ -1771,6 +2480,7 @@ class Process {
     switch (name) {
       case 'read': {
         const h = S.fds.get(a[0]); if (!h) return err(E.BADF);
+        if (h.file && h.acc === 1) return err(E.BADF);   // O_WRONLY
         if (h.std !== undefined) { if (h.std !== 0) return err(E.BADF);
           const b = drainStdinAsync(a[2]); if (b === null) return h.nonblock ? err(E.AGAIN) : 0n; S.wbytes(a[1], b); return BigInt(b.length); }
         if (h.fifo) { if (!h.fifo.chunks.length && h.nonblock && h.fifo.writers > 0) return err(E.AGAIN); const b = pipeRead(h.fifo, a[2]); S.wbytes(a[1], b); return BigInt(b.length); }
@@ -1791,12 +2501,14 @@ class Process {
         if (h.sock) { const br = initWisp(); if (h.sock.nonblock) { const pk = br.call(br.OP.POLL, h.sock.id, 0, 0); if (pk.res <= 0) return err(E.AGAIN); } const r = br.call(h.sock.udp ? br.OP.RECVFROM : br.OP.RECV, h.sock.id, a[2], 0); if (r.res <= 0) return BigInt(r.res); S.wbytes(a[1], r.data.subarray(0, r.res)); return BigInt(r.res); }
         if (h.dir) return err(E.ISDIR);
         if (!h.file) return err(E.BADF);
-        const b = fileRead(h.file, h.off.v, a[2]); if (ioFailed()) return err(E.IO); S.wbytes(a[1], b); h.off.v += b.length; return BigInt(b.length);
+        const b = fileRead(h.file, h.off.v, a[2]); { const ie = ioFailed(); if (ie) return err(ie); } S.wbytes(a[1], b); h.off.v += b.length; return BigInt(b.length);
       }
       case 'write': { if ((a[2] | 0) < 0) return err(E.INVAL); // guard: negative size must not slice from the end
         const h = S.fds.get(a[0]); if (!h) return err(E.BADF);
+        if (h.file && h.acc === 0) return err(E.BADF);   // O_RDONLY: was written anyway
         S.refresh();
-        if (h.std !== undefined) { post(td.decode(S.u8.slice(a[1], a[1] + a[2])), h.std === 0 ? 1 : h.std); return BigInt(a[2]); }
+        if (h.std !== undefined) { const sfd = h.std === 0 ? 1 : h.std; post(stdDec(sfd).decode(S.u8.slice(a[1], a[1] + a[2]), { stream: true }), sfd); return BigInt(a[2]); }
+        if (h.snapdev) { const why = pySnapCapture(S, a[0], td.decode(S.u8.slice(a[1], a[1] + a[2]))); if (why) { if (pySnapDebug(S)) post('[snapshot] refused: ' + why + '\n', 2); return err(E.INVAL); } return BigInt(a[2]); }
         if (h.fifo) { if (h.fifo.readers <= 0) { postSignal(S, SIG.PIPE); return err(E.PIPE); } // no reader will ever come back: SIGPIPE (dfl kills) + EPIPE
           // POSIX: a 0-length write to a pipe transfers nothing and has no effect.
           // Pushing an empty chunk woke the reader, which read 0 bytes and took it
@@ -1815,14 +2527,31 @@ class Process {
         if (h.pty !== undefined) { const p = ptys.get(h.pty); const b = S.u8.slice(a[1], a[1] + a[2]); if (h.master) ptyMasterWrite(p, b); else ptySlaveWrite(p, b); return BigInt(a[2]); }
         if (h.sock) { const br = initWisp(); const r = br.call(br.OP.SEND, h.sock.id, a[2], 0, S.u8.slice(a[1], a[1] + a[2])); return BigInt(r.res); }
         if (!h.file) return err(E.BADF);
-        const w = fileWrite(h.file, h.append ? h.file.size : h.off.v, S.u8.slice(a[1], a[1] + a[2])); if (ioFailed()) return err(E.IO); h.off.v += w; return BigInt(w);
+        const w = fileWrite(h.file, h.append ? h.file.size : h.off.v, S.u8.slice(a[1], a[1] + a[2])); { const ie = ioFailed(); if (ie) return err(ie); } h.off.v += w; return BigInt(w);
       }
       case 'writev': { let t = 0n; for (let i = 0; i < a[2]; i++) { const p = S.r32(a[1] + i * 8), l = S.r32(a[1] + i * 8 + 4); if (!l) continue; const r = S.sys('write', [a[0], p, l]); if (r < 0n) return t > 0n ? t : r; t += r; } return t; }
-      case 'readv': { let t = 0n; for (let i = 0; i < a[2]; i++) { const p = S.r32(a[1] + i * 8), l = S.r32(a[1] + i * 8 + 4); if (!l) continue; const r = S.sys('read', [a[0], p, l]); if (r < 0n) return t > 0n ? t : r; t += r; if (Number(r) < l) break; } return t; }
-      case 'pread64': case 'pread': { const h = S.fds.get(a[0]); if (!h) return err(E.BADF); if (!h.file) return err(E.SPIPE);
-        const b = fileRead(h.file, Number(a[3]), a[2]); S.wbytes(a[1], b); return BigInt(b.length); }   // positional read, does NOT move the fd offset (git reads packs this way)
-      case 'pwrite64': case 'pwrite': { const h = S.fds.get(a[0]); if (!h || !h.file) return err(E.BADF);
-        const w = fileWrite(h.file, Number(a[3]), S.u8.slice(a[1], a[1] + a[2])); return BigInt(w); }
+      case 'readv': {
+        { const h0 = S.fds.get(a[0]); if (h0 && h0.file && h0.acc === 1) return err(E.BADF); }   // O_WRONLY
+        // A regular file is read in ONE fileRead for all the buffers, then scattered: the
+        // per-buffer loop below moved the offset and wrote guest memory after the first
+        // buffer, and in the in-process engine the second buffer's bridge read restarts the
+        // whole syscall (NeedAsync) -- the replay then read from the moved offset. musl's
+        // stdio reads files with a 2-buffer readv, so mutool saw shifted bytes and a false
+        // EOF on any /root file bigger than its first read (2026-11-09, Android/no isolation).
+        { const h = S.fds.get(a[0]);
+          if (h && h.file && !h.dir && h.std === undefined && !h.fifo && !h.spair && !h.sock && h.pty === undefined && !h.hostcall && !h.tfd && !h.devnull && !h.devzero && !h.devrandom) {
+            const iov = []; let total = 0;
+            for (let i = 0; i < a[2]; i++) { const p = S.r32(a[1] + i * 8), l = S.r32(a[1] + i * 8 + 4); if (l) { iov.push([p, l]); total += l; } }
+            const b = fileRead(h.file, h.off.v, total); { const ie = ioFailed(); if (ie) return err(ie); }
+            let done = 0;
+            for (const [p, l] of iov) { if (done >= b.length) break; const k = Math.min(l, b.length - done); S.wbytes(p, b.subarray(done, done + k)); done += k; }
+            h.off.v += b.length; return BigInt(b.length);
+          } }
+        let t = 0n; for (let i = 0; i < a[2]; i++) { const p = S.r32(a[1] + i * 8), l = S.r32(a[1] + i * 8 + 4); if (!l) continue; const r = S.sys('read', [a[0], p, l]); if (r < 0n) return t > 0n ? t : r; t += r; if (Number(r) < l) break; } return t; }
+      case 'pread64': case 'pread': { const h = S.fds.get(a[0]); if (!h) return err(E.BADF); if (!h.file) return err(E.SPIPE); if (h.acc === 1) return err(E.BADF);
+        const b = fileRead(h.file, Number(a[3]), a[2]); { const ie = ioFailed(); if (ie) return err(ie); } S.wbytes(a[1], b); return BigInt(b.length); }   // positional read, does NOT move the fd offset (git reads packs this way)
+      case 'pwrite64': case 'pwrite': { const h = S.fds.get(a[0]); if (!h || !h.file || h.acc === 0) return err(E.BADF);
+        const w = fileWrite(h.file, Number(a[3]), S.u8.slice(a[1], a[1] + a[2])); { const ie = ioFailed(); if (ie) return err(ie); } return BigInt(w); }   // a failed write was a silent 0
       case 'open': return S.openAt(S.atPath(-100, S.cstr(a[0])), a[1], a[2]);
       case 'openat': return S.openAt(S.atPath(a[0], S.cstr(a[1])), a[2], a[3]);
       case 'close': { const h = S.fds.get(a[0]); if (!h) return err(E.BADF);
@@ -1837,6 +2566,8 @@ class Process {
             && localListeners.get(h.sock.local.port) === h.sock.local) localListeners.delete(h.sock.local.port);
         if (h.sock && h.sock.id && !h.shared) initWisp().call(initWisp().OP.CLOSE, h.sock.id, 0, 0);
         S.fds.delete(a[0]); S.dirState.delete(a[0]);
+        if (h.file && lockTab.has(h.file)) { const f0 = h.file, me = S.selfPid, ofd = h.off;
+          lockDrop((f, l) => f === f0 && ((l.kind === 'posix' && l.owner === me) || (l.kind !== 'posix' && l.owner === ofd && !ofdLive(ofd)))); }
         if (h.file && h.file.brId) opfsMaybeRelease(h.file);   // last fd gone -> give the OPFS lock back
         return 0n; }
       case 'lseek': { const h = S.fds.get(a[0]); if (!h) return err(E.BADF);
@@ -1851,6 +2582,18 @@ class Process {
         if (h.devrandom) { S.putStat(a[1], { size: 0, mode: 0o020666 }); return 0n; }
         if (h.std !== undefined || h.fifo || h.sock || h.spair) { S.putStat(a[1], { size: 0, mode: (h.fifo || h.sock || h.spair) ? 0o010600 : 0o020620 }); return 0n; }
         if (h.exe) { S.putStat(a[1], { size: 1, mode: 0o100755 }); return 0n; }
+        // An open OPFS-backed file: stat THE FILE (not whatever its path names now) with its
+        // CURRENT size from the bridge -- another tab may have rewritten or replaced it, and
+        // git mmaps exactly st_size bytes (see the bridge's STAT).
+        if (h.file && h.file.br !== undefined && h.file.sym === undefined) {
+          const f = h.file, id = opfsHandle(f);
+          // A size the bridge reported moments ago (the OPEN just before -- git's open+fstat) is
+          // current: skip the round trip. Only an fd whose size is older asks again.
+          if (f.mtimeDirty) opfsSettleMtime(f, h.path);
+          if (id && !(Date.now() - (f.sizeAt || 0) < 25)) { const r = initOpfs().call(OFS.STAT, id, 0, 0, null); if (r.res >= 0) { const ab = auxBig(r); if (ab > 0) { f.size = ab - 1; f.sizeAt = Date.now(); } } }
+          S.putStat(a[1], { size: f.size, mode: f.mode, mtimeMs: f.mtimeMs, uid: f.uid ?? 0, gid: f.gid ?? 0, ino: inoOf(f) });
+          return 0n;
+        }
         return S.statPath(h.path, a[1]); }
       case 'stat': case 'lstat': { const p = S.atPath(-100, S.cstr(a[0])); let m;
         if (p === '/dev/ptmx') { S.putStat(a[1], ptyStatObj(0, true)); return 0n; }
@@ -1859,10 +2602,23 @@ class Process {
             || p === '/dev/zero' || p === '/dev/full' || p === '/dev/stdin' || p === '/dev/stdout' || p === '/dev/stderr')
           { S.putStat(a[1], { size: 0, mode: 0o020666 }); return 0n; }
         return S.statPath(p, a[1], name === 'stat'); }
-      case 'newfstatat': { const s = S.cstr(a[1]); return s === '' ? S.sys('fstat', [a[0], a[2]]) : S.statPath(S.atPath(a[0], s), a[2]); }
+      // flags (a[3]) & AT_SYMLINK_NOFOLLOW (0x100) is lstat: musl's lstat() is fstatat(AT_FDCWD,
+      // path, st, AT_SYMLINK_NOFOLLOW). This followed links regardless, so an rsync'd symlink
+      // whose target was not copied yet "failed to stat" (ENOENT). busybox calls SYS_lstat.
+      case 'newfstatat': { const s = S.cstr(a[1]); return s === '' ? S.sys('fstat', [a[0], a[2]]) : S.statPath(S.atPath(a[0], s), a[2], !((a[3] | 0) & 0x100)); }
       case 'access': case 'faccessat': case 'faccessat2': {
         const p = name === 'access' ? S.atPath(-100, S.cstr(a[0])) : S.atPath(a[0], S.cstr(a[1]));
         if (p === '/proc/self/exe') return 0n;
+        if (isProcPath(p)) {
+          const n = procNode(S, p, true); if (!n) return err(E.NOENT);
+          const want = (name === 'access' ? (a[1] | 0) : (a[2] | 0)) & 6;
+          if (n.kind !== 'redirect') return (want & 2) ? err(E.ACCES) : 0n;   // /proc itself is read-only
+          // left /proc (/proc/self/cwd/x, a followed fd link): the ordinary check on the real path
+          opfsFault(n.path); const rf = S.follow(n.path);
+          if (dirs.has(rf)) return 0n;
+          const f = files.get(rf); if (!f) return err(E.NOENT);
+          return (!want || S.mayAccess(f, want)) ? 0n : err(E.ACCES);
+        }
         if (p === '/dev/null' || p === '/dev/tty' || p === '/dev/ptmx' || p === '/dev/urandom' || p === '/dev/random'
             || p === '/dev/zero' || p === '/dev/full' || p === '/dev/stdin' || p === '/dev/stdout' || p === '/dev/stderr')
           return 0n; // devices exist (scripts' `test -e`)
@@ -1881,24 +2637,28 @@ class Process {
         if (p === '/proc/self/exe') return put('/bin/' + (S.argv[0] || 'wasm'));
         let m2; if ((m2 = p.match(/^\/proc\/self\/fd\/(\d+)$/))) { const h = S.fds.get(+m2[1]); if (!h) return err(E.BADF);
           return put(h.pty !== undefined ? (h.master ? '/dev/ptmx' : '/dev/pts/' + h.pty) : h.path ? h.path : h.std !== undefined ? '/dev/tty' : '/dev/null'); }
+        if (isProcPath(p)) { const n = procNode(S, p, false); if (!n) return err(E.NOENT);
+          if (n.kind === 'link') return put(n.target);
+          if (n.kind !== 'redirect') return err(E.INVAL);
+          opfsFault(n.path); const rl = files.get(n.path);   // /proc/self/cwd/x: x itself may be a symlink
+          if (rl && rl.sym !== undefined) return put(rl.sym); }
         return err(E.INVAL); }
-      case 'unlink': { const p = S.atPath(-100, S.cstr(a[0])); opfsFault(p); if (!files.has(p)) return err(E.NOENT);
-        if (protectedDelete(S, p)) return err(E.PERM);
-        const f = files.get(p);
-        if (f.br !== undefined) { const r = opfsPathOp(OFS.UNLINK, f.br); if (r < 0) return BigInt(r); f.brId = 0; }
-        rmEntry(p); return 0n; }
-      case 'rmdir': { const p = S.atPath(-100, S.cstr(a[0])); opfsFault(p); if (!dirs.has(p)) return err(E.NOENT);
-        if (protectedDelete(S, p)) return err(E.PERM);
-        if (dirs.get(p).size) return err(E.NOTEMPTY);
-        if (inOpfs(p) && p !== opfsMount) { const r = opfsPathOp(OFS.RMDIR, opfsRel(p)); if (r < 0 && r !== -E.NOENT) return BigInt(r); }
-        rmEntry(p); return 0n; }
-      case 'mkdir': { const p = S.atPath(-100, S.cstr(a[0])); opfsFault(p);
+      case 'unlink': return unlinkPath(S, S.atPath(-100, S.cstr(a[0])));
+      case 'rmdir': return rmdirPath(S, S.atPath(-100, S.cstr(a[0])));
+      // unlinkat(dirfd, path, flags): AT_REMOVEDIR (0x200) = rmdir. It was missing (ENOSYS), and
+      // Python's shutil.rmtree deletes through it (os.unlink/os.rmdir with dir_fd): every
+      // rmtree failed -- pip's temp-dir cleanup printed "Function not implemented" tracebacks.
+      case 'unlinkat': { const p = S.atPath(a[0], S.cstr(a[1])); return (a[2] & 0x200) ? rmdirPath(S, p) : unlinkPath(S, p); }
+      // mkdirat: rsync's receiver makes every directory with it (it was ENOSYS, so `rsync -a`
+      // of a tree failed on each subdirectory). Same semantics, relative to a dirfd.
+      case 'mkdir': case 'mkdirat': { const p = name === 'mkdir' ? S.atPath(-100, S.cstr(a[0])) : S.atPath(a[0], S.cstr(a[1])); opfsFault(p);
         // POSIX: mkdir(2) on an existing path is EEXIST. This used to call mkdirp()
         // straight away, which is idempotent, so the syscall had `mkdir -p` semantics and
         // silently succeeded on a directory that was already there. `mkdir -p` still works:
         // busybox tolerates EEXIST itself, which is exactly how it is meant to be built.
         if (dirs.has(p) || files.has(p)) return err(E.EXIST);
-        mkdirp(p);
+        mkdirp(p); if (S.cred.euid !== 0 || S.cred.egid !== 0) dirOwners.set(p, { uid: S.cred.euid, gid: S.cred.egid });
+        { const want = (name === 'mkdir' ? a[1] : a[2]) & 0o7777 & ~S.umask; if (want !== 0o755) dirSetMode(p, want); else dirModes.set(p, want); }
         // opfsLoaded is a MAP (path -> when we last listed it), not a Set. This said
         // .add(p), which threw TypeError -- and the dispatcher turns ANY handler exception
         // into -1, so every mkdir in the workspace reported EPERM "Operation not permitted"
@@ -1911,24 +2671,36 @@ class Process {
       case 'rename': case 'renameat': case 'renameat2': {
         const pa = name === 'rename' ? S.atPath(-100, S.cstr(a[0])) : S.atPath(a[0], S.cstr(a[1]));
         const pb = name === 'rename' ? S.atPath(-100, S.cstr(a[1])) : S.atPath(a[2], S.cstr(a[3]));
-        opfsFault(pa); opfsFault(pb);
+        opfsFault(pa); opfsFault(pb); pyTreeTouch(pa); pyTreeTouch(pb);
         if (!isAppPath(pb) && protectedDelete(S, pa)) return err(E.PERM);   // moving out of the workspace == deleting it
         // the new name keeps the old file's identity: mode (+x!), owner, times, symlink target
         const keepAttrs = (nf, of) => { nf.mode = of.mode; if (of.uid !== undefined) nf.uid = of.uid; if (of.gid !== undefined) nf.gid = of.gid; nf.mtimeMs = of.mtimeMs; if (of.sym !== undefined) nf.sym = of.sym; };
         if (dirs.has(pa)) {                              // directory rename: re-key the whole subtree
           if (files.has(pb)) return err(E.NOTDIR);
-          if (pb === pa || pb.startsWith(pa + '/')) return err(E.INVAL);
+          if (pb === pa) return 0n;                     // POSIX: a name onto itself does nothing
+          if (pb.startsWith(pa + '/')) return err(E.INVAL);
           if (dirs.has(pb) && dirs.get(pb).size) return err(E.NOTEMPTY);
-          if (inOpfs(pa) || inOpfs(pb)) return err(E.XDEV); // mv falls back to copy+rm through the store
+          const opa = inOpfs(pa), opb = inOpfs(pb);
+          if (opa !== opb || pa === opfsMount || pb === opfsMount) return err(E.XDEV); // RAM<->OPFS: mv copies
+          if (opa) {
+            // OPFS -> OPFS: the bridge moves every file by handle (no copying), crash-safe via
+            // its rename journal. EXDEV only when the tree holds cloud-only files (mv then
+            // copies them through the store, downloading them, as before).
+            const r = opfsPathOp(OFS.RENAMEDIR, opfsRel(pa), opfsRel(pb));
+            if (r < 0) return BigInt(r);
+            for (const k of [...opfsLoaded.keys()]) if (k === pa || k.startsWith(pa + '/') || k === pb || k.startsWith(pb + '/')) opfsLoaded.delete(k);
+          }
           rmEntry(pb);
           const paParent = pa.slice(0, pa.lastIndexOf('/')) || '/';
           const pd = dirs.get(paParent); if (pd) pd.delete(pa.slice(pa.lastIndexOf('/') + 1));
-          for (const [k, v] of [...files]) if (k.startsWith(pa + '/')) { files.delete(k); files.set(pb + k.slice(pa.length), v); }
+          for (const [k, v] of [...files]) if (k.startsWith(pa + '/')) { files.delete(k); const nk = pb + k.slice(pa.length); files.set(nk, v); if (v.br !== undefined) v.br = opfsRel(nk); }
           for (const [k, v] of [...dirs]) if (k === pa || k.startsWith(pa + '/')) { dirs.delete(k); dirs.set(pb + k.slice(pa.length), v); }
           const pbParent = pb.slice(0, pb.lastIndexOf('/')) || '/'; mkdirp(pbParent);
           dirs.get(pbParent).add(pb.slice(pb.lastIndexOf('/') + 1));
           return 0n; }
         const f = files.get(pa); if (!f) return err(E.NOENT);
+        if (dirs.has(pb)) return err(E.ISDIR);           // a file onto a directory (was EEXIST from the store)
+        if (pb === pa) return 0n;
         if (f.br !== undefined && inOpfs(pb)) {          // OPFS -> OPFS: rename in the store
           const r = opfsPathOp(OFS.RENAME, f.br, opfsRel(pb)); if (r < 0) return BigInt(r);
           rmEntry(pb); rmEntry(pa);
@@ -1949,12 +2721,18 @@ class Process {
           if ((nf.mode & 0o7777) !== (OPFS_DEFAULT_MODE & 0o7777)) opfsSaveMode(nf); return 0n; }
         rmEntry(pb); rmEntry(pa);                        // RAM -> RAM
         addFile(pb, f.data || new Uint8Array(0)); const nf = files.get(pb); nf.size = f.size; keepAttrs(nf, f); return 0n; }
-      case 'chdir': { const p = S.atPath(-100, S.cstr(a[0])); opfsFault(p); if (!dirs.has(p)) return err(E.NOTDIR); S.cwd.p = p; return 0n; }
+      case 'chdir': { let p = S.atPath(-100, S.cstr(a[0]));
+        if (isProcPath(p)) { const n = procNode(S, p, true); if (!n) return err(E.NOENT);
+          if (n.kind === 'dir') { S.cwd.p = n.path; return 0n; }
+          if (n.kind !== 'redirect') return err(E.NOTDIR);
+          p = n.path; }                  // cd /proc/self/cwd: into the real directory
+        opfsFault(p); if (!dirs.has(p)) return err(E.NOTDIR); S.cwd.p = p; return 0n; }
       case 'fchdir': { const h = S.fds.get(a[0]); if (!h || !h.dir) return err(E.BADF); S.cwd.p = h.path; return 0n; }
-      case 'getcwd': return BigInt(S.wstr(a[0], S.cwd.p, a[1]) + 1);
+      case 'getcwd': { if (te.encode(S.cwd.p).length + 1 > (a[1] >>> 0)) return err(34);   // ERANGE: was silently truncated
+        return BigInt(S.wstr(a[0], S.cwd.p, a[1]) + 1); }
       case 'chmod': case 'fchmodat': { const p = S.follow(S.atPath(name === 'chmod' ? -100 : a[0], S.cstr(name === 'chmod' ? a[0] : a[1])));
         opfsFault(p); const md = name === 'chmod' ? a[1] : a[2];
-        if (dirs.has(p)) return 0n;
+        if (dirs.has(p)) { const ow = dirOwners.get(p); if (S.cred.euid !== 0 && (ow ? ow.uid : 0) !== S.cred.euid) return err(E.PERM); dirSetMode(p, md); return 0n; }
         const f = files.get(p); if (!f) return err(E.NOENT);
         if (S.cred.euid !== 0 && (f.uid ?? 0) !== S.cred.euid) return err(E.PERM);
         f.mode = (f.mode & ~0o7777) | (md & 0o7777); opfsSaveMode(f); return 0n; }
@@ -1966,6 +2744,7 @@ class Process {
         if (S.cred.euid !== 0) return err(E.PERM);
         const f = files.get(p); if (!f && !dirs.has(p)) return err(E.NOENT);
         if (f) { const u = a[pi + 1] | 0, g = a[pi + 2] | 0; if (u !== -1) f.uid = u; if (g !== -1) f.gid = g; }
+        else { const o = dirOwners.get(p) || { uid: 0, gid: 0 }, u = a[pi + 1] | 0, g = a[pi + 2] | 0; dirOwners.set(p, { uid: u !== -1 ? u : o.uid, gid: g !== -1 ? g : o.gid }); }
         return 0n; }
       case 'fchown': { const h = S.fds.get(a[0]); if (!h || !h.file) return err(E.BADF);
         if (S.cred.euid !== 0) return err(E.PERM);
@@ -1973,8 +2752,10 @@ class Process {
       case 'umask': { const old = S.umask; S.umask = a[0] & 0o777; return BigInt(old); }
       case 'symlink': case 'symlinkat': { const tgt = S.cstr(a[0]);
         const lp = S.atPath(name === 'symlink' ? -100 : a[1], S.cstr(name === 'symlink' ? a[1] : a[2]));
-        if (files.has(lp) || dirs.has(lp)) return err(E.EXIST);
+        opfsFault(lp); if (files.has(lp) || dirs.has(lp)) return err(E.EXIST);
+        if (inOpfs(lp) && lp !== opfsMount) { const e = opfsSymlink(lp, tgt); if (e) return err(e); }
         addFile(lp, new Uint8Array(0), 0o120777); const lf = files.get(lp);
+        if (inOpfs(lp)) { lf.br = opfsRel(lp); lf.data = null; lf.size = te.encode(tgt).length; }
         lf.sym = tgt; lf.uid = S.cred.euid; lf.gid = S.cred.egid; return 0n; }
       case 'link': case 'linkat': { const oi = name === 'link' ? 0 : 1, ni = name === 'link' ? 1 : 3;
         const pa = S.follow(S.atPath(name === 'link' ? -100 : a[0], S.cstr(a[oi])));
@@ -1988,13 +2769,27 @@ class Process {
       case 'truncate': { const p = S.follow(S.atPath(-100, S.cstr(a[0]))); opfsFault(p);
         const f = files.get(p); if (!f) return err(E.NOENT);
         if (!S.mayAccess(f, 2)) return err(E.ACCES);
-        if (f.br !== undefined) { const id = opfsHandle(f, true); if (id) initOpfs().call(OFS.TRUNC, id, Number(a[1]), 0, null); }
+        if (f.br !== undefined) { const id = opfsHandle(f, true); if (id) initOpfs().call(OFS.TRUNC, id, Number(a[1]), 0, null); f.ownWrite = true; f.mtimeMs = Date.now(); }
         f.size = Number(a[1]); return 0n; }
-      case 'ftruncate': { const h = S.fds.get(a[0]); if (!h || !h.file) return err(E.BADF);
+      case 'ftruncate': { const h = S.fds.get(a[0]); if (!h || !h.file) return err(E.BADF); if (h.acc === 0) return err(E.INVAL);   // Linux: EINVAL for a read-only fd
         const f = h.file;
-        if (f.br !== undefined) { const id = opfsHandle(f, true); if (id) initOpfs().call(OFS.TRUNC, id, Number(a[1]), 0, null); }
+        if (f.br !== undefined) { const id = opfsHandle(f, true); if (id) initOpfs().call(OFS.TRUNC, id, Number(a[1]), 0, null); f.ownWrite = true; f.mtimeMs = Date.now(); }
         f.size = Number(a[1]); return 0n; }
-      case 'fsync': case 'fdatasync': return 0n; // VFS writes are synchronous; OPFS flushes at RELEASE
+      case 'fsync': case 'fdatasync': {
+        // A durability barrier for OPFS-backed files: the bridge flushes the file's writer, or
+        // (file locked elsewhere, writes in a private copy) tries to save the copy -- EIO if it
+        // cannot. A write that failed earlier on this file (port bridge: writes are answered
+        // before they land) is reported here too. RAM files have nothing to make durable.
+        const h = S.fds.get(a[0]); if (!h) return err(E.BADF);
+        const f = h.file;
+        if (!f || f.br === undefined || !f.brId) return 0n;
+        const br = initOpfs(); if (!br) return err(E.IO);
+        const r = br.call(OFS.FSYNC, f.brId, 0, 0, null);
+        const late = br.takeErr ? br.takeErr(f.brId) : 0;
+        if (late < 0) return err(ioErrno(late));
+        if (r.res < 0) return err(ioErrno(r.res));
+        return 0n;
+      }
       case 'utimensat': case 'utimes': case 'futimesat': { // touch/make set mtimes (atime not modeled)
         const UTIME_NOW = 0x3fffffff, UTIME_OMIT = 0x3ffffffe;
         let f;
@@ -2105,8 +2900,16 @@ class Process {
           // Re-read the OPFS listing at the start of each enumeration, so entries
           // created by another tab / the host app since we first looked show up
           // (the fault-in cache is once-only and would otherwise be stale).
-          if (inOpfs(h.path)) { opfsLoaded.delete(h.path); opfsLoadDir(h.path); }
-          st = { names: ['.', '..', ...dirs.get(h.path)], pos: 0 }; S.dirState.set(a[0], st);
+          if (h.proc) {
+            const n = procNode(S, h.path, true);
+            const kinds = n && n.kind === 'dir' ? n.names : new Map();
+            st = { names: ['.', '..', ...kinds.keys()], kinds, pos: 0 };
+          } else {
+            if (inOpfs(h.path)) opfsLoadDir(h.path, true, true);
+            st = { names: ['.', '..', ...(dirs.get(h.path) || [])], pos: 0 };   // || []: it may have just been found gone
+            if (h.path === '/' && !st.names.includes('proc')) st.names.push('proc');
+          }
+          S.dirState.set(a[0], st);
         }
         let off = 0;
         while (st.pos < st.names.length) {
@@ -2115,7 +2918,9 @@ class Process {
           if (off + reclen > a[2]) break;
           const full = h.path === '/' ? '/' + nm : h.path + '/' + nm;
           const fe = files.get(full);
-          const type = dirs.has(full) || nm === '.' || nm === '..' ? 4 : (fe && fe.sym !== undefined) ? 10 : 8; // DT_DIR/DT_LNK/DT_REG
+          const pk = st.kinds && st.kinds.get(nm);
+          const type = pk ? (pk === 'dir' ? 4 : pk === 'link' ? 10 : 8)
+                     : dirs.has(full) || full === '/proc' || nm === '.' || nm === '..' ? 4 : (fe && fe.sym !== undefined) ? 10 : 8; // DT_DIR/DT_LNK/DT_REG
           S.i64(a[1] + off, 1n); S.i64(a[1] + off + 8, BigInt(st.pos + 1));
           S.refresh(); S.dv.setUint16(a[1] + off + 16, reclen, true); S.u8[a[1] + off + 18] = type;
           S.wbytes(a[1] + off + 19, nb); S.u8[a[1] + off + 19 + nb.length] = 0;
@@ -2165,7 +2970,9 @@ class Process {
         if (a[1] === 2) { h.cloexec = !!(lo(a[2]) & 1); return 0n; }     // F_SETFD (FD_CLOEXEC)
         if (a[1] === 3) return BigInt(2 | (h.nonblock ? 0x800 : 0));
         if (a[1] === 4) { h.nonblock = !!(lo(a[2]) & 0x800); return 0n; }
+        if (a[1] === 5 || a[1] === 6 || a[1] === 7 || a[1] === 36 || a[1] === 37 || a[1] === 38) return lockTry(S, 'fcntl', [a[0], a[1], a[2]]);
         return 0n; }
+      case 'flock': return lockTry(S, 'flock', a);
       case 'clock_gettime': { if (a[0] === 1 || a[0] === 4) { const ms = performance.now(); S.i64(a[1], BigInt(Math.floor(ms / 1000))); S.i64(a[1] + 8, BigInt(Math.floor((ms % 1000) * 1e6))); return 0n; }
         const ms = Date.now(); S.i64(a[1], BigInt(Math.floor(ms / 1000))); S.i64(a[1] + 8, BigInt((ms % 1000) * 1e6)); return 0n; }
       case 'gettimeofday': { const ms = Date.now(); S.i64(a[0], BigInt(Math.floor(ms / 1000))); S.i64(a[0] + 8, BigInt((ms % 1000) * 1000)); return 0n; }
@@ -2305,7 +3112,28 @@ class Process {
         if (m !== null) { if (how === 0) S.sig.mask |= m; else if (how === 1) S.sig.mask &= ~m; else S.sig.mask = m; }
         return 0n; }
       case 'rt_sigpending': { S.refresh(); let m = 0n; for (const s of S.sig.pending) m |= 1n << BigInt(s - 1); S.i64(a[0], BigInt.asIntN(64, m)); return 0n; }
-      case 'sigaltstack': case 'prctl': case 'rt_sigreturn': return 0n;
+      case 'prctl': {
+        // PR_SET_NAME / PR_GET_NAME: the task name /proc/<pid>/comm and stat show. busybox
+        // runs a NOEXEC applet (sleep, yes, ...) in the forked shell WITHOUT exec and names
+        // it this way (set_task_comm), which is how pidof / killall / pgrep find it.
+        if ((a[0] | 0) === 15) { S.comm = S.cstr(a[1]).slice(0, 15); return 0n; }
+        if ((a[0] | 0) === 16) { S.wstr(a[1], S.comm || procComm(S), 16); return 0n; }
+        return 0n; }
+      case 'sigaltstack': case 'rt_sigreturn': return 0n;
+      // Not implemented, ON PURPOSE and quietly: callers try them as a fast path and fall back
+      // to read/write on ENOSYS (Python's shutil.copyfile, coreutils cp). As unknown syscalls
+      // they printed "unimplemented syscall ... this program may fail" on every file copy.
+      case 'sendfile': case 'copy_file_range': return err(E.NOSYS);
+      // posix_fadvise / readahead: ADVICE about the page cache, which this kernel does not
+      // have. Success without doing anything is what Linux returns for advice it ignores (xz
+      // calls fadvise(SEQUENTIAL) on every input; it printed "unimplemented syscall").
+      case 'fadvise': case 'fadvise64': case 'readahead': return 0n;
+      // Extended attributes: this VFS has none, so EOPNOTSUPP (95), what Linux answers on a
+      // filesystem mounted without xattr support. rsync probes lgetxattr at startup; as an
+      // unknown syscall it printed "unimplemented syscall" on every run.
+      case 'getxattr': case 'lgetxattr': case 'fgetxattr': case 'setxattr': case 'lsetxattr': case 'fsetxattr':
+      case 'listxattr': case 'llistxattr': case 'flistxattr': case 'removexattr': case 'lremovexattr': case 'fremovexattr':
+        return err(95);
       case 'futex': { const uaddr = a[0] >>> 0, fop = a[1] & 0x7f, val = a[2] | 0;
         S.refresh(); S.syncShm();
         let at = null, base = 0;
@@ -2333,7 +3161,7 @@ class Process {
         // pad, totalhigh (11 L), freehigh (12 L), mem_unit (u32, 13 L): 4 GiB total / 2 GiB free
         // in 4 KiB units (an ILP32 unsigned long cannot count 4 GiB of bytes)
         const L = S.L, p = a[0]; S.refresh(); S.u8.fill(0, p, p + 13 * L + 4);
-        S.wLong(p, 0, 1000); S.wLong(p, 4, 1 << 20); S.wLong(p, 5, 1 << 19);
+        S.wLong(p, 0, Math.floor((Date.now() - KSTART) / 1000)); S.wLong(p, 4, 1 << 20); S.wLong(p, 5, 1 << 19);   // real uptime, as /proc/uptime
         S.dv.setUint16(p + 10 * L, 1, true); S.dv.setUint32(p + 13 * L, 4096, true);
         return 0n; }
       case 'getrandom': { const b = new Uint8Array(Math.min(a[1], 65536)); crypto.getRandomValues(b); S.wbytes(a[0], b); return BigInt(b.length); }
@@ -2600,6 +3428,20 @@ class Process {
           return err(E.INTR); }
         return (back(), S).sys(name, a);
       }
+      case 'fcntl': case 'flock': {
+        // F_SETLKW / F_OFD_SETLKW / flock without LOCK_NB: wait for the lock, interruptible.
+        // Woken by any unlock in this kernel; polled every 50ms for holders in other tabs.
+        const blocking = name === 'flock' ? !((a[1] | 0) & 4) && ((a[1] | 0) & ~4) !== 8 : (a[1] === 7 || a[1] === 38);
+        if (!blocking) return (back(), S).sys(name, a);
+        for (;;) {
+          const r = (back(), S).sys(name, name === 'flock' ? [a[0], (a[1] | 0) | 4] : [a[0], a[1] === 7 ? 6 : 37, a[2]]);
+          if (r !== -BigInt(E.AGAIN)) return r;
+          let mine = null;
+          const w = await S.sigRace((fin) => { mine = fin; lockWaiters.add(fin); setTimeout(() => fin('t'), 50); });
+          lockWaiters.delete(mine);
+          if (w === 'sig') { const v = await (back(), S).onSigWakeAsync(false); if (v !== null) return v; return err(E.INTR); }
+        }
+      }
       case 'nanosleep': case 'clock_nanosleep': { // interruptible (EINTR) + TIMER_ABSTIME
         const end = Date.now() + S.sleepMs(name, a);
         while (Date.now() < end) {
@@ -2793,6 +3635,17 @@ class Process {
       }
       const name = im.name;
       if (name === '__init' || name === '__deinit') wali[name] = () => 0;
+      else if (name === '__get_init_envfile0') wali[name] = (buf, sz) => {
+        // walios libc (musl-patches/src/env/initenv.c): the environment as a NUL-separated file,
+        // like /proc/self/environ -- values may contain newlines (a multi-line GIT_EDITOR,
+        // autoconf's as_nl). Binaries built before it import __get_init_envfile below.
+        if (!S.env.length) return 0;
+        const parts = S.env.map((e) => benc(e));
+        const out = new Uint8Array(parts.reduce((n, b) => n + b.length + 1, 0));
+        let o = 0; for (const b of parts) { out.set(b, o); o += b.length + 1; }   // each entry NUL-terminated
+        addFile(`/.wali_env_${S.pid}`, out);
+        S.wstr(buf, `/.wali_env_${S.pid}`, sz); return 1;
+      };
       else if (name === '__get_init_envfile') wali[name] = (buf, sz) => {
         if (!S.env.length) return 0;
         // The env reaches a new process as a NEWLINE-SEPARATED file that wali-musl's
@@ -2815,7 +3668,7 @@ class Process {
         for (const e of S.env) { if (e.indexOf('\n') >= 0) bad.push(e.slice(0, e.indexOf('=')) || '?'); else safe.push(e); }
         if (bad.length) WARN('env: dropped ' + bad.length + ' variable(s) whose value contains a newline (' + bad.join(', ') + '): the env file is newline-separated, so a child cannot receive them');
         if (!safe.length) return 0;
-        addFile(`/.wali_env_${S.pid}`, te.encode(safe.join('\n') + '\n'));
+        addFile(`/.wali_env_${S.pid}`, benc(safe.join('\n') + '\n'));
         S.wstr(buf, `/.wali_env_${S.pid}`, sz); return 1;
       };
       else if (name === 'log_execution') { // wasm-opt --log-execution preemption hook
@@ -2825,8 +3678,8 @@ class Process {
         wali[name] = () => { if (++fuel & 0x3fff) return; S.pollTimers(); if (S.sig.pending.size) { S.sigDelivered = false; S.predeliver(); } };
       }
       else if (name === '__cl_get_argc') wali[name] = () => S.argv.length;
-      else if (name === '__cl_get_argv_len') wali[name] = (i) => te.encode(S.argv[i] || '').length;
-      else if (name === '__cl_copy_argv') wali[name] = (buf, i) => S.wstr(buf, S.argv[i] || '', 0);
+      else if (name === '__cl_get_argv_len') wali[name] = (i) => benc(S.argv[i] || '').length;
+      else if (name === '__cl_copy_argv') wali[name] = (buf, i) => S.wstrB(buf, S.argv[i] || '');
       else if (name === '__proc_exit') wali[name] = (c) => { throw new ExitError(c, true); };
       else if (name === 'setjmp' || name === 'sigsetjmp' || name === '_setjmp') wali[name] = () => 0;
       else if (name === "__wasm_thread_spawn") {
@@ -3014,18 +3867,21 @@ class Process {
       path_symlink: (optr, olen, dirfd, nptr, nlen) => { S.refresh();
         const target = td.decode(S.u8.slice(optr, optr + olen)), nn = td.decode(S.u8.slice(nptr, nptr + nlen));
         const h = S.fds.get(dirfd); const lp = norm(nn, h && h.preopen ? h.preopen : S.cwd.p);
-        if (files.has(lp) || dirs.has(lp)) return 20;                               // EEXIST
-        addFile(lp, new Uint8Array(0), 0o120777); files.get(lp).sym = target; return OK; },
+        opfsFault(lp); if (files.has(lp) || dirs.has(lp)) return 20;                // EEXIST
+        if (inOpfs(lp) && lp !== opfsMount) { const e = opfsSymlink(lp, target); if (e) return e === E.EXIST ? 20 : 29; }
+        addFile(lp, new Uint8Array(0), 0o120777); const lf = files.get(lp);
+        if (inOpfs(lp)) { lf.br = opfsRel(lp); lf.data = null; lf.size = te.encode(target).length; }
+        lf.sym = target; return OK; },
       fd_filestat_set_size: (fd, size) => { const h = S.fds.get(fd); if (!h || !h.file) return BADF;
         const n = Number(size); const f = h.file;
-        if (f.br !== undefined) { const id = opfsHandle(f, true); if (id) initOpfs().call(OFS.TRUNC, id, n, 0, null); f.size = n; return OK; }
+        if (f.br !== undefined) { const id = opfsHandle(f, true); if (id) initOpfs().call(OFS.TRUNC, id, n, 0, null); f.size = n; f.ownWrite = true; f.mtimeMs = Date.now(); return OK; }
         if (n <= f.size) { f.size = n; return OK; }
         const nd = new Uint8Array(Math.max(n, f.data ? f.data.length : 0)); if (f.data) nd.set(f.data.subarray(0, f.size)); f.data = nd; f.size = n; return OK; },
       fd_filestat_set_times: () => OK,
-      environ_sizes_get: (cptr, sptr) => { S.i32(cptr, S.env.length); S.i32(sptr, S.env.reduce((a, e) => a + te.encode(e).length + 1, 0)); return OK; },
-      environ_get: (eptr, bptr) => { let b = bptr; for (const e of S.env) { S.i32(eptr, b); eptr += 4; b += S.wstr(b, e, 0) + 1; } return OK; },
-      args_sizes_get: (cptr, sptr) => { S.i32(cptr, S.argv.length); S.i32(sptr, S.argv.reduce((a, e) => a + te.encode(e).length + 1, 0)); return OK; },
-      args_get: (aptr, bptr) => { let b = bptr; for (const a of S.argv) { S.i32(aptr, b); aptr += 4; b += S.wstr(b, a, 0) + 1; } return OK; },
+      environ_sizes_get: (cptr, sptr) => { S.i32(cptr, S.env.length); S.i32(sptr, S.env.reduce((a, e) => a + benc(e).length + 1, 0)); return OK; },
+      environ_get: (eptr, bptr) => { let b = bptr; for (const e of S.env) { S.i32(eptr, b); eptr += 4; b += S.wstrB(b, e) + 1; } return OK; },
+      args_sizes_get: (cptr, sptr) => { S.i32(cptr, S.argv.length); S.i32(sptr, S.argv.reduce((a, e) => a + benc(e).length + 1, 0)); return OK; },
+      args_get: (aptr, bptr) => { let b = bptr; for (const a of S.argv) { S.i32(aptr, b); aptr += 4; b += S.wstrB(b, a) + 1; } return OK; },
       clock_time_get: (id, prec, ptr) => { S.dv.setBigInt64(ptr, BigInt(Date.now()) * 1000000n, true); return OK; },
       random_get: (ptr, len) => { const b = new Uint8Array(len); crypto.getRandomValues(b); S.wbytes(ptr, b); return OK; },
       fd_fdstat_set_flags: () => OK, fd_sync: () => OK, fd_datasync: () => OK, sched_yield: () => OK,
@@ -3099,9 +3955,16 @@ class Process {
   }
 
   async runInWorker(opts) {
+    // A python3 that can start from a snapshot (decided before anything is built for it).
+    const pick = opts ? null : await pySnapPick(this).catch((e) => { if (pySnapDebug(this)) post('[snapshot] cold: ' + ((e && e.message) || e) + '\n', 2); return null; });
     procCount++;
     const mod = modCache.get(this.modKey);
     if (!mod) { post(`[host] no module for ${this.modKey}\n`, 2); return 127; }
+    // Take a spare BEFORE building the plan: for a module that imports its memory,
+    // makeImports hands out this.sharedMem, which has to be the memory the spare's
+    // instance was built on.
+    const spare = this.sharedMem ? null : takeSpare(this.modKey);
+    if (spare && spare.memory) this.sharedMem = spare.memory;
     const plan = this._workerPlan(mod);
     if (!plan) { post(`[host] no import signatures for ${this.modKey} (compiled without bytes)\n`, 2); return 127; }
     this._plan = plan;
@@ -3109,7 +3972,6 @@ class Process {
     // instance) but cannot read the VFS, and a parked thread cannot be handed a new
     // SharedArrayBuffer -- so one growable buffer is installed up front and every .so
     // travels through it. Growable SAB is Chrome 111+; fall back to a fixed 32MB.
-    const spare = SPARE_OK(plan, opts) ? takeSpare(this.modKey) : null;
     let bulk;
     if (spare) { bulk = spare.bulk; }
     else {
@@ -3118,27 +3980,31 @@ class Process {
     }
     this._bulk = bulk;
     const ctl = spare ? spare.ctl : new SharedArrayBuffer(KCTL.BYTES);
-    const w = spare ? spare.w : new Worker(NODE_STUB_RE.test(this.modKey) ? NODE_WORKER_URL : 'wali-proc-worker.js?v=tls1');
+    const w = spare ? spare.w : new Worker(NODE_STUB_RE.test(this.modKey) ? NODE_WORKER_URL : 'wali-proc-worker.js?v=snap3');
     this.procWorker = w;
     const st = { exit: null };
     const ready = spare ? spare.ready : new Promise((res) => { this._procReady = res; });
     // The spare may not have seen its own 'ready' yet, and installing this process's
     // onmessage below replaces the handler that was waiting for it -- so route it here.
     if (spare) this._procReady = spare.settle;
+    this._ctl = ctl;
     w.onmessage = (ev) => {
       const m = ev.data;
       if (m.t === 'ready') { this._procReady(m); return; }
+      if (m.t === 'snap-dl') { pySnapLoaderLog(this, m); return; }
+      if (m.t === 'restored' || m.t === 'restore-failed') { if (this._restoreAck) this._restoreAck(m); return; }
       if (m.t === 'warn') { post('[host] ' + m.s + '\n', 2); return; }
       if (m.t === 'trap') { post(`[host] trap in pid ${this.pid}: ${m.error}\n`, 2); return; }
       if (m.t === 'exit') { st.exit = m.code; }
     };
-    w.onerror = (ev) => { post(`[host] process worker for pid ${this.pid} failed: ${ev.message || ev}\n`, 2);
+    w.onerror = (ev) => { if (this._restoreAck) { this._restoreAck({ t: 'restore-failed', error: 'worker failed: ' + (ev.message || ev) }); return; }   // (before the guest ran: start cold)
+                          post(`[host] process worker for pid ${this.pid} failed: ${ev.message || ev}\n`, 2);
                           if (st.exit === null) st.exit = 139; Atomics.store(new Int32Array(ctl), 0, KCTL.DONE); Atomics.notify(new Int32Array(ctl), 0); };
     if (!spare) w.postMessage({ t: 'init', mod, ctl, names: plan.names, sigs: plan.sigv, bulk, memory: plan.memory });
     const r = await ready;
-    // Start the NEXT one warming while this process runs -- a build is the same few modules
-    // over and over, so the guess is nearly always right.
-    if (SPARE_OK(plan, opts)) { try { prepareSpare(this.modKey, plan); } catch (_) {} }
+    // Start the NEXT ones warming while this process runs -- a shell or a build is the same
+    // few modules over and over, so the guess is nearly always right.
+    try { prepareSpare(this.modKey, plan); } catch (_) {}
     if (!r.ok) { post(`[host] pid ${this.pid} failed to start: ${r.error}\n`, 2); w.terminate(); this.retire(); return 127; }
     this.memory = r.memory; this.membuf = null; this.refresh();
 
@@ -3160,11 +4026,41 @@ class Process {
       new Uint8Array(this.memory.buffer).set(src.subarray(0, hw));
       if (opts.onForkReady) opts.onForkReady();
       w.postMessage({ t: 'rewind', asyncifyBuf: opts.asyncifyBuf, sp: opts.sp, tls: opts.tls });
+    } else if (pick) {
+      // Start from a Python snapshot (see pySnapPick): the guest half in the worker
+      // (driveRestore in wali-proc-worker.js), then the kernel half here -- only once the
+      // worker says the copy is in place, so a failed restore leaves nothing to undo.
+      const s = pick.snap, t0 = performance.now();
+      const ack = new Promise((res) => { this._restoreAck = res; });
+      w.postMessage({ t: 'restore', snap: { mem: s.mem, len: s.len, ranges: s.ranges, dl: s.dl, table: s.table, tableLen: s.tableLen },
+                      code: pyResumeCode(this.argv, this.env),
+                      // e2e-python-snapshot.mjs: make this restore fail, to see the cold fallback work
+                      testFail: (this.env || []).includes('WALIOS_SNAPSHOT_TEST_FAIL=1') });
+      const r2 = await ack;
+      this._restoreAck = null;
+      if (r2.t !== 'restored') {
+        // Nothing of the copy ran: start this same process cold, and stop using the layer.
+        pySnaps.delete(s.layer); pySnapDead.add(s.layer);
+        self.postMessage({ t: 'py-snap-failed', layer: s.layer, why: 'restore: ' + r2.error, drop: true });
+        if (pySnapDebug(this)) post('[snapshot] restore failed, starting cold: ' + r2.error + '\n', 2);
+        try { w.terminate(); } catch (_) {}
+        this.procWorker = null; this.memory = null; this.membuf = null; this.sharedMem = null; procCount--;
+        return this.runInWorker({ cold: true });
+      }
+      this.heapBrk = s.k.heapBrk;
+      this.mmapFree = s.k.mmapFree.map((x) => ({ ...x }));
+      this.mmapLive = new Map(s.k.mmapLive);
+      for (const [sg, h] of s.k.sig) this.sig.handlers.set(sg, { ...h });
+      for (const k of s.hostcallFds || []) if (!this.fds.has(k)) { this.fds.set(k, { hostcall: { inbuf: '', chunks: [], waiters: [] }, cloexec: false }); this.nextFd = Math.max(this.nextFd, k + 1); }
+      if (pySnapDebug(this)) post(`[snapshot] '${s.layer}' (${pick.mode}): mount ${pick.mountMs.toFixed(0)}ms, restore ${(performance.now() - t0).toFixed(0)}ms ${JSON.stringify(r2.ms)}, ${(s.stat.kept / 1048576).toFixed(0)} of ${(s.len / 1048576).toFixed(0)}MB, built in ${s.stat.buildMs}ms\n`, 2);
     } else {
       w.postMessage({ t: 'run' });
     }
     const res = await this._serve(w, ctl, plan, bulk, st, true, this.pid);
     for (const t of this._threads || []) { try { t.terminate(); } catch (_) {} }
+    // This run wanted a snapshot nobody had: ask for it now that it is done, so the build
+    // (if this kernel gets to do it) runs while the result is being read.
+    if (this.pySnapWant) { try { pySnapWant(this.pySnapWant); } catch (_) {} this.pySnapWant = null; }
     if (res.replaced !== undefined) return res.replaced;   // execve: the new image owns this pid; it retires itself
     this.retire();
     return res.code;
@@ -3194,8 +4090,9 @@ class Process {
     }
     if (!WebAssembly.Module.exports(mod).some((e) => e.name === entry)) { post(`[host] pid ${this.pid}: no ${entry} export; cannot start a thread\n`, 2); return -1; }
     const tid = this._nextTid = (this._nextTid || 1) + 1;
+    if (this.sig.masks) this.sig.masks.set(tid, this.sig.mask);   // a new thread starts with its creator's mask
     const ctl = new SharedArrayBuffer(KCTL.BYTES);
-    const w = new Worker('wali-proc-worker.js?v=tls1');
+    const w = new Worker('wali-proc-worker.js?v=snap3');
     (this._threads = this._threads || []).push(w);
     const st = { exit: null };
     const ready = new Promise((res) => {
@@ -3239,6 +4136,12 @@ class Process {
   // it reports DONE. Returns { code } or, when the main thread exec'd a new image,
   // { replaced: <exit code of the image that took over this pid> }.
   async _serve(w, ctl, plan, bulk, st, isMain, tid) {
+    const rec = { P: this, f64: new Float64Array(ctl) };
+    cpuLive.add(rec);
+    try { return await this._serveLoop(w, ctl, plan, bulk, st, isMain, tid); }
+    finally { cpuLive.delete(rec); const c = cpuOfRec(rec); this.cpuMs = (this.cpuMs || 0) + c; cpuDoneMs += c; }
+  }
+  async _serveLoop(w, ctl, plan, bulk, st, isMain, tid) {
     const { names, parms, handlers } = plan;
     const I64 = 0x7e;
     const i32 = new Int32Array(ctl), i64 = new BigInt64Array(ctl);
@@ -3280,18 +4183,21 @@ class Process {
         let v;
         this.curTid = tid;      // which thread of this process is calling (gettid, set_tid_address)
         if (nm === 'wasi_snapshot_preview1.fd_read') { await this.waitReadable(args[0]); this.curTid = tid; }   // WASI's blocking read
-        if (sysname && BLOCKING.has(sysname)) {
+        if (sysname && isBlocking(sysname, args)) {
           // A blocking syscall must NOT run inline on this thread: sysAsync is the
           // promise-based twin; awaiting it keeps the event loop free, which is the
           // whole point of running guests on their own threads.
           const margs = args.map((x) => (typeof x === 'bigint' && sysname !== 'mmap') ? i64arg(x) : x);
           if (STRACE) stracePost(`[strace ${this.pid}${tid && tid !== this.pid ? '.' + tid : ''}] ${sysname}(${margs.join(', ')}) ...\n`, 2);   // entry of a blocking call: a hang shows who is parked where
-          v = await S_await(this, sysname, margs);
+          const tk = performance.now(), pr = S_await(this, sysname, margs);   // (its synchronous part counts as kernel load)
+          kBusyMs += performance.now() - tk;
+          v = await pr;
           this.curTid = tid;    // another thread's syscall may have been served meanwhile (inChild/fds key on it)
         } else {
           const h = handlers[idx];
           if (!h) throw new Error('no handler for ' + nm);
-          v = h(...args);
+          const tk = performance.now();
+          try { v = h(...args); } finally { kBusyMs += performance.now() - tk; }
         }
         ret = (typeof v === 'bigint') ? v : BigInt(Math.trunc(Number(v) || 0));
       } catch (e0) {
@@ -3420,6 +4326,7 @@ class Process {
         catch (e) { reply(BigInt(-(e && e.badf ? E.BADF : E.INVAL))); continue; }
         const proc = new Process(target.key, target.argv, ev || this.env, childFds, this.cwd.p);
         if (this.cred) proc.cred = { ...this.cred };
+        proc.umask = this.umask;   // POSIX: inherited (every child started with 022: git's shared-repo dirs came out 755 under umask 002)
         proc.ppid = this.pid; proc.pgid = this.pgid; proc.sid = this.sid;
         if (a4 >>> 16 & 1) { proc.pgid = proc.pid; proc.sid = proc.pid; }   // POSIX_SPAWN_SETSID
         const childPid = proc.pid;
@@ -3468,7 +4375,7 @@ class Process {
           const childPid = ctx.pid;
           const ccwd = this.cwd.p;   // the child's cwd: read it before the pop puts the parent's view back
           this.childStack.pop(); this.unVfork(ctx);
-          const task = Promise.resolve(startProcess(target, ev, fdsnap, ccwd, this.cred, childPid)).then((code) => {
+          const task = Promise.resolve(startProcess(target, ev, fdsnap, ccwd, this.cred, childPid, this.umask)).then((code) => {
             this.reaped.set(childPid, code === null ? 127 : code);
             releaseFds(fdsnap);
             this.childTasks.delete(childPid);
@@ -3484,7 +4391,7 @@ class Process {
         Atomics.store(i32, 3, 0);
         Atomics.store(i32, 0, KCTL.DIE);
         Atomics.notify(i32, 0);
-        const code = await startProcess(target, ev, fdsnap, this.cwd.p, this.cred, this.pid);
+        const code = await startProcess(target, ev, fdsnap, this.cwd.p, this.cred, this.pid, this.umask);
         w.terminate();
         // NOT retire(): the new image owns this pid now, and retire() does
         // procs.delete(this.pid) -- which would delete the process that just replaced us
@@ -3586,7 +4493,7 @@ class Process {
           try {
             if (sysname === 'execve') v = await S._execveInProc(map(a2));
             else if (sysname === 'posix_spawn') v = await S._posixSpawnInProc(map(a2));
-            else if (blocking) v = await Promise.race([S_await(S, sysname, map(a2)), S._goneP]);
+            else if (blocking || ((sysname === 'fcntl' || sysname === 'flock') && lockWaits(sysname, a2))) v = await Promise.race([S_await(S, sysname, map(a2)), S._goneP]);
             else v = S.sys(sysname, map(a2));
             break;
           } catch (e) {
@@ -3603,7 +4510,7 @@ class Process {
         S.pollTimers();
         if (S.shmAt.size) S.syncShm();
         S.sigDelivered = false;
-        if (blocking || special || S.sig.pending.size || S.stopped || S._dead !== undefined || Date.now() - S.lastYield >= QUANTUM_MS) return slow(a2);
+        if (blocking || ((sysname === 'fcntl' || sysname === 'flock') && lockWaits(sysname, a2)) || special || S.sig.pending.size || S.stopped || S._dead !== undefined || Date.now() - S.lastYield >= QUANTUM_MS) return slow(a2);
         let v;
         try { v = S.sys(sysname, map(a2)); }         // a value, not a promise: the guest is not suspended
         catch (e) { if (e instanceof NeedAsync) return slow(a2, e); throw e; }
@@ -3626,7 +4533,8 @@ class Process {
     }
     // libffi (walios/build/libffi): calls and closures through this instance's table, on JSPI
     // stacks of their own so a callee's syscall can still suspend.
-    if (envI) { const ffi = waliFfiImports(() => S.inst.exports, true); for (const k of Object.keys(ffi)) if (k in envI) envI[k] = ffi[k]; }
+    if (envI) { const ffi = waliFfiImports(() => S.inst.exports, true); for (const k of Object.keys(ffi)) if (k in envI) envI[k] = ffi[k];
+      if ('__wali_ffi_table_alloc' in envI) envI.__wali_ffi_table_alloc = (...a) => { S.snapUnsafe = S.snapUnsafe || 'libffi closure'; return ffi.__wali_ffi_table_alloc(...a); }; }
     // WASI: fd_read blocks BEFORE the sync shim runs (the worker loop parks in waitReadable).
     const wasi = imp.wasi_snapshot_preview1;
     if (wasi && wasi.fd_read) { const fdRead = wasi.fd_read; wasi.fd_read = new WebAssembly.Suspending(async (fd, ...rest) => { await S.waitReadable(fd); return fdRead(fd, ...rest); }); }
@@ -3648,6 +4556,7 @@ class Process {
   }
 
   async runInProc() {
+    const pick = await pySnapPick(this).catch((e) => { if (pySnapDebug(this)) post('[snapshot] cold: ' + ((e && e.message) || e) + '\n', 2); return null; });
     procCount++;
     const mod = modCache.get(this.modKey);
     if (!mod) { post(`[host] no module for ${this.modKey}\n`, 2); this.retire(); return 127; }
@@ -3657,10 +4566,116 @@ class Process {
     try { this.inst = new WebAssembly.Instance(mod, this._makeInProcImports(mod)); }
     catch (e) { post(`[host] pid ${this.pid} failed to start: ${(e && e.message) || e}\n`, 2); this.retire(); return 127; }
     this._inprocInit();
-    const res = await this._driveInProc(false);
+    let res = null;
+    if (pick) {
+      // Start from a Python snapshot (see pySnapPick). Everything before the guest runs is
+      // synchronous here; if it fails, a fresh instance starts cold and the layer is retired.
+      const t0 = performance.now();
+      let ms = null, why = '';
+      try { ms = this._restoreInProc(pick.snap); } catch (e) { why = String((e && e.message) || e); }
+      if (why) {
+        pySnaps.delete(pick.snap.layer); pySnapDead.add(pick.snap.layer);
+        self.postMessage({ t: 'py-snap-failed', layer: pick.snap.layer, why: 'restore: ' + why });   // (its own copy: nothing for the host to drop)
+        if (pySnapDebug(this)) post('[snapshot] restore failed, starting cold: ' + why + '\n', 2);
+        this.sharedMem = null; this.dlHandles = []; this.dlRecs = []; this.tableLog = new Map(); this.snapUnsafe = '';
+        try { this.inst = new WebAssembly.Instance(mod, this._makeInProcImports(mod)); }
+        catch (e) { post(`[host] pid ${this.pid} failed to start: ${(e && e.message) || e}\n`, 2); this.retire(); return 127; }
+        this._inprocInit();
+      } else {
+        if (pySnapDebug(this)) post(`[snapshot] '${pick.snap.layer}' (${pick.mode}, in-process): mount ${pick.mountMs.toFixed(0)}ms, restore ${(performance.now() - t0).toFixed(0)}ms ${JSON.stringify(ms)}, ${(pick.snap.stat.kept / 1048576).toFixed(0)} of ${(pick.snap.len / 1048576).toFixed(0)}MB, built in ${pick.snap.stat.buildMs}ms\n`, 2);
+        res = await this._driveRestoreInProc(pyResumeCode(this.argv, this.env));
+      }
+    }
+    if (!res) res = await this._driveInProc(false);
+    if (this.pySnapWant) { try { pySnapWant(this.pySnapWant); } catch (_) {} this.pySnapWant = null; }
     if (res.replaced !== undefined) return res.replaced;   // execve: the new image owns this pid; it retires itself
     this.retire();
     return res.code;
+  }
+
+  // The in-process half of a Python snapshot restore (the worker engine's is driveRestore in
+  // wali-proc-worker.js): re-link the side modules at their recorded bases, refill the table,
+  // copy the memory in, then the kernel's own state for the process. Throws before touching
+  // anything the caller cannot throw away.
+  _restoreInProc(snap) {
+    const t0 = performance.now();
+    const exp = this.inst.exports, table = exp.__indirect_function_table, mem = this.memory;
+    const initLen = mem.buffer.byteLength;
+    if (snap.len > initLen) mem.grow(Math.ceil((snap.len - initLen) / PAGE));
+    if (table.length < snap.tableLen) table.grow(snap.tableLen - table.length);
+    const Gi = (v) => new WebAssembly.Global({ value: 'i32', mutable: false }, v >>> 0);
+    const BASE = new Set(['memory', '__indirect_function_table', '__stack_pointer', '__memory_base', '__table_base']);
+    this.dlRecs = []; this.tableLog = new Map();
+    for (const r of snap.dl) {
+      const env = { memory: mem, __indirect_function_table: table, __stack_pointer: exp.__stack_pointer,
+                    __memory_base: Gi(r.memBase), __table_base: Gi(r.tableBase) };
+      const gotMem = {}, gotFunc = {};
+      let inst = null;
+      for (const im of WebAssembly.Module.imports(r.mod)) {
+        if (im.module === 'env') {
+          if (BASE.has(im.name)) continue;
+          const sym = exp[im.name];
+          env[im.name] = (sym !== undefined) ? sym : ((...a) => {
+            const own = inst && inst.exports[im.name];
+            if (typeof own === 'function') return own(...a);
+            const alt = this.dlHandles.map((h) => h.inst.exports[im.name]).find((f) => typeof f === 'function');
+            if (alt) return alt(...a);
+            throw new Error('[host] unresolved dynamic fn: ' + im.name);
+          });
+        } else if (im.module === 'GOT.mem') {
+          const sym = exp[im.name];
+          gotMem[im.name] = new WebAssembly.Global({ value: 'i32', mutable: true }, (sym && sym.value !== undefined) ? sym.value : Number(sym || 0));
+        } else if (im.module === 'GOT.func') {
+          gotFunc[im.name] = new WebAssembly.Global({ value: 'i32', mutable: true }, (r.gotFunc[im.name] || 0) >>> 0);
+        }
+      }
+      const waliProxy = new Proxy(this.wali || {}, { get: (t, n) => t[n] || (typeof n !== 'string' ? undefined : (() => { throw new Error('[host] unresolved wali import from side module: ' + n); })) });
+      inst = new WebAssembly.Instance(r.mod, { env, wali: waliProxy, 'GOT.mem': gotMem, 'GOT.func': gotFunc });
+      for (const k in gotMem) { const e = inst.exports[k]; if (e && e.value !== undefined) gotMem[k].value = r.memBase + e.value; }
+      if (r.tlsBase >= 0 && typeof inst.exports.__wasm_init_tls === 'function') inst.exports.__wasm_init_tls(r.tlsBase);
+      this.dlHandles.push({ inst, symCache: new Map() });
+      this.dlRecs.push(r);
+    }
+    for (const [idx, d] of snap.table) {
+      const fn = d.h < 0 ? exp[d.name] : this.dlHandles[d.h].inst.exports[d.name];
+      if (typeof fn !== 'function') throw new Error('table slot ' + idx + ': no export ' + d.name);
+      table.set(idx, fn); this.tableLog.set(idx, d);
+    }
+    const tLink = performance.now() - t0;
+    if ((this.env || []).includes('WALIOS_SNAPSHOT_TEST_FAIL=1')) throw new Error('test failure (WALIOS_SNAPSHOT_TEST_FAIL)');
+    const src = new Uint8Array(snap.mem, 0, snap.len), dst = new Uint8Array(mem.buffer);
+    const put = (a, b) => { a = Math.max(0, a); b = Math.min(b, snap.len); if (b > a) dst.set(src.subarray(a, b), a); };
+    put(0, initLen);
+    for (const r of snap.dl) { put(r.memBase, r.memBase + (r.memSize || 0)); if (r.tlsBase >= 0) put(r.tlsBase, r.tlsBase + (r.tlsSize || 0)); }
+    for (const [a, b] of snap.ranges) put(a, b);
+    this.membuf = null; this.refresh();
+    this.heapBrk = snap.k.heapBrk;
+    this.mmapFree = snap.k.mmapFree.map((x) => ({ ...x }));
+    this.mmapLive = new Map(snap.k.mmapLive);
+    for (const [sg, h] of snap.k.sig) this.sig.handlers.set(sg, { ...h });
+    for (const k of snap.hostcallFds || []) if (!this.fds.has(k)) { this.fds.set(k, { hostcall: { inbuf: '', chunks: [], waiters: [] }, cloexec: false }); this.nextFd = Math.max(this.nextFd, k + 1); }
+    return { link: Math.round(tLink), copy: Math.round(performance.now() - t0 - tLink) };
+  }
+
+  // Run a restored Python: through its C API, each call on a JSPI stack of its own so the
+  // syscalls it makes can suspend. The resume code ends in sys.exit (ExitError).
+  async _driveRestoreInProc(code) {
+    const exp = this.inst.exports, P = (f) => WebAssembly.promising(f);
+    try {
+      const bytes = te.encode(code);
+      const p = await P(exp.malloc)(bytes.length + 1);
+      this.membuf = null; this.refresh(); this.u8.set(bytes, p); this.u8[p + bytes.length] = 0;
+      await P(exp.PyGILState_Ensure)();
+      const r = await P(exp.PyRun_SimpleString)(p);
+      await P(exp.exit)(r === 0 ? 0 : 1);
+      return { code: this._dead !== undefined ? this._dead : (r === 0 ? 0 : 1) };
+    } catch (e0) {
+      const e = unwrapJS(e0);
+      if (e instanceof ReplacedError) { const c = await e.task; return { replaced: (c === null ? 127 : c) & 0xff }; }
+      if (e instanceof ExitError) return { code: e.code & 0xff };
+      post(`[host] trap in pid ${this.pid} (restored python): ${(e && e.stack) || e}\n`, 2);
+      return { code: 139 };
+    }
   }
 
   // Run the guest until it exits, building a fork child at every Asyncify unwind.
@@ -3750,7 +4765,7 @@ class Process {
       const childPid = ctx.pid;
       const ccwd = this.cwd.p;   // the child's cwd: read it before the pop puts the parent's view back
       this.childStack.pop(); this.unVfork(ctx);
-      const task = Promise.resolve(startProcess(target, ev, fdsnap, ccwd, this.cred, childPid)).then((code) => {
+      const task = Promise.resolve(startProcess(target, ev, fdsnap, ccwd, this.cred, childPid, this.umask)).then((code) => {
         this.reaped.set(childPid, code === null ? 127 : code);
         releaseFds(fdsnap);
         this.childTasks.delete(childPid);
@@ -3762,7 +4777,7 @@ class Process {
       this.childTasks.set(childPid, task);
       return CHILD_DONE;
     }
-    throw new ReplacedError(Promise.resolve(startProcess(target, ev, fdsnap, this.cwd.p, this.cred, this.pid)));
+    throw new ReplacedError(Promise.resolve(startProcess(target, ev, fdsnap, this.cwd.p, this.cred, this.pid, this.umask)));
   }
 
   // posix_spawn(pathPtr, argvPtr, envpPtr, fdmapPtr, fdmapLen) -> pid | -errno, in-process.
@@ -3780,6 +4795,7 @@ class Process {
     catch (e) { return err(e && e.badf ? E.BADF : E.INVAL); }
     const proc = new Process(target.key, target.argv, ev || this.env, childFds, this.cwd.p);
     if (this.cred) proc.cred = { ...this.cred };
+    proc.umask = this.umask;
     proc.ppid = this.pid; proc.pgid = this.pgid; proc.sid = this.sid;
     if (a4 >>> 16 & 1) { proc.pgid = proc.pid; proc.sid = proc.pid; }     // POSIX_SPAWN_SETSID
     const childPid = proc.pid;
@@ -3801,12 +4817,12 @@ class Process {
   spawnForkChildMeta(childPid) {
     const child = new Process(this.modKey, this.argv, this.env, new Map(), this.cwd.p);
     procs.delete(child.pid);
-    child.pid = childPid; child.pgid = this.pgid; child.sid = this.sid; child.ppid = this.pid; child.cred = { ...this.cred };
+    child.pid = childPid; child.pgid = this.pgid; child.sid = this.sid; child.ppid = this.pid; child.cred = { ...this.cred }; child.umask = this.umask;
     for (const [b, at] of this.shmAt) child.shmAt.set(b, { seg: at.seg, shadow: at.shadow.slice() });
     procs.set(childPid, child);
     child.fds = new Map([...this.fds].map(([k, v]) => { v.shared = true; return [k, { ...v }]; }));
     for (const v of child.fds.values()) child.bumpFifo(v);
-    child.heapBrk = this.heapBrk; child.ctty = this.ctty; child.ilp32 = this.ilp32;
+    child.heapBrk = this.heapBrk; child.ctty = this.ctty; child.ilp32 = this.ilp32; child.comm = this.comm;   // fork keeps the task name; execve resets it
     child.nextFd = this.nextFd; child.umask = this.umask;
     child.sig.handlers = new Map(this.sig.handlers); child.sig.mask = this.sig.mask;
     return child;
@@ -3817,6 +4833,7 @@ class Process {
 let lazyTars = {};                 // moduleKey -> [[tarUrl, mountPrefix], ...] (loaded once, on first exec)
 let mmapPool = true;               // recycle munmap'd anon regions; run-message `noMmapPool` disables (A/B only)
 const lazyTarsDone = new Set();
+const lazyTarsBusy = new Map();     // moduleKey -> the companion mount in flight
 // lazily fetch+compile a manifest URL on first use, plus any companion tar the
 // program needs (e.g. python.wasm -> pylib.tar.gz at /py). Returns whether the
 // key is (now) compiled. VFS keys are compiled at resolve time.
@@ -3832,8 +4849,25 @@ async function ensureModule(key) {
       post(`[host] loaded ${key} (${(performance.now() - t0).toFixed(0)}ms)\n`, 2);
     } catch (e) { post(`[host] failed to load ${key}: ${e.message || e}\n`, 2); return false; }
   }
-  if (lazyTars[key] && !lazyTarsDone.has(key)) { lazyTarsDone.add(key); // companion data (stdlib, etc.)
-    for (const [url, prefix] of lazyTars[key]) { try { await loadTar(url, prefix); } catch (e) { post(`[host] companion ${url} failed: ${e.message || e}\n`, 2); } }
+  // companion data (python's stdlib at /py, etc.). Marked done only once every tar is in: it
+  // used to be marked BEFORE mounting, so a mount that failed or was cut short (a `timeout 30
+  // python3` killed during the first, slow pylib mount on a loaded PC) left /py empty and
+  // every later python3 in that kernel died "No module named 'encodings'" (lean A/B co2vol,
+  // 2026-11-10: 80 failed runs). A failed mount is retried by the next exec; concurrent
+  // execs share the one mount in flight.
+  if (lazyTars[key] && !lazyTarsDone.has(key)) {
+    let p = lazyTarsBusy.get(key);
+    if (!p) {
+      p = (async () => {
+        let ok = true;
+        for (const [url, prefix] of lazyTars[key]) { try { await loadTar(url, prefix); } catch (e) { ok = false; post(`[host] companion ${url} failed: ${e.message || e}\n`, 2); } }
+        if (ok) lazyTarsDone.add(key);
+        lazyTarsBusy.delete(key);
+        return ok;
+      })();
+      lazyTarsBusy.set(key, p);
+    }
+    await p;
   }
   return true;
 }
@@ -3939,7 +4973,29 @@ function pathSearch(p, cwd) {
   return null;
 }
 
+// Resolve symlinks in a VFS path (every component, the last one too: exec follows it), max 8
+// hops -- Process.follow without a process. A program reached through a symlinked DIRECTORY
+// was "not found": git's compiled-in exec-path is a symlink to /usr/libexec/git-core, and
+// `git submodule` died "die() should not be called in child" when GIT_EXEC_PATH was unset.
+function vfsFollow(p, depth = 0) {
+  if (depth > 8) return p;
+  const segs = p.split('/').filter(Boolean); let cur = '';
+  for (let i = 0; i < segs.length; i++) {
+    cur += '/' + segs[i];
+    if (inOpfs(cur)) opfsFault(cur);
+    const f = files.get(cur);
+    if (f && f.sym !== undefined) {
+      const tgt = f.sym.startsWith('/') ? f.sym : cur.slice(0, cur.lastIndexOf('/') + 1) + f.sym;
+      return vfsFollow(norm(tgt + '/' + segs.slice(i + 1).join('/'), '/'), depth + 1);
+    }
+  }
+  return p;
+}
 async function resolveExec(p, argv, cwd, selfKey, depth) {
+  if (p.includes('/') && !resolveModuleKey(p, selfKey)) {
+    const vp = vfsFollow(p.startsWith('/') ? norm(p, '/') : norm(p, cwd));
+    if (vp !== (p.startsWith('/') ? norm(p, '/') : norm(p, cwd))) p = vp;
+  }
   if (!resolveModuleKey(p, selfKey)) {
     const onPath = pathSearch(p, cwd);
     if (onPath) p = onPath;
@@ -3948,8 +5004,14 @@ async function resolveExec(p, argv, cwd, selfKey, depth) {
     const sc = scriptExecRewrite(p, argv, cwd);
     if (sc) return resolveExec(sc.path, sc.argv, cwd, selfKey, (depth || 0) + 1);
   }
-  const key = resolveExecKey(p, cwd, selfKey);
+  let key = resolveExecKey(p, cwd, selfKey);
   if (!key) return null;
+  // ash is built FEATURE_SH_STANDALONE: an applet name never goes through $PATH, a plain
+  // applet re-execs as execve("/proc/self/exe", ["tree", ...]). So a package `apk add`ed
+  // under an applet's name must be swapped in HERE, or `apk add tree` keeps running
+  // busybox's tree. NOEXEC/NOFORK applets (find, which, ...) never exec; apk says so.
+  const a0 = argv && argv[0] ? String(argv[0]).split('/').pop() : '';
+  if (a0 && key === manifest['busybox'] && pkgAdded.has(a0) && manifest[a0]) key = manifest[a0];
   if (!(await ensureModule(key))) return null;   // LAZY: fetch + compile on first exec
   return { key, argv };
 }
@@ -3979,21 +5041,439 @@ function spawnFdTable(parentFds, spec) {
   return out;
 }
 
+// ---- Python snapshots --------------------------------------------------------------------
+// python3 is slow to START here: booting the interpreter is ~0.4s, and importing the packages
+// people actually use costs seconds (prod binary, 2026-11-08: requests 2.6s, openpyxl 4.1s,
+// pandas 6-7s, the eight most used together 10-12s). A snapshot is a python3 that has already
+// imported them, copied at that moment. A later `python3 -c CODE`, `python3 SCRIPT` or
+// `python3 - <<EOF` whose source imports one of those packages starts as a copy of it.
+//
+// An accelerator only. Every run it does not cover starts cold, exactly as before: the
+// in-process (JSPI) engine, interpreter flags, -m, a program that imports none of the
+// packages, a layer not built yet, a different PYTHON*/package environment, a failed restore.
+//
+//   layers   the HOST names them (run message `pySnap`), smallest first, each a superset of
+//            the one before: e.g. office (requests, openpyxl, pypdf, docx, PIL, reportlab),
+//            then data (office + pandas, numpy). A run uses the smallest one covering its
+//            imports, so a docx script does not pay pandas' memory.
+//   build    the first run that needs a layer starts cold; when it exits the kernel asks the
+//            host for the layer ('py-snap-need'), and the host either hands over one another
+//            kernel built or lets this one build it ('py-snap-build'): a hidden python3
+//            (pySnapBuild, its own pid range, immune to killall/stopall) imports the layer and
+//            writes /dev/walios-snapshot. It runs while the model reads the result.
+//   capture  that write copies the process's memory (non-zero pages only) and the kernel's
+//            state for it (brk, mmap lists, signal dispositions, /dev/hostcall fds, the bundles
+//            mounted so far); the process's worker then sends what only it knows: its side
+//            modules (numpy, lxml, PIL, ...) with their memory/table/TLS bases and every
+//            function-table slot it filled (wali-proc-worker.js sendSnapLog).
+//   share    a finished snapshot goes to the host, which gives it to every kernel of the tab.
+//            Nothing is copied: the memory is a SharedArrayBuffer and the side modules are
+//            compiled modules. The host drops them when the tab's last kernel goes.
+//   restore  the bundles the snapshot had mounted are mounted here first; the worker re-links
+//            the side modules at their recorded bases, copies the memory in and runs the
+//            program through Python's C API (driveRestore, pyResumeCode). If anything before
+//            the program fails, the process starts cold instead and the layer is dropped.
+let pySnapCfg = null;              // { layers: [{ name, pkgs: ['pandas', 'PIL.Image', ...] }] }; null = off
+const pySnaps = new Map();         // layer -> ready snapshot (built here or handed over by the host)
+const pySnapCapture0 = new Map();  // pid -> snapshot being captured (waiting for its worker's 'snap-dl')
+const pySnapAsked = new Set();     // layers asked of the host, not answered yet
+const pySnapDead = new Set();      // layers that failed in this kernel: not asked for again
+let pySnapNextPid = 1 << 20;       // builders' pids: a run resets nextPid, and a builder outlives runs
+const mountedTars = new Map();     // url -> prefix: every bundle this kernel has unpacked
+// Top-level module names changed in Python's import roots by something other than python's own
+// bundles: a write, delete or rename by a program, or an `apk add`ed module (the farm has its
+// own requests, lxml, urllib3, ... that land over the bundle's). A snapshot holding one of
+// them would run the OLD code where a cold start imports the new: such runs start cold, and
+// this kernel builds no snapshot that holds one. (__pycache__ writes are Python's own.)
+const pyTouched = new Set();
+const PY_TREES = ['/site-packages/_shims/', '/site-packages/', '/py/Lib/', '/ext/'];
+function pyTreeTouch(p) {
+  if (typeof p !== 'string' || p.includes('/__pycache__/')) return;
+  for (const t of PY_TREES) if (p.startsWith(t)) {
+    const name = p.slice(t.length).split('/')[0].split('.')[0].split('-')[0];
+    if (name) pyTouched.add(name);
+    return;
+  }
+}
+// Environment a package may read AT IMPORT (so a snapshot made under other values would
+// behave differently from a cold start): it must be the same as the builder's, or start cold.
+const PY_SNAP_ENV = (k) => /^(PYTHON|SANDPIE_LAZY_PKGS$|SANDPIE_HOST_RPC$|SANDPIE_ASYNCIO$|NUMPY|NPY_|OMP_|OPENBLAS|MKL_|PANDAS|MPL|MATPLOTLIB|SSL_|REQUESTS_|CURL_CA|LANG$|LC_)/.test(k);
+// What the builder's environment keeps. Never secrets or the session token: the snapshot's
+// memory is shared by every conversation of the tab.
+const PY_SNAP_BUILD_ENV = (k) => PY_SNAP_ENV(k) || /^(PATH|HOME|USER|LOGNAME|SHELL|TERM|NO_COLOR|CONFIG_SITE|TMPDIR|TZ)$/.test(k);
+const envMap = (env) => { const o = {}; for (const kv of env || []) { const i = kv.indexOf('='); if (i > 0) o[kv.slice(0, i)] = kv.slice(i + 1); } return o; };
+const pyEngine = () => (INPROC ? 'inproc' : 'worker');
+const pyIsPython = (key) => !!(pySnapCfg && key && (key === manifest.python3 || key === manifest.python));
+const pySnapDebug = (P) => STRACE || (P && (P.env || []).includes('WALIOS_SNAPSHOT_DEBUG=1'));
+const topOf = (n) => String(n).split('.')[0];
+// What a layer offers: what it asks for, plus the non-stdlib modules its snapshot turned out
+// to hold (lxml under docx, dateutil under pandas, ...).
+const pyLayerOffer = (L) => { const s = pySnaps.get(L.name); return new Set([...L.pkgs.map(topOf), ...(s ? s.mods : [])]); };
+
+// Top-level modules a program imports, read from its source. A heuristic, and allowed to be:
+// a name it misses only costs the speed-up, an extra one only picks a bigger layer.
+function pyImportsOf(src) {
+  const out = new Set();
+  const re = /^[ \t]*(?:from[ \t]+([A-Za-z_]\w*)[\w.]*[ \t]+import\b|import[ \t]+([^\n#]+))/gm;
+  for (const m of String(src).replace(/;/g, '\n').matchAll(re)) {
+    if (m[1]) { out.add(m[1]); continue; }
+    for (const part of m[2].split(',')) { const n = part.trim().split(/[\s.]/)[0]; if (/^[A-Za-z_]\w*$/.test(n)) out.add(n); }
+  }
+  return out;
+}
+// The source of `python3 SCRIPT` (its first 512KB is plenty to see the imports).
+function pyReadScript(P, path) {
+  const vp = path.startsWith('/') ? norm(path, '/') : norm(path, P.cwd.p);
+  opfsFault(vp);
+  const f = files.get(vp);
+  if (!f || f.sym !== undefined || (f.data === undefined && f.br === undefined)) return null;
+  const n = Math.min(f.size, 512 << 10);
+  const b = f.br !== undefined ? fileRead(f, 0, n) : f.data.subarray(0, n);
+  return td.decode(b);
+}
+// The source of `python3 -` / `python3 <<EOF`: what is in the stdin pipe, without taking it.
+// A here-document is written by the shell before (or right as) python starts, so wait a moment
+// for the writer to finish; a pipe from a long-running producer just gets what is there.
+async function pyPeekStdin(P) {
+  const h = P.fds.get(0);
+  if (!h || !h.fifo || h.end !== 'r') return null;
+  for (let i = 0; i < 60 && h.fifo.writers > 0; i++) await new Promise((r) => setTimeout(r, 5));
+  let n = 0; for (const c of h.fifo.chunks) n += c.length;
+  const all = new Uint8Array(n); let o = 0;
+  for (const c of h.fifo.chunks) { all.set(c, o); o += c.length; }
+  return td.decode(all);
+}
+
+// A synchronous VFS step that may need the file bridge: in the in-process engine a bridge call
+// that has to wait throws NeedAsync instead; wait for it and run the step again (as the
+// syscalls do).
+async function pySync(fn) {
+  for (;;) { try { return fn(); } catch (e) { if (!(e instanceof NeedAsync)) throw e; await e.promise; } }
+}
+// Which snapshot this process should start from, or null (= cold). Async: it may read the
+// script, peek stdin and mount the bundles the snapshot needs.
+async function pySnapPick(P) {
+  if (!pySnapCfg || P.pySnapLayer || !pyIsPython(P.modKey)) return null;
+  const e = envMap(P.env);
+  if (e.WALIOS_NO_SNAPSHOT) return null;
+  const a = P.argv || [];
+  let src = null, mode = '';
+  if (a[1] === '-c' && a.length >= 3) { mode = 'c'; src = a[2]; }
+  else if (a[1] === '-' || (a.length === 1 && P.fds.get(0) && P.fds.get(0).fifo)) { mode = 'stdin'; src = await pyPeekStdin(P); }
+  else if (a[1] && !a[1].startsWith('-')) { mode = 'script'; src = await pySync(() => pyReadScript(P, a[1])); }
+  if (src === null) return null;
+  const layers = pySnapCfg.layers;
+  const want = pyImportsOf(src);
+  const offers = layers.map(pyLayerOffer);
+  const need = [...want].filter((n) => offers.some((o) => o.has(n)));
+  // A program that imports none of them: only a layer meant for any program ('any', the
+  // stdlib one) -- a big layer would cost it memory for nothing.
+  if (!need.length && !layers[0].any) return null;
+  // The smallest layer that has everything needed (else the biggest), and the smallest READY
+  // one from there up -- a bigger layer holds everything a smaller one does.
+  let target = need.length ? layers.findIndex((L, i) => need.every((n) => offers[i].has(n))) : 0;
+  if (target < 0) target = layers.length - 1;
+  const top = need.length ? layers.length : 1;
+  const envOk = (s) => { for (const k of new Set([...Object.keys(e), ...Object.keys(s.env)])) if (PY_SNAP_ENV(k) && e[k] !== s.env[k]) return false; return true; };
+  let snap = null;
+  let at = -1, other = false;
+  for (let i = target; i < top && !snap; i++) {
+    const s = pySnaps.get(layers[i].name);
+    if (s && s.modKey === P.modKey && s.engine === pyEngine() && envOk(s)) { snap = s; at = i; } else if (s) other = true;
+  }
+  if (snap) {
+    const changed = (snap.loaded || snap.mods).filter((n) => pyTouched.has(n));
+    if (changed.length) { if (pySnapDebug(P)) post(`[snapshot] cold: changed here since the snapshot: ${changed.join(', ')}\n`, 2); return null; }
+  }
+  // A file next to the program (or in the current directory, for -c and stdin) that has the
+  // name of a module the snapshot holds would be imported INSTEAD of it by a cold start.
+  if (snap) {
+    let dir = P.cwd.p;
+    if (mode === 'script') { const vp = a[1].startsWith('/') ? norm(a[1], '/') : norm(a[1], P.cwd.p); dir = vp.slice(0, vp.lastIndexOf('/')) || '/'; }
+    for (const n of (snap.loaded || snap.mods)) {
+      const base = (dir === '/' ? '' : dir) + '/' + n;
+      await pySync(() => { opfsFault(base + '.py'); opfsFault(base); });
+      if (files.has(base + '.py') || dirs.has(base)) {
+        if (pySnapDebug(P)) post(`[snapshot] cold: ${base} would shadow the snapshot's ${n}\n`, 2);
+        return null;
+      }
+    }
+  }
+  // The layer this run should have had is asked for when the run exits (runInWorker) --
+  // also when a bigger one served it, so the next such run costs less memory.
+  if (at !== target && !(other && !snap)) P.pySnapWant = { layer: layers[target], modKey: P.modKey, env: P.env };
+  if (!snap) {
+    if (pySnapDebug(P)) post(`[snapshot] cold: no '${layers[target].name}' snapshot yet (imports ${need.join(', ') || 'nothing heavy'})\n`, 2);
+    return null;
+  }
+  // The bundles it was built with (numpy, docs, ...) must be here too: the restored Python
+  // already believes they are mounted, and its packages read more of their files later.
+  const t0 = performance.now();
+  for (const [url, prefix] of snap.tars) if (!mountedTars.has(url)) {
+    try { await loadTar(url, prefix); } catch (err) { if (pySnapDebug(P)) post(`[snapshot] cold: bundle ${url}: ${err.message || err}\n`, 2); return null; }
+  }
+  return { snap, mode, mountMs: performance.now() - t0 };
+}
+
+// A run needed a layer nobody has: ask the host (once). It answers with a snapshot another
+// kernel built, or tells this kernel to build it.
+function pySnapWant(w) {
+  const L = w.layer;
+  if (!pySnapCfg || pySnapDead.has(L.name) || pySnapAsked.has(L.name)) return;
+  pySnapAsked.add(L.name);
+  pySnapCfg.want = pySnapCfg.want || new Map();
+  pySnapCfg.want.set(L.name, w);
+  self.postMessage({ t: 'py-snap-need', layer: L.name, local: INPROC || undefined });   // (in-process: this kernel's own copy)
+}
+function pySnapBuild(name) {
+  const w = pySnapCfg && pySnapCfg.want && pySnapCfg.want.get(name);
+  if (!w) { self.postMessage({ t: 'py-snap-failed', layer: name, why: 'nothing to build from' }); return; }
+  const L = w.layer;
+  const code = [
+    'import os, sys, json, gc',
+    "base = {m.split('.')[0] for m in sys.modules}",
+    'ok = []',
+    'for n in ' + JSON.stringify(L.pkgs) + ':',
+    '    try:',
+    '        __import__(n)',
+    '        ok.append(n)',
+    '    except Exception:',
+    '        pass',
+    "loaded = sorted({m.split('.')[0] for m in sys.modules} - base)",
+    "mods = sorted(set(loaded) - set(sys.stdlib_module_names))",
+    // Only what the shipped bundles provide: a package installed in THIS conversation (pip,
+    // apk) is not in the other conversations the snapshot is shared with.
+    "home = ('/py/', '/ext/', '/site-packages/')",
+    "own = [n for n, m in list(sys.modules.items()) if getattr(m, '__file__', None) and not m.__file__.startswith(home)]",
+    'if own:',
+    "    sys.exit('not from the bundles: ' + ', '.join(own[:5]))",
+    // Everything imported so far lives as long as the process: keep the cyclic GC of every
+    // restored run from walking it again and again.
+    'gc.collect()',
+    'gc.freeze()',
+    "fd = os.open('/dev/walios-snapshot', os.O_WRONLY)",
+    'try:',
+    '    os.write(fd, json.dumps({"layer": ' + JSON.stringify(L.name) + ', "mods": mods, "loaded": loaded, "ok": ok}).encode())',
+    'finally:',
+    '    os.close(fd)',
+  ].join('\n');
+  const env = (w.env || []).filter((kv) => PY_SNAP_BUILD_ENV(kv.slice(0, kv.indexOf('='))));
+  const fds = new Map([[0, { devnull: true }], [1, { devnull: true }], [2, { devnull: true }]]);
+  const P = new Process(w.modKey, ['python3', '-c', code], env, fds, '/tmp');
+  procs.delete(P.pid); P.pid = pySnapNextPid++; P.pgid = P.sid = P.pid; P.ppid = 0; procs.set(P.pid, P);
+  P.pySnapLayer = L.name; P.daemon = true;
+  const t0 = P.pySnapT0 = performance.now();
+  P.run().then((rc) => setTimeout(() => {   // (its worker's 'snap-dl' may still be on the way)
+    if (pySnaps.has(L.name) && pySnaps.get(L.name).builtBy === P.pid) return;
+    pySnapCapture0.delete(P.pid);
+    pySnapDead.add(L.name);
+    self.postMessage({ t: 'py-snap-failed', layer: L.name, why: 'builder exited ' + rc + ' after ' + Math.round(performance.now() - t0) + 'ms without a snapshot' });
+  }, 1000), (err) => {
+    pySnapDead.add(L.name);
+    self.postMessage({ t: 'py-snap-failed', layer: L.name, why: String((err && err.message) || err) });
+  });
+}
+// The host handed over a snapshot (built by another kernel of the tab, or by this one).
+function pySnapAccept(s) {
+  if (!s || !s.layer) return;
+  pySnaps.set(s.layer, s);
+  pySnapAsked.delete(s.layer);
+}
+
+// The bundles a snapshot needs mounted: python's own (stdlib, extras) and the lazy package
+// bundles it pulled in -- never anything else this kernel unpacked (a conversation's saved VM
+// state, apk packages): those belong to this conversation, not to the tab.
+function pyBundlesMounted(S) {
+  const ok = new Set((lazyTars[S.modKey] || []).map((x) => x[0]));
+  try { for (const v of Object.values(JSON.parse(envMap(S.env).SANDPIE_LAZY_PKGS || '{}'))) if (Array.isArray(v)) ok.add(v[0]); } catch (_) {}
+  return [...mountedTars].filter(([u]) => ok.has(u));
+}
+// A builder wrote /dev/walios-snapshot. Returns '' or why it was refused.
+function pySnapCapture(S, fd, payload) {
+  if (!S.pySnapLayer) return 'only a snapshot builder can write here';
+  if (!INPROC && (!S.procWorker || !S._ctl)) return 'no process worker';
+  if (S._threads && S._threads.length) return 'the process has threads';
+  let info; try { info = JSON.parse(payload); } catch (_) { return 'bad request'; }
+  { const mine = (info.loaded || []).filter((n) => pyTouched.has(n)); if (mine.length) return 'changed in this kernel: ' + mine.join(', '); }
+  // /dev/hostcall channels (sitecustomize's bundle mounts) are re-created at the same numbers
+  // in each restored process; any other open file would be a dangling handle in the copy.
+  const hostcallFds = [], extra = [];
+  for (const [k, h] of S.fds) { if (k <= 2 || k === fd) continue; if (h && h.hostcall) hostcallFds.push(k); else extra.push(k); }
+  if (extra.length) return 'open files: fds ' + extra.join(',');
+  S.refresh();
+  const t0 = performance.now();
+  const len = S.memory.buffer.byteLength;
+  const src = new Uint8Array(S.memory.buffer, 0, len);
+  const mem = INPROC ? new ArrayBuffer(len) : new SharedArrayBuffer(len);
+  const dst = new Uint8Array(mem);
+  // Only non-zero pages are copied, and only they are copied back on restore: a fresh
+  // process's memory is already zero there (the parts instantiation writes are handled in
+  // driveRestore).
+  const ranges = [];
+  const w64 = new BigUint64Array(S.memory.buffer, 0, len >> 3);
+  const P8 = PAGE >> 3;
+  for (let pg = 0, npg = Math.ceil(len / PAGE); pg < npg; pg++) {
+    let nz = false;
+    for (let i = pg * P8, e = Math.min((pg + 1) * P8, w64.length); i < e; i++) if (w64[i] !== 0n) { nz = true; break; }
+    if (!nz) continue;
+    const a = pg * PAGE, b = Math.min(a + PAGE, len);
+    const last = ranges[ranges.length - 1];
+    if (last && last[1] === a) last[1] = b; else ranges.push([a, b]);
+  }
+  for (const [a, b] of ranges) dst.set(src.subarray(a, b), a);
+  const kept = ranges.reduce((t, [a, b]) => t + b - a, 0);
+  pySnapCapture0.set(S.pid, {
+    layer: S.pySnapLayer, engine: pyEngine(), modKey: S.modKey, builtBy: S.pid, mem, len, ranges, mods: info.mods || [], loaded: info.loaded || [],
+    env: envMap(S.env), hostcallFds, tars: pyBundlesMounted(S),
+    k: { heapBrk: S.heapBrk, mmapFree: S.mmapFree.map((x) => ({ ...x })), mmapLive: [...S.mmapLive],
+         sig: [...S.sig.handlers].map(([s, h]) => [s, { ...h }]) },
+    stat: { captureMs: Math.round(performance.now() - t0), buildMs: Math.round(performance.now() - (S.pySnapT0 || t0)), bytes: len, kept },
+  });
+  // The side modules and table slots: in-process they are right here; a process worker sends
+  // its own after this reply (wali-proc-worker.js KSNAP).
+  if (INPROC) {
+    const table = S.inst.exports.__indirect_function_table;
+    pySnapLoaderLog(S, { unsafe: S.snapUnsafe || '', dl: (S.dlRecs || []).slice(), table: [...(S.tableLog || new Map())], tableLen: table ? table.length : 0 });
+  } else Atomics.store(new Int32Array(S._ctl), 8, 1);
+  return '';
+}
+// The builder's worker sent its side modules and table slots ('snap-dl'): the snapshot is whole.
+function pySnapLoaderLog(P, m) {
+  const s = pySnapCapture0.get(P.pid);
+  if (!s) return;
+  pySnapCapture0.delete(P.pid);
+  if (m.unsafe) { pySnapDead.add(s.layer); self.postMessage({ t: 'py-snap-failed', layer: s.layer, why: m.unsafe }); return; }
+  Object.assign(s, { dl: m.dl, table: m.table, tableLen: m.tableLen, at: Date.now() });
+  s.stat.sideModules = m.dl.length; s.stat.tableSlots = m.table.length;
+  pySnaps.set(s.layer, s);
+  pySnapAsked.delete(s.layer);
+  // In-process snapshots stay in this kernel: without SharedArrayBuffer, handing one to the
+  // host (and on to other kernels) would COPY it each time. The host only learns it is built.
+  if (s.engine === 'inproc') self.postMessage({ t: 'py-snap-ready', layer: s.layer, local: true });
+  else self.postMessage({ t: 'py-snap-ready', snap: s });
+}
+
+// Run by PyRun_SimpleString in the restored interpreter: make it THIS process (environment,
+// argv, fresh random state, timezone, stdio buffering, import caches, a new __main__) and run
+// the program the way `python3 -c` / `python3 SCRIPT` / `python3 -` would, ending in sys.exit
+// so Python finalizes and exits normally.
+function pyResumeCode(argv, env) {
+  const body = `
+def _walios_resume(argv, env):
+    import os, sys, types, builtins, importlib
+    for k in list(os.environ):
+        if k not in env:
+            del os.environ[k]
+    for k, v in env.items():
+        if os.environ.get(k) != v:
+            os.environ[k] = v
+    sys.orig_argv = list(argv)
+    import random
+    random.seed()
+    np = sys.modules.get('numpy')
+    if np is not None:
+        try:
+            np.random.seed()
+        except Exception:
+            pass
+    import time
+    try:
+        time.tzset()
+    except Exception:
+        pass
+    unbuf = bool(os.environ.get('PYTHONUNBUFFERED'))
+    for f in (sys.stdout, sys.stderr):
+        try:
+            f.reconfigure(line_buffering=(f is sys.stderr) or f.isatty(), write_through=unbuf)
+        except Exception:
+            pass
+    # Relative sys.path entries ('' = the current directory) were resolved to the builder's
+    # directory when their finders were made: drop them so they are made again here.
+    for k in list(sys.path_importer_cache):
+        if not k or not os.path.isabs(k):
+            del sys.path_importer_cache[k]
+    # site-packages directories that appeared after the snapshot was made (apk add, pip
+    # install): a cold start's site.py would have put them on sys.path, .pth files included.
+    try:
+        import site
+        dirs = list(site.getsitepackages())
+        if site.ENABLE_USER_SITE:
+            dirs.insert(0, site.getusersitepackages())
+        for d in dirs:
+            if d not in sys.path and os.path.isdir(d):
+                site.addsitedir(d)
+        # A cold start's sitecustomize runs AFTER site.py added those, so what it appends
+        # (/usr/lib/sandpie, the app's own modules) comes last there too.
+        if '/usr/lib/sandpie' in sys.path:
+            sys.path.remove('/usr/lib/sandpie')
+            sys.path.append('/usr/lib/sandpie')
+    except Exception:
+        pass
+    importlib.invalidate_caches()
+    main = types.ModuleType('__main__')
+    main.__builtins__ = builtins
+    if len(argv) == 1 or argv[1] == '-':
+        sys.argv = list(argv[1:]) or ['']
+        src, fname = sys.stdin.buffer.read(), '<stdin>'
+    elif argv[1] == '-c':
+        sys.argv = ['-c'] + list(argv[3:])
+        src, fname = argv[2], '<string>'
+    else:
+        path = argv[1]
+        sys.argv = list(argv[1:])
+        sys.path[0] = os.path.dirname(os.path.realpath(path))
+        with open(path, 'rb') as fh:
+            src = fh.read()
+        fname = os.path.abspath(path)
+        main.__file__ = fname
+        main.__cached__ = None
+    sys.modules['__main__'] = main
+    import linecache
+    linecache.clearcache()
+    code = None
+    try:
+        code = compile(src, fname, 'exec')
+        # python3 -c shows its source in tracebacks (keyed by the code object, which is
+        # how CPython registers it: warnings, which look up by file name, do not see it).
+        if fname == '<string>':
+            reg = getattr(linecache, '_register_code', None)
+            if reg is not None:
+                reg(code, src, fname)
+            else:
+                linecache.cache[fname] = (len(src), None, src.splitlines(True), fname)
+        exec(code, main.__dict__)
+    except SystemExit:
+        raise
+    except BaseException as e:
+        import traceback
+        tb = e.__traceback__
+        while tb is not None and tb.tb_frame.f_code is not code:
+            tb = tb.tb_next
+        traceback.print_exception(type(e), e, tb)
+        sys.exit(130 if isinstance(e, KeyboardInterrupt) else 1)
+    sys.exit(0)
+`;
+  return 'exec(compile(' + JSON.stringify(body) + ", '<walios-resume>', 'exec'))\n"
+    + '_walios_resume(__import__("json").loads(' + JSON.stringify(JSON.stringify(argv)) + '), __import__("json").loads(' + JSON.stringify(JSON.stringify(envMap(env))) + '))\n';
+}
+
 // Start a resolved program as a process on its own worker. `asPid` is the pid of the
 // image it replaces -- execve keeps pid, pgid and ppid -- otherwise it gets a fresh one.
 // Returns a promise of the exit code (null = could not start).
-function startProcess(target, envp, fdTable, cwd, cred, asPid) {
+function startProcess(target, envp, fdTable, cwd, cred, asPid, umask) {
   const proc = new Process(target.key, target.argv, envp, fdTable, cwd);
+  if (umask !== undefined) proc.umask = umask;
   if (STRACE) stracePost(`[strace ${asPid || proc.pid}] exec ${target.key} ${JSON.stringify(target.argv.slice(0, 8))}\n`, 2);
   if (cred) proc.cred = { ...cred };
   if (asPid) {
     const old = procs.get(asPid); procs.delete(proc.pid); proc.pid = asPid;
+    if (old && umask === undefined) proc.umask = old.umask;   // execve keeps the umask
     proc.pgid = old ? old.pgid : asPid; proc.sid = old ? old.sid : asPid;
     if (old && old.ppid) proc.ppid = old.ppid;
     // POSIX: the signal mask and PENDING signals survive execve (handlers reset). A kill
     // that raced the child between fork and exec used to vanish with the old Process
     // object -- `sleep 5 & kill $!` then ran the full 5s and reported 0.
-    if (old) { proc.sig.mask = old.sig.mask; for (const s of old.sig.pending) proc.sig.pending.add(s); }
+    if (old) { proc.sig.mask = old.sig.mask; for (const s of old.sig.pending) proc.sig.pending.add(s); proc.startMs = old.startMs || proc.startMs; }
     else for (const Q of procs.values()) if (Q.childTasks && Q.childTasks.has(asPid)) { proc.ppid = Q.pid; break; }
     procs.set(asPid, proc);
   }
@@ -4014,7 +5494,8 @@ self.onmessage = async (ev) => {
   if (m.t === 'opfs-port') { opfsPort = m.port; return; }
   if (m.t === 'add-pkg') { // register a package into the live manifest -> runnable (lazy-compiled on first exec)
     if (m.name && m.url) {
-      manifest[m.name] = m.url;
+      manifest[m.name] = m.url; pkgAdded.add(m.name);
+      pkgAddedMsgs.set(m.name, { name: m.name, url: m.url, tars: m.tars, lazyTars: m.lazyTars });
       // lazyTars is keyed by MODULE URL (see ensureModule), not by name. `tars` is the
       // repo index's [[url, prefix], ...] for this binary; `lazyTars` is the older
       // {url: tars} object form terminal.html sends -- merge it as-is.
@@ -4027,9 +5508,23 @@ self.onmessage = async (ev) => {
       if (!files.has(bp)) { mkdirp('/bin'); addFile(bp, te.encode('#!wali-manifest\n'), 0o100755); }
     }
     return; }
-  if (m.t === 'hostcall-reply') { hostcallReply(m.id, m.reply); return; }   // the host answered a /dev/hostcall request
+  // a host call may have written files under /root (dbx get, soffice, look's renders): re-read
+  // listings from now on, or the very next command misses them for OPFS_LIST_TTL (2026-11-10)
+  if (m.t === 'hostcall-reply') { opfsEpoch = Date.now(); hostcallReply(m.id, m.reply); return; }
+  // Python snapshots (see pySnapPick): one built by another kernel of the tab, the go-ahead
+  // to build one here, or the host dropping one.
+  if (m.t === 'py-snap') { pySnapAccept(m.snap); return; }
+  if (m.t === 'py-snap-build') { if (pySnapCfg) pySnapBuild(m.layer); else self.postMessage({ t: 'py-snap-failed', layer: m.layer, why: 'snapshots are off here' }); return; }
+  if (m.t === 'py-snap-drop') { pySnaps.delete(m.layer); return; }   // the host answered a /dev/hostcall request
+  if (m.t === 'vm-snapshot') {   // per-conversation VM state; see vmSnapshot
+    let r;
+    try { r = vmSnapshot(m.roots || ['/tmp', '/usr/local', '/opt'], m.max || (128 << 20)); }
+    catch (e) { r = { error: String((e && e.message) || e) }; }
+    r.pkgs = [...pkgAddedMsgs.values()];
+    self.postMessage(Object.assign({ t: 'vm-snapshot', id: m.id }, r), r.buf ? [r.buf.buffer] : []);
+    return; }
   if (m.t === 'mount-tar') {   // lazy package bundle, requested by the guest on an import miss
-    loadTar(m.url, m.prefix).then(() => self.postMessage({ t: 'tar-mounted', url: m.url, ok: true }),
+    loadTar(m.url, m.prefix, pyTreeTouch).then(() => self.postMessage({ t: 'tar-mounted', url: m.url, ok: true }),
                                   (e) => self.postMessage({ t: 'tar-mounted', url: m.url, ok: false, err: String(e && e.message || e) }));
     return; }
   if (m.t === 'opfs-sab') { opfsSab = m.sab; return; }
@@ -4043,7 +5538,7 @@ self.onmessage = async (ev) => {
     // had already done, every time. groupExit() is the same teardown exit_group uses, so a
     // parked wait4 or a blocked read is released rather than left hanging.
     // 137 = 128 + SIGKILL, what a shell reports for a killed job.
-    for (const P of [...procs.values()]) { try { P.groupExit(137); } catch (_) {} }
+    for (const P of [...procs.values()]) { if (P.daemon) continue; try { P.groupExit(137); } catch (_) {} }   // (a snapshot builder is the kernel's, not the run's)
     self.postMessage({ t: 'killed-all' });
     return; }
   // SUSPEND / RESUME. killall preserves the FILESYSTEM but destroys the RUN: a ./configure
@@ -4058,7 +5553,7 @@ self.onmessage = async (ev) => {
   // so it can fall back to killing rather than silently leave something burning CPU.
   if (m.t === 'stopall' || m.t === 'contall') {
     const sig = m.t === 'stopall' ? SIG.STOP : SIG.CONT;
-    const all = [...procs.values()];
+    const all = [...procs.values()].filter((P) => !P.daemon);
     for (const P of all) { try { postSignal(P, sig); } catch (_) {} }
     const settle = () => {
       const parked = all.filter((P) => procs.has(P.pid) && P.stopped).length;
@@ -4103,6 +5598,7 @@ self.onmessage = async (ev) => {
     STRACE = !!m.strace;
     opfsEpoch = Date.now();   // listings from earlier runs are refreshed on first use (see opfsLoadDir)
     if (m.engine === 'inproc') INPROC = true;
+    pySnapCfg = (m.pySnap && Array.isArray(m.pySnap.layers) && m.pySnap.layers.length) ? { layers: m.pySnap.layers, want: pySnapCfg && pySnapCfg.want } : null;
     if (INPROC && !INPROC_AVAILABLE) throw new Error('this browser has neither SharedArrayBuffer (cross-origin isolation) nor JSPI (WebAssembly.Suspending); walios cannot run here');
     if (INPROC) post(`[host] engine: in-process (JSPI${typeof SharedArrayBuffer === 'function' ? ', forced' : ', no SharedArrayBuffer'})\n`, 2);
     artFallback = m.artFallback || {};   // CDN url -> this server's copy (see fetchArt); before the first tar
@@ -4175,13 +5671,15 @@ self.onmessage = async (ev) => {
     const t0 = performance.now();
     // Live gauges for the terminal header: total wasm memory across processes,
     // live process count, and cumulative syscalls (the page derives a rate = speed).
+    // (+ the walios monitor's CPU / kernel-load / per-process numbers: statsSnapshot)
+    let tickAt = performance.now();
     const statsTimer = setInterval(() => {
-      let mem = 0; for (const p of procs.values()) { try { mem += p.memory.buffer.byteLength; } catch {} }
-      self.postMessage({ t: 'stats', mem, procs: procs.size, syscalls: syscallTotal, ms: performance.now() - t0 });
+      const now = performance.now(), lag = Math.max(0, now - tickAt - 1000); tickAt = now;
+      try { self.postMessage(Object.assign(statsSnapshot(t0), { lag: Math.round(lag) })); } catch (_) {}
     }, 1000);
     let code;
     try { code = await root.run(); }
-    finally { clearInterval(statsTimer); }
+    finally { clearInterval(statsTimer); try { self.postMessage(Object.assign(statsSnapshot(t0), { lag: 0, done: true })); } catch (_) {} }
     if (opfsBr) { try { opfsBr.call(OFS.RELEASE, 0, 0, 0, null); } catch {}
       for (const f of files.values()) { if (f.brRel) { clearTimeout(f.brRel); f.brRel = 0; } if (f.brId) f.brId = 0; } }
     straceFlush();
