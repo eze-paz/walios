@@ -319,6 +319,9 @@ fi
 # A compile that fails in ELF-only inline assembly gets one retry without it (wali-noelfasm).
 e=\$(mktemp); $L/$drv "\${F[@]}" "\${A[@]}" "\${LATE[@]}" 2>"\$e"; rc=\$?
 if [ \$rc != 0 ] && grep -q '<inline asm>' "\$e" && $TC/bin/wali-noelfasm $L/$drv "\${F[@]}" "\${A[@]}" "\${LATE[@]}"; then rm -f "\$e"; exit 0; fi
+# An ELF data-only assembly file (ICU's genccode/pkgdata: ".type x,%object" + .long rows) gets
+# one retry as the same bytes in C (wali-elfdata).
+if [ \$rc != 0 ] && $TC/bin/wali-elfdata $L/$drv "\${F[@]}" "\${A[@]}" "\${LATE[@]}"; then rm -f "\$e"; exit 0; fi
 cat "\$e" >&2; rm -f "\$e"; exit \$rc
 EOF
   chmod +x bin/wali-$d
@@ -392,6 +395,82 @@ done
 rm -rf "$t"; exit $rc
 EOF
 chmod +x bin/wali-noelfasm
+# ELF data-only assembly (.s/.S): sections, labels, alignment and data directives, nothing
+# executable -- what data embedders write (ICU's pkgdata -m static: "Expected label,@type
+# declaration, got: %" in clang's wasm assembler, R61). wali-elfdata <compiler command>:
+# preprocess the one source, turn each label's bytes into a C array (same name, alignment,
+# visibility, const for .rodata), compile that. Anything else in the file: exit 1, no retry.
+cat > bin/wali-elfdata <<'EOF'
+#!/bin/bash
+cc=$1; shift
+src="" P=() skip="" dropx=""
+for a in "$@"; do
+  if [ -n "$dropx" ]; then dropx=""; continue; fi
+  if [ -n "$skip" ]; then skip=""; P+=("$a"); continue; fi
+  case "$a" in *.s|*.S|*.sx|*.asm) [ -f "$a" ] && { [ -n "$src" ] && exit 1; src=$a; continue; } ;; esac
+  case "$a" in -x) dropx=1; continue;; -xassembler*) continue;; esac
+  P+=("$a")
+  case "$a" in -o|-MF|-MT|-MQ|-include|-I|-D|-U) skip=1;; esac
+done
+[ -n "$src" ] || exit 1
+t=$(mktemp -d)
+E=(); oi=0
+for a in "${P[@]}"; do case "$a" in -c) E+=(-E);; *) E+=("$a");; esac; done
+for i in "${!E[@]}"; do [ "${E[$i]}" = -o ] && { E[$((i+1))]=$t/s.s; oi=1; }; done
+[ $oi = 1 ] || E+=(-o "$t/s.s")
+case "$src" in *.s) cp "$src" "$t/s.s";; *) "$cc" "${E[@]}" -x assembler-with-cpp "$src" 2>/dev/null || { rm -rf "$t"; exit 1; };; esac
+perl -e '
+  my (%glob, %hid, @syms, $cur, $sec, $align) = ();
+  $sec = ".text";
+  sub num { my $v = shift; $v =~ s/^\s+|\s+$//g; return undef unless $v =~ /^-?(0x[0-9a-fA-F]+|0[0-7]*|[1-9][0-9]*)$/; return $v =~ /^-?0x/i ? (($v =~ /^-/) ? -hex(substr($v,1)) : hex($v)) : ($v =~ /^-?0[0-7]/ ? oct($v) : $v + 0); }
+  sub put { my ($n, $v) = @_; die "data outside a label\n" unless $cur; for my $i (0..$n-1) { push @{$cur->{b}}, ($v >> (8*$i)) & 0xff; } }
+  sub str { my $s = shift; my @o; while (length $s) { if ($s =~ s/^\\([0-7]{1,3})//) { push @o, oct($1) } elsif ($s =~ s/^\\x([0-9a-fA-F]+)//) { push @o, hex($1) & 0xff } elsif ($s =~ s/^\\(.)//s) { my %e = (n=>10,t=>9,r=>13,"0"=>0,"\\"=>92,"\""=>34,b=>8,f=>12); push @o, exists $e{$1} ? $e{$1} : ord($1) } else { $s =~ s/^(.)//s; push @o, ord($1) } } return @o; }
+  open my $f, "<", $ARGV[0] or die;
+  while (my $l = <$f>) {
+    next if $l =~ /^\s*#/;
+    $l =~ s{/\*.*?\*/}{}g; $l =~ s/\s+$//; $l =~ s/^\s+//; next if $l eq "";
+    while ($l =~ s/^([A-Za-z_.\$][\w.\$]*):\s*//) {
+      my $name = $1;
+      die "label outside data\n" unless $sec =~ /^\.(rodata|data|bss)/;
+      $cur = { n => $name, b => [], a => $align || 1, ro => scalar($sec =~ /^\.rodata/) }; push @syms, $cur; $align = 0;
+    }
+    next if $l eq "";
+    my ($d, $r) = $l =~ /^(\.[\w.]+)\s*(.*)$/ or die "instruction: $l\n";
+    if ($d =~ /^\.(globl|global)$/) { $glob{$_} = 1 for split /\s*,\s*/, $r }
+    elsif ($d eq ".hidden") { $hid{$_} = 1 for split /\s*,\s*/, $r }
+    elsif ($d =~ /^\.(type|size|file|ident|local|weak|cfi_\w+|addrsig|addrsig_sym)$/) {}
+    elsif ($d eq ".section") { ($sec) = $r =~ /^"?([^",\s]+)/ }
+    elsif ($d =~ /^\.(rodata|data|bss|text)$/) { $sec = $d }
+    elsif ($d =~ /^\.(balign|align)$/) { my ($n) = split /\s*,\s*/, $r; $n = num($n); die "align\n" unless defined $n; $cur && @{$cur->{b}} ? do { push @{$cur->{b}}, 0 while @{$cur->{b}} % $n } : ($align = $n) }
+    elsif ($d eq ".p2align") { my ($n) = split /\s*,\s*/, $r; $n = 1 << num($n); $cur && @{$cur->{b}} ? do { push @{$cur->{b}}, 0 while @{$cur->{b}} % $n } : ($align = $n) }
+    elsif ($sec =~ /^\.(note|comment|gnu|debug)/) {}
+    elsif ($d =~ /^\.(long|int|4byte)$/) { for (split /\s*,\s*/, $r) { my $v = num($_); die "value $_\n" unless defined $v; put(4, $v) } }
+    elsif ($d =~ /^\.(byte)$/) { for (split /\s*,\s*/, $r) { my $v = num($_); die "value $_\n" unless defined $v; put(1, $v) } }
+    elsif ($d =~ /^\.(short|2byte|value|hword)$/) { for (split /\s*,\s*/, $r) { my $v = num($_); die "value $_\n" unless defined $v; put(2, $v) } }
+    elsif ($d =~ /^\.(quad|8byte)$/) { for (split /\s*,\s*/, $r) { my $v = num($_); die "value $_\n" unless defined $v; put(8, $v) } }
+    elsif ($d =~ /^\.(zero|skip|space)$/) { my ($n, $v) = split /\s*,\s*/, $r; put(1, defined $v ? num($v) : 0) for 1..num($n) }
+    elsif ($d =~ /^\.(ascii|asciz|string)$/) { while ($r =~ /"((?:[^"\\]|\\.)*)"/g) { my @c = str($1); push @c, 0 if $d ne ".ascii"; die "data outside a label\n" unless $cur; push @{$cur->{b}}, @c } }
+    else { die "directive $d\n" }
+  }
+  die "no data\n" unless @syms;
+  print "/* wali-elfdata: from ELF data-only assembly */\n";
+  for my $s (@syms) {
+    my $n = @{$s->{b}} || 1; my $vis = $hid{$s->{n}} ? "__attribute__((visibility(\"hidden\"))) " : "";
+    printf "%s%s%sunsigned char %s[%d] __attribute__((aligned(%d), used)) = {", ($glob{$s->{n}} ? "" : "static "), $vis, ($s->{ro} ? "const " : ""), $s->{n}, $n, $s->{a};
+    my @b = @{$s->{b}}; @b = (0) unless @b;
+    for my $i (0..$#b) { print(($i % 24 ? "" : "\n"), $b[$i], ","); }
+    print "\n};\n";
+  }
+' "$t/s.s" > "$t/s.c" 2>/dev/null || { rm -rf "$t"; exit 1; }
+K=(); skip=""
+for a in "${P[@]}"; do
+  if [ -n "$skip" ]; then skip=""; continue; fi
+  case "$a" in -MF|-MT|-MQ) skip=1;; -MD|-MMD|-MP) ;; *) K+=("$a");; esac
+done
+"$cc" "${K[@]}" -Wno-unused-command-line-argument -x c "$t/s.c"; rc=$?
+rm -rf "$t"; exit $rc
+EOF
+chmod +x bin/wali-elfdata
 # `ld -v` as ELF lld answers it, "(compatible with GNU linkers)": libtool decides by that word
 # whether the linker can build shared libraries at all (with_gnu_ld) -- without it every -module
 # and every shared library stopped at "cannot build a shared library" or got no archive_cmds
