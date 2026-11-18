@@ -25,7 +25,7 @@ cd git-$GITV
 MAKEVARS=(
   CC="$CC" AR="$AR" RANLIB="$RANLIB"
   uname_S=Linux uname_M=x86_64 uname_R=6.0 HOST_CPU=x86_64
-  NO_CURL=YesPlease NO_OPENSSL=YesPlease NO_GETTEXT=YesPlease NO_ICONV=YesPlease NO_EXPAT=YesPlease
+  NO_CURL=YesPlease NO_OPENSSL=YesPlease NO_GETTEXT=YesPlease NO_EXPAT=YesPlease
   NO_TCLTK=YesPlease NO_PERL=YesPlease NO_PYTHON=YesPlease NO_GITWEB=YesPlease NO_REGEX=YesPlease
   NO_UNIX_SOCKETS=YesPlease NO_INSTALL_HARDLINKS=YesPlease HAVE_ALLOCA_H=YesPlease
   NO_MMAP= NO_PTHREADS=
@@ -55,8 +55,6 @@ mkdir -p ../gc/usr/libexec/git-core && cp $SCRIPTS git-sh-i18n--envsubst ../gc/u
 mkdir -p ../gc/home/aezequiel/libexec && ln -s /usr/libexec/git-core ../gc/home/aezequiel/libexec/git-core
 chmod 755 ../gc/usr/libexec/git-core/git-*
 head -1 ../gc/usr/libexec/git-core/git-submodule
-tar czf "$OUT/git-core-$GITV.tar.gz" -C ../gc usr home
-ls -la "$OUT"
 
 # Candidate git.wasm with REAL fork() (Asyncify, as farm/ci/asyncify-fork.txt programs): the
 # shipped git uses the vfork protocol, whose child branch runs inside the parent until it
@@ -83,3 +81,12 @@ make -j"$(nproc)" "${MAKEVARS[@]}" prefix=/usr CFLAGS="-O2 -I$PWD/../zinst/inclu
 "$TC/binaryen/bin/wasm-opt" --asyncify --pass-arg=asyncify-imports@wali.SYS_fork -O2 git -o "$OUT/git-asyncfork.wasm"
 node -e 'const m=new WebAssembly.Module(require("fs").readFileSync(process.argv[1])); const i=WebAssembly.Module.imports(m).map(x=>x.name); console.log("env import:", i.filter(n=>/init_envfile/.test(n)).join(","))' "$OUT/git-asyncfork.wasm"
 ls -la "$OUT/git-asyncfork.wasm"
+# iconv(1) (iconv.c, on musl's iconv(3)): Linux has the command, busybox has no applet, and
+# git's tests pipe through it (t7102). Ships in git-core.tar.gz at /usr/bin/iconv. Built here,
+# after the libc env patch, so it reads the NUL-separated environment like the git above.
+mkdir -p ../gc/usr/bin
+"$CC" -O2 "$HERE/iconv.c" -o ../gc/usr/bin/iconv
+head -c4 ../gc/usr/bin/iconv | od -An -tx1 | grep -qi "00 61 73 6d" || { echo "!! iconv is not wasm"; exit 1; }
+chmod 755 ../gc/usr/bin/iconv
+tar czf "$OUT/git-core-$GITV.tar.gz" -C ../gc usr home
+ls -la "$OUT"
