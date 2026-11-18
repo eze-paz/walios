@@ -109,10 +109,14 @@ jobs:
       - name: Build-tool debs (cached for every build job)
         uses: actions/cache@v4
         id: apt
-        with: { path: '~/aptc', key: "apt-${{ hashFiles('farm/ci/apt-tools.sh') }}-${{ github.run_id }}" }
+        # restore-keys: an earlier run's debs when the mirror stalls for this one (R61: the plan job's
+        # download and then every build job's mirror install hung, 33 min each; 2 runs lost)
+        with: { path: '~/aptc', key: "apt-${{ hashFiles('farm/ci/apt-tools.sh') }}-${{ github.run_id }}", restore-keys: "apt-${{ hashFiles('farm/ci/apt-tools.sh') }}-" }
       - if: steps.apt.outputs.cache-hit != 'true'
         run: |
           . farm/ci/apt-tools.sh
+          if ls ~/aptc/archives/*.deb >/dev/null 2>&1 && [ -d ~/aptc/lists ] && [ -d ~/aptc/libtool ]; then
+            echo "an earlier run's debs: no mirror"; du -sh ~/aptc; exit 0; fi
           A="-o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30"
           D="-o Dir::Cache::archives=$HOME/aptc/archives --download-only"
           mkdir -p ~/aptc/archives/partial ~/aptc/lists

@@ -3,5 +3,5 @@
   "max": 600,
   "chunk": 3,
   "publish": true,
-  "note": "R61b canary (rerun: R61 lost 8 jobs to a stalled apt mirror) (TC v44): host.js runs native ELF execs under WALI_HOST_ENV (pkgdata: cannot resolve /bin/sh); shim posix_spawn/posix_spawnp on walios fork -- musl's needs clone(CLONE_VM), so system()/popen() failed (ICU's pkgdata install stopped before icu-uc.pc; harfbuzz/pango)"
+  "note": "R61c canary (plan job reuses an earlier run's debs: R61, R61b lost half their jobs to a stalled apt mirror) (TC v44): host.js runs native ELF execs under WALI_HOST_ENV (pkgdata: cannot resolve /bin/sh); shim posix_spawn/posix_spawnp on walios fork -- musl's needs clone(CLONE_VM), so system()/popen() failed (ICU's pkgdata install stopped before icu-uc.pc; harfbuzz/pango)"
 }
