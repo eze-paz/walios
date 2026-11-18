@@ -61,6 +61,9 @@ jobs:
         if: contains(needs.inputs.outputs.only, matrix.rt)
         # (libxml2: the LLVM release's wasm-ld links against libxml2.so.2, which the runner image lacks)
         run: sudo apt-get update -qq && sudo apt-get install -y -qq libbsd-dev libxml2 >/dev/null && bash farm/ci/toolchain.sh "$RUNNER_TEMP/tc"
+      - name: libc env reader (NUL-separated environment, musl-patches/src/env/initenv.c)
+        if: contains(needs.inputs.outputs.only, matrix.rt)
+        run: bash farm/ci/libc-envpatch.sh "$RUNNER_TEMP/tc"
       - name: Build ${{ matrix.rt }}
         if: contains(needs.inputs.outputs.only, matrix.rt)
         run: WALI_TC="$RUNNER_TEMP/tc" bash runtimes/${{ matrix.rt }}/build.sh "$RUNNER_TEMP/out"
@@ -101,6 +104,11 @@ jobs:
           REL=https://github.com/eze-paz/walios/releases/download
           if [ "$WALI_ABI" = ilp32 ]; then U=$REL/toolchain-2026-10-31/wali32-sysroot.tar.gz; else U=$REL/pkgs-2026-10-31/wali-sysroot.tar.gz; fi
           curl -sSfL --retry 6 -o "$RUNNER_TEMP/sysroot.tar.gz" "$U"
+      - name: libc env reader (NUL-separated environment, musl-patches/src/env/initenv.c)
+        run: |
+          sudo apt-get install -y -qq libxml2 >/dev/null
+          bash farm/ci/toolchain.sh "$RUNNER_TEMP/tc"
+          bash farm/ci/libc-envpatch.sh "$RUNNER_TEMP/tc" "$RUNNER_TEMP/sysroot.tar.gz"
       - name: python_cxx.wasm
         run: bash runtimes/cpython/build.sh "$RUNNER_TEMP/sysroot.tar.gz" "$RUNNER_TEMP/py"
       - name: Stdlib extensions (zlib, _bz2, _sqlite3, _ssl)
