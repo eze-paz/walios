@@ -83,6 +83,19 @@ make -j"$(nproc)" "${MAKEVARS[@]}" prefix=/usr CFLAGS="-O2 -I$PWD/../zinst/inclu
 "$TC/binaryen/bin/wasm-opt" --asyncify --pass-arg=asyncify-imports@wali.SYS_fork -O2 git -o "$OUT/git-asyncfork.wasm"
 node -e 'const m=new WebAssembly.Module(require("fs").readFileSync(process.argv[1])); const i=WebAssembly.Module.imports(m).map(x=>x.name); console.log("env import:", i.filter(n=>/init_envfile/.test(n)).join(","))' "$OUT/git-asyncfork.wasm"
 ls -la "$OUT/git-asyncfork.wasm"
+# git's other programs, where a Linux install puts them (git 2.45 `make install`, prefix=/usr):
+# scalar and git-shell in /usr/bin (git-shell also in the exec-path), git-http-backend and
+# git-daemon in /usr/libexec/git-core. Same tree and flags as git; each forks, so each gets
+# the Asyncify pass too. In git-core.tar.gz with the scripted commands.
+EXTRA="scalar git-shell git-http-backend git-daemon"
+make -j"$(nproc)" "${MAKEVARS[@]}" prefix=/usr CFLAGS="-O2 -I$PWD/../zinst/include -D__WALI_ASYNCIFY_FORK" $EXTRA
+mkdir -p ../gc/usr/bin
+for b in $EXTRA; do
+  case $b in scalar|git-shell) dst=../gc/usr/bin/$b ;; *) dst=../gc/usr/libexec/git-core/$b ;; esac
+  "$TC/binaryen/bin/wasm-opt" --asyncify --pass-arg=asyncify-imports@wali.SYS_fork -O2 "$b" -o "$dst"
+  chmod 755 "$dst"; ls -la "$dst"
+done
+cp ../gc/usr/bin/git-shell ../gc/usr/libexec/git-core/git-shell
 # iconv(1) (iconv.c, on musl's iconv(3)): Linux has the command, busybox has no applet, and
 # git's tests pipe through it (t7102). Ships in git-core.tar.gz at /usr/bin/iconv. Built here,
 # after the libc env patch, so it reads the NUL-separated environment like the git above.
