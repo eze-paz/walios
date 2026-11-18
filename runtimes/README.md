@@ -9,3 +9,9 @@ toolchain (`farm/ci/toolchain.sh`); `WALI_ABI=ilp32` builds for the walios ILP32
 `runtimes-<abi>-<date>-<run>` release; committing `runtimes/request.json` (`{"abi": ..., "only": ...}`)
 starts a run. These files are mirrored from the sandpie repository (`walios/build`), where
 they are maintained.
+
+`cpython-v11/` is the recipe the deployed `python_cxx.wasm` (sandpie `?v=11`, then `?v=12` =
+the same build with the NUL-separated env reader) came from: sandpie 473f496f's
+`walios/build/cpython`. `cpython/` has moved on since (libc closure exports, call
+trampolines) and builds a different binary. `"cpython_dir": "runtimes/cpython-v11"` in
+`request.json` picks it.
