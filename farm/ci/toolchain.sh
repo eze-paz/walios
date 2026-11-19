@@ -310,6 +310,10 @@ if [ \$link = 1 ]; then
   K=(); for y in "\${NEEDED[@]}"; do
     case "\$y" in -l*) z=""; for d in "\${dirs[@]}"; do [ -f "\$d/lib\${y#-l}.a" ] || [ -f "\$d/lib\${y#-l}.so" ] && { z=1; break; }; done; [ -n "\$z" ] || continue;; esac
     K+=("\$y"); done; NEEDED=("\${K[@]}")
+  # A -x <lang> on the line also covers every input after it -- the archives added here and
+  # below would be compiled as source (boost's b2: "libffi.a:1:1: error: expected
+  # unqualified-id"): they follow -x none.
+  for a in "\${A[@]}"; do case "\$a" in -x*) A+=(-x none); break;; esac; done
   A+=("\${NEEDED[@]}")
   if [ \${#G[@]} -gt 0 ]; then
     # With the overlay group first; if anything in it breaks the link, the same link without
@@ -389,8 +393,16 @@ oi=0; for i in "${!E[@]}"; do [ "${E[$i]}" = -o ] && { out=${E[$((i+1))]}; E[$((
 [ $oi = 1 ] || { rm -rf "$t"; exit 1; }
 "$cc" "${E[@]}" "$src" 2>/dev/null || { rm -rf "$t"; exit 1; }
 # 2. drop the ELF-only pieces
+#    A default-version `.symver real, name@@VER` is the library's public name for `real`
+#    (lksctp's sctp_connectx, alsa-lib's snd_pcm_forward): it becomes an alias, not nothing.
+#    Compat versions (`name@VER`) only matter to an ELF dynamic linker and are dropped.
 perl -0pi -e '
-  s/\b(?:__asm__|__asm|asm)\s*(?:__volatile__\s*)?\(\s*"\s*\.(?:symver|section[\s"]+\.gnu\.warning|stabs)[^;]*;//g;
+  s{\b(?:__asm__|__asm|asm)\s*(?:__volatile__\s*)?\(\s*((?:"(?:[^"\\]|\\.)*"\s*)+)\)\s*;}{
+    my $s = join "", ($1 =~ /"((?:[^"\\]|\\.)*)"/g);
+    $s =~ /^\s*\.symver\s+(\w+)\s*,\s*(\w+)\@\@[\w.]+\s*$/ && $1 ne $2
+      ? "extern __typeof($1) $2 __attribute__((alias(\"$1\")));"
+      : $s =~ /^\s*\.(?:symver|section\s+\.gnu\.warning|stabs)/ ? "" : $&
+  }ge;
   s/__attribute__\s*\(\(\s*(?:__)?section(?:__)?\s*\(\s*"\.gnu\.warning\.[^)]*\)\s*\)\)//g;
 ' "$t/s.$ext"
 # 3. compile the result, without the dependency/preprocessor-only flags

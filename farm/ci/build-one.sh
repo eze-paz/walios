@@ -77,7 +77,7 @@ pkgver="?"; BUILD_SECS=0; DEPS=""
 # and recipe progress lines are skipped, and with no error line the log's last line stands.
 why() {
   local l
-  l=$(grep -v -E '^(farm: |checking |Checking |-- |>>> |  > |configure: WARNING)' "$log" |
+  l=$(grep -v -E '^(farm: |checking |Checking |-- |>>> |  > |configure: WARNING|curl: \([0-9]+\))' "$log" |
       grep -m1 -E '(fatal )?error:|Error:|ERROR[: ]|CMake Error|\*\*\* |undefined (symbol|reference)|[Nn]ot found|No such file|cannot |Unsupported|not supported')
   [ -n "$l" ] || l=$(grep -v -E '^\s*$' "$log" | tail -1)
   printf '%s' "$l" | tr -d '\000-\037"\\' | cut -c1-120
@@ -525,4 +525,12 @@ fi
 # A NON-EMPTY archive or shared object: a failed compile still leaves `ar` an empty libfoo.a
 # (8 bytes, xxhash), which used to count as built and broke every dependent's configure.
 if [ -f "$OUT/$pkg.overlay.tar.gz" ] && tar tzvf "$OUT/$pkg.overlay.tar.gz" | awk '$1 ~ /^-/ && $3 > 8 && $6 ~ /\.(a|so)$/' | grep -q .; then emit pass lib-built lib; fi
+# A recipe with an arch list but nothing to compile (alpine-keys, firmware blobs, sound sets,
+# pure-Lua lua-resty-*, shell-script tools): its installed files ARE the package, as for noarch.
+# Only when the source has no C/C++/asm at all -- a compiled package that produced no program
+# is a failure, not data.
+if [ -z "$(find "$SRC" \( -name '*.c' -o -name '*.cc' -o -name '*.cpp' -o -name '*.cxx' -o -name '*.S' -o -name '*.s' -o -name '*.rs' -o -name '*.go' \) -print -quit 2>/dev/null)" ] &&
+   ! (cd "$pkgdir" && find . -type f -exec sh -c 'head -c4 "$1" | od -An -tx1 | tr -d " \n" | grep -qE "^(7f454c46|0061736d)$"' _ {} \; -print 2>/dev/null | grep -q .); then
+  noarch_files data-only
+fi
 emit fail "no-wasm-output:$(why)"
