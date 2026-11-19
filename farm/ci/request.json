@@ -1,7 +1,1 @@
-{
-  "pkgs": "lksctp-tools libkcapi alsa-lib numactl fuse3 boost1.84 highlight openldap alpine-keys bluez-firmware pm-utils acf-snort netcat-openbsd run-parts bash coreutils",
-  "max": 600,
-  "chunk": 3,
-  "publish": true,
-  "note": "R65 canary (TC v48): .symver name@@VER -> alias; -x none before appended archives (boost b2); openldap select-yields answer; data-only recipes publish their files; why() skips mirror curl lines; netcat-openbsd + run-parts from the sources release"
-}
+{"pkgs":"lksctp-tools libkcapi alsa-lib numactl fuse3 libbsd netcat-openbsd boost1.84 highlight bash coreutils ncurses glib icu libxml2 sqlite gawk","max":600,"chunk":3,"publish":true,"note":"R66 canary (TC v49): noelfasm keeps other asm whole + aliases at EOF; -dumpfullversion; sysroot headers via -idirafter"}

@@ -155,6 +155,9 @@ done
   v=\$($L/wasm-ld --version) || exit \$?
   case "\$v" in *GNU*) ;; *) v="\$v (compatible with GNU linkers)";; esac
   echo "\$v"; exit 0;; esac
+# gcc's -dumpfullversion (clang has only -dumpversion): boost's b2 asks it of "g++" and stopped
+# at "returned an invalid \$kind string ''" (R65), so boost never installed its headers.
+[ \$io = 0 ] && case " \$* " in *" -dumpfullversion "*) exec $L/$drv -dumpversion;; esac
 # __STDC_ISO_10646__: gcc on musl/glibc pre-includes stdc-predef.h, which defines it (wchar_t
 # holds Unicode code points); clang for wasm does not, and libedit refuses to build without
 # it. (Not the whole header: it redefines two clang builtins, a warning under -Werror.)
@@ -170,7 +173,10 @@ done
 # XSIMD_WITH_EMULATED=1: xsimd only takes its wasm backend under Emscripten, and with no
 # architecture it declares no API at all (pandas' scalar kernels use it); this is its own
 # switch for the portable one.
-F=($TGT --sysroot=$S -nostdlibinc $cxx -isystem $S/include -D_GNU_SOURCE -DXSIMD_WITH_EMULATED=1
+# The sysroot's headers come last (-idirafter), after the build's own -I and -isystem dirs, as
+# /usr/include does for gcc: libbsd's overlay <sys/stat.h> (include/bsd, S_ISTXT) wraps libc's
+# with #include_next, and an -isystem sysroot ahead of it hid the wrapper (netcat-openbsd too).
+F=($TGT --sysroot=$S -nostdlibinc $cxx -idirafter $S/include -D_GNU_SOURCE -DXSIMD_WITH_EMULATED=1
    -D__STDC_ISO_10646__=201206L '-D__builtin_return_address(x)=((void *)0)' \$OPT -mllvm -wasm-enable-sjlj -fwasm-exceptions -matomics -mbulk-memory -mexception-handling -msimd128 -pthread
    -Wno-implicit-function-declaration -Wno-int-conversion -Wno-incompatible-pointer-types
    -Wno-incompatible-function-pointer-types -Wno-unused-command-line-argument -Wno-ignored-optimization-argument
@@ -396,14 +402,22 @@ oi=0; for i in "${!E[@]}"; do [ "${E[$i]}" = -o ] && { out=${E[$((i+1))]}; E[$((
 #    A default-version `.symver real, name@@VER` is the library's public name for `real`
 #    (lksctp's sctp_connectx, alsa-lib's snd_pcm_forward): it becomes an alias, not nothing.
 #    Compat versions (`name@VER`) only matter to an ELF dynamic linker and are dropped.
-perl -0pi -e '
+#    The aliases go at the end of the file, where `real` is defined (libkcapi and numactl put
+#    the .symver before it); C only (a C++ alias would need the mangled name). Any other asm
+#    statement is kept whole ($& saved first: the inner matches overwrite it).
+NOELF_EXT=$ext perl -0pi -e '
+  my @al;
   s{\b(?:__asm__|__asm|asm)\s*(?:__volatile__\s*)?\(\s*((?:"(?:[^"\\]|\\.)*"\s*)+)\)\s*;}{
-    my $s = join "", ($1 =~ /"((?:[^"\\]|\\.)*)"/g);
-    $s =~ /^\s*\.symver\s+(\w+)\s*,\s*(\w+)\@\@[\w.]+\s*$/ && $1 ne $2
-      ? "extern __typeof($1) $2 __attribute__((alias(\"$1\")));"
-      : $s =~ /^\s*\.(?:symver|section\s+\.gnu\.warning|stabs)/ ? "" : $&
+    my ($m, $l) = ($&, $1);
+    my $s = join "", ($l =~ /"((?:[^"\\]|\\.)*)"/g);
+    $s =~ s/\\t/ /g;
+    if ($s =~ /^\s*\.symver\s+(\w+)\s*,\s*(\w+)\@\@[\w.]+\s*$/) {
+      push @al, [$1, $2] if $1 ne $2 && $ENV{NOELF_EXT} eq "i"; "" }
+    elsif ($s =~ /^\s*\.(?:symver|section\s+\.gnu\.warning|stabs)/) { "" }
+    else { $m }
   }ge;
   s/__attribute__\s*\(\(\s*(?:__)?section(?:__)?\s*\(\s*"\.gnu\.warning\.[^)]*\)\s*\)\)//g;
+  $_ .= join "", map { "\nextern __typeof($_->[0]) $_->[1] __attribute__((alias(\"$_->[0]\")));\n" } @al;
 ' "$t/s.$ext"
 # 3. compile the result, without the dependency/preprocessor-only flags
 K=(); skip=""
