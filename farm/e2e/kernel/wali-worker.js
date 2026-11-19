@@ -591,7 +591,44 @@ let opfsEpoch = 0;
 // deleted or renamed it: the PATH goes, as on Linux -- open fds keep their file object, and its
 // bridge id follows a rename / answers an error after a delete. Keeping the path used to leave a
 // moved file listed under its old name, and re-opening that name reused the id of the moved file.
-const opfsGone = (f) => f.br !== undefined && (!!f.brId || !opfsFileInUse(f));
+const opfsGone = (f) => f.br !== undefined && !f.pendingFrom && (!!f.brId || !opfsFileInUse(f));
+// ---- link() on the mount, made cheap -------------------------------------------------------
+// OPFS has no hard links, so a link is a COPY (opfs-worker OP.LINK). But git links EVERY object
+// it writes (tmp_obj -> objects/xx/..., then unlinks the tmp): a copy each time made `git add`
+// and commits ~30% slower than the rename git fell back to while link() was EPERM. So link()
+// only records the new name as a pending alias of the source (files entry with pendingFrom),
+// and the copy is made later -- unless the SOURCE is unlinked first, git's case: then the
+// store file is simply renamed to the new name. Anything else that touches either name (open,
+// rename, chmod, utime, truncate), a 100 ms timer, or the end of the run makes the copy.
+const pendingLinks = new Map();       // new path -> { src: source file object, timer }
+function linkMaterialize(pb) {        // make the pending alias pb a real store file (copy of its source)
+  const pl = pendingLinks.get(pb); if (!pl) return;
+  const fa = files.get(pb);
+  if (!fa || fa.pendingFrom !== pl.src) { clearTimeout(pl.timer); pendingLinks.delete(pb); return; }
+  const br = initOpfs();
+  let ok = false;
+  if (br) {
+    const pbb = te.encode(pl.src.br + '\0' + opfsRel(pb));
+    const r = br.call(OFS.LINK, pbb.length, 0, 0, pbb);   // may throw NeedAsync: the entry stays for the replay
+    ok = r.res >= 0 || r.res === -E.EXIST;
+    if (!ok) post(`[host] link: could not copy ${pb} (errno ${-r.res}); the new name is dropped\n`, 2);
+  }
+  clearTimeout(pl.timer); pendingLinks.delete(pb); delete fa.pendingFrom;
+  if (!ok) rmEntry(pb);
+}
+function linkFlushFrom(f) { if (f && pendingLinks.size) for (const [pb, pl] of [...pendingLinks]) if (pl.src === f) linkMaterialize(pb); }
+function linkFlushPath(p) {           // before anything changes p: settle the links it is part of
+  if (!pendingLinks.size) return;
+  const f = files.get(p); if (!f) return;
+  if (f.pendingFrom) linkMaterialize(p);
+  linkFlushFrom(f);
+}
+function linkTimer(pb) {
+  return setTimeout(function tick() {
+    try { linkMaterialize(pb); }
+    catch (e) { if (e instanceof NeedAsync) e.promise.then(() => { try { linkMaterialize(pb); } catch (_) {} }); }
+  }, 100);
+}
 function opfsDropTree(c) {
   let kept = false;
   const kids = dirs.get(c);
@@ -1065,9 +1102,25 @@ const modCache = new Map();   // key -> WebAssembly.Module
 const SPARE_POOL = (lim) => (!lim || lim.initial <= 160 ? 2 : 1);   // 160 pages = 10MB
 const SPARE_MAX_PAGES = 512;
 const spares = new Map();          // modKey -> [{ w, ctl, bulk, memory, ready, settle }]
+// Spares are kept for the SPARE_MODULES modules run most recently, not for every module ever run:
+// each holds a shared memory whose maximum (1-2 GB) is reserved address space, and a tab that
+// had run ~100 different programs (the farm e2e: one page, a hundred packages) could no longer
+// allocate the memory of the next process -- "WebAssembly.Memory(): could not allocate memory".
+const SPARE_MODULES = 8;
+function dropSpares(modKey) {
+  for (const sp of spares.get(modKey) || []) { try { sp.w.terminate(); } catch (_) {} }
+  spares.delete(modKey);
+}
 function takeSpare(modKey) {
   const list = spares.get(modKey);
   return list && list.length ? list.shift() : null;
+}
+// A shared memory for a process; when the address space is short, the idle spares go first.
+function newSharedMemory(desc) {
+  try { return new WebAssembly.Memory(desc); }
+  catch (e) { if (!(e instanceof RangeError) || !spares.size) throw e;
+    for (const k of [...spares.keys()]) dropSpares(k);
+    return new WebAssembly.Memory(desc); }
 }
 function prepareSpare(modKey, plan) {
   if (!plan || NODE_STUB_RE.test(modKey)) return;
@@ -1076,7 +1129,8 @@ function prepareSpare(modKey, plan) {
   const lim = plan.memory ? (modSharedMem.get(modKey) || { initial: 256, maximum: 16384 }) : null;
   if (lim && lim.initial > SPARE_MAX_PAGES) return;
   const list = spares.get(modKey) || [];
-  spares.set(modKey, list);
+  spares.delete(modKey); spares.set(modKey, list);          // most recently used last
+  for (const k of spares.keys()) { if (spares.size <= SPARE_MODULES) break; dropSpares(k); }
   while (list.length < SPARE_POOL(lim)) {
     try {
       const memory = lim ? new WebAssembly.Memory({ initial: lim.initial, maximum: lim.maximum, shared: true }) : null;
@@ -1604,6 +1658,26 @@ function unlinkPath(S, p) {
   opfsFault(p); if (!files.has(p)) return err(dirs.has(p) ? E.ISDIR : E.NOENT);
   if (protectedDelete(S, p)) return err(E.PERM);
   const f = files.get(p);
+  if (f.pendingFrom) {                       // a pending link alias: never stored, nothing to delete
+    const pl = pendingLinks.get(p); if (pl) { clearTimeout(pl.timer); pendingLinks.delete(p); }
+    rmEntry(p); return 0n;
+  }
+  if (f.br !== undefined && pendingLinks.size) {
+    // The source of pending links goes: the store file is RENAMED to the first new name
+    // (git's link-then-unlink of every object) instead of copied and deleted.
+    const heirs = [...pendingLinks].filter(([, pl]) => pl.src === f);
+    if (heirs.length && !opfsFileInUse(f)) {
+      const [pb0, pl0] = heirs[0], fa = files.get(pb0);
+      if (f.brId) { try { initOpfs().call(OFS.CLOSE, f.brId, 0, 0, null); } catch (_) {} f.brId = 0; if (f.brRel) { clearTimeout(f.brRel); f.brRel = 0; } }
+      const r = opfsPathOp(OFS.RENAME, f.br, opfsRel(pb0));
+      if (r >= 0 && fa) {
+        clearTimeout(pl0.timer); pendingLinks.delete(pb0); delete fa.pendingFrom;
+        for (const [pbx, plx] of heirs.slice(1)) { plx.src = fa; const fx = files.get(pbx); if (fx) fx.pendingFrom = fa; }
+        rmEntry(p); return 0n;
+      }
+    }
+    if (heirs.length) linkFlushFrom(f);      // otherwise: copies first, then the ordinary unlink
+  }
   if (f.br !== undefined) { const r = opfsPathOp(OFS.UNLINK, f.br); if (r < 0) return BigInt(r); f.brId = 0; }
   rmEntry(p); return 0n;
 }
@@ -2346,7 +2420,7 @@ class Process {
     this.i64(p + 40, BigInt(o.rdev || 0));
     this.i64(p + 48, BigInt(o.size)); this.i64(p + 56, 4096n); this.i64(p + 64, BigInt(Math.ceil(o.size / 512)));
     const t = (off, ms) => { this.i64(p + off, BigInt(Math.floor(ms / 1000))); this.i64(p + off + 8, BigInt(Math.floor((ms % 1000) * 1e6))); };
-    t(72, o.mtimeMs || Date.now()); t(88, o.mtimeMs || Date.now()); t(104, o.mtimeMs || Date.now());
+    { const mt = o.mtimeMs ?? Date.now(); t(72, mt); t(88, mt); t(104, mt); }   // ?? not ||: mtime 0 (the epoch, `touch -d @0`, git chmtime =0) is a time, not "unknown"
   }
   followDir(p) {         // resolve symlinks in the parent components only (lstat semantics)
     const i = p.lastIndexOf('/');
@@ -2478,6 +2552,7 @@ class Process {
     }
     path2 = this.follow(path2);
     let f = files.get(path2);
+    if (f && pendingLinks.size && (f.pendingFrom || (flags & 3) || (flags & O_TRUNC))) { linkFlushPath(path2); f = files.get(path2); }
     if (f && f.sym === undefined) {   // existing regular file: enforce rw bits
       const acc = flags & 3, want = (acc !== 1 ? 4 : 0) | (acc !== 0 ? 2 : 0);
       if (!this.mayAccess(f, want)) return err(E.ACCES);
@@ -2491,7 +2566,7 @@ class Process {
       if (!(flags & O_CREAT)) return err(E.NOENT);
       // The parent directory must exist: O_CREAT makes the file, never its directories (addFile
       // would mkdir -p them). mkstemp("nodir/tXXXXXX") succeeded instead of ENOENT (t0070).
-      { const par = path2.slice(0, path2.lastIndexOf('/')) || '/'; opfsFault(par);
+      { const par = path2.slice(0, path2.lastIndexOf('/')) || '/';   // (opfsFault(path2) above has listed it)
         if (!dirs.has(par)) return err(files.has(par) ? E.NOTDIR : E.NOENT); }
       addFile(path2, new Uint8Array(0), 0o100000 | ((mode || 0o666) & ~this.umask & 0o7777));
       f = files.get(path2);
@@ -2763,6 +2838,9 @@ class Process {
         // silently succeeded on a directory that was already there. `mkdir -p` still works:
         // busybox tolerates EEXIST itself, which is exactly how it is meant to be built.
         if (dirs.has(p) || files.has(p)) return err(E.EXIST);
+        // ...and in a directory that does not exist it is ENOENT (ENOTDIR under a file): mkdirp
+        // made the missing parents too, so `mkdir a/b/c` worked without -p.
+        { const par = p.slice(0, p.lastIndexOf('/')) || '/'; if (!dirs.has(par)) return err(files.has(par) ? E.NOTDIR : E.NOENT); }
         mkdirp(p); if (S.cred.euid !== 0 || S.cred.egid !== 0) dirOwners.set(p, { uid: S.cred.euid, gid: S.cred.egid });
         { const want = (name === 'mkdir' ? a[1] : a[2]) & 0o7777 & ~S.umask; if (want !== 0o755) dirSetMode(p, want); else dirModes.set(p, want); }
         // opfsLoaded is a MAP (path -> when we last listed it), not a Set. This said
@@ -2778,6 +2856,7 @@ class Process {
         const pa = name === 'rename' ? S.atPath(-100, S.cstr(a[0])) : S.atPath(a[0], S.cstr(a[1]));
         const pb = name === 'rename' ? S.atPath(-100, S.cstr(a[1])) : S.atPath(a[2], S.cstr(a[3]));
         opfsFault(pa); opfsFault(pb); pyTreeTouch(pa); pyTreeTouch(pb);
+        linkFlushPath(pa); linkFlushPath(pb);   // pending link() copies (see pendingLinks)
         if (!isAppPath(pb) && protectedDelete(S, pa)) return err(E.PERM);   // moving out of the workspace == deleting it
         // the new name keeps the old file's identity: mode (+x!), owner, times, symlink target
         const keepAttrs = (nf, of) => { nf.mode = of.mode; if (of.uid !== undefined) nf.uid = of.uid; if (of.gid !== undefined) nf.gid = of.gid; nf.mtimeMs = of.mtimeMs; if (of.sym !== undefined) nf.sym = of.sym; };
@@ -2844,6 +2923,7 @@ class Process {
       case 'chmod': case 'fchmodat': { const p = S.follow(S.atPath(name === 'chmod' ? -100 : a[0], S.cstr(name === 'chmod' ? a[0] : a[1])));
         opfsFault(p); const md = name === 'chmod' ? a[1] : a[2];
         if (dirs.has(p)) { const ow = dirOwners.get(p); if (S.cred.euid !== 0 && (ow ? ow.uid : 0) !== S.cred.euid) return err(E.PERM); dirSetMode(p, md); return 0n; }
+        linkFlushPath(p);
         const f = files.get(p); if (!f) return err(E.NOENT);
         if (S.cred.euid !== 0 && (f.uid ?? 0) !== S.cred.euid) return err(E.PERM);
         f.mode = (f.mode & ~0o7777) | (md & 0o7777); opfsSaveMode(f); return 0n; }
@@ -2884,27 +2964,27 @@ class Process {
           // one) answers EINVAL: EPERM then, as a filesystem without links.
           const parent = pb.slice(0, pb.lastIndexOf('/')) || '/';
           opfsFault(parent); if (!dirs.has(parent)) return err(E.NOENT);
-          const br = initOpfs(); if (!br) return err(E.IO);
-          const pbb = te.encode(opfsRel(pa) + '\0' + opfsRel(pb));
-          const r = br.call(OFS.LINK, pbb.length, 0, 0, pbb);
-          if (r.res < 0) return err(r.res === -E.INVAL ? E.PERM : ioErrno(r.res));
+          if (!initOpfs()) return err(E.IO);
+          if (f.pendingFrom) linkMaterialize(pa);   // a link of a link: the first one becomes real
           dirs.get(parent).add(pb.slice(pb.lastIndexOf('/') + 1));
           // Same inode as the source, in this kernel: git's clone --local checks a fresh link by
           // comparing st_ino/mode/size/uid with the source ("hardlink different from source").
-          files.set(pb, { br: opfsRel(pb), size: auxBig(r) || f.size, mtimeMs: f.mtimeMs, opfsM: undefined, data: null, mode: f.mode,
-                          linkIno: inoOf(f), ...(f.uid !== undefined ? { uid: f.uid, gid: f.gid } : {}) });
+          // A pending alias (pendingLinks above): the copy -- or a rename -- comes later.
+          files.set(pb, { br: opfsRel(pb), size: f.size, mtimeMs: f.mtimeMs, opfsM: undefined, data: null, mode: f.mode,
+                          linkIno: inoOf(f), pendingFrom: f, ...(f.uid !== undefined ? { uid: f.uid, gid: f.gid } : {}) });
+          pendingLinks.set(pb, { src: f, timer: linkTimer(pb) });
           return 0n;
         }
         const parent = pb.slice(0, pb.lastIndexOf('/')) || '/'; mkdirp(parent);
         dirs.get(parent).add(pb.slice(pb.lastIndexOf('/') + 1));
         files.set(pb, f); return 0n; } // same object: a real hard link
-      case 'truncate': { const p = S.follow(S.atPath(-100, S.cstr(a[0]))); opfsFault(p);
+      case 'truncate': { const p = S.follow(S.atPath(-100, S.cstr(a[0]))); opfsFault(p); linkFlushPath(p);
         const f = files.get(p); if (!f) return err(E.NOENT);
         if (!S.mayAccess(f, 2)) return err(E.ACCES);
         if (f.br !== undefined) { const id = opfsHandle(f, true); if (id) initOpfs().call(OFS.TRUNC, id, Number(a[1]), 0, null); f.ownWrite = true; f.mtimeMs = Date.now(); }
         f.size = Number(a[1]); return 0n; }
       case 'ftruncate': { const h = S.fds.get(a[0]); if (!h || !h.file) return err(E.BADF); if (h.acc === 0) return err(E.INVAL);   // Linux: EINVAL for a read-only fd
-        const f = h.file;
+        const f = h.file; linkFlushFrom(f);
         if (f.br !== undefined) { const id = opfsHandle(f, true); if (id) initOpfs().call(OFS.TRUNC, id, Number(a[1]), 0, null); f.ownWrite = true; f.mtimeMs = Date.now(); }
         f.size = Number(a[1]); return 0n; }
       case 'fsync': case 'fdatasync': {
@@ -2927,7 +3007,7 @@ class Process {
         let f;
         if (name !== 'utimes' && !a[1]) { const h = S.fds.get(a[0]); if (!h || !h.file) return err(E.BADF); f = h.file; } // futimens: NULL path = the fd itself
         else { const p = S.follow(name === 'utimes' ? S.atPath(-100, S.cstr(a[0])) : S.atPath(a[0], S.cstr(a[1])));
-          opfsFault(p);
+          opfsFault(p); linkFlushPath(p);
           if (dirs.has(p)) return 0n;
           f = files.get(p); if (!f) return err(E.NOENT); }
         const tp = name === 'utimes' ? a[1] : a[2];
@@ -4058,7 +4138,7 @@ class Process {
   getSharedMemory() {
     if (!this.sharedMem) {
       const lim = modSharedMem.get(this.modKey) || { initial: 256, maximum: 16384 };
-      this.sharedMem = new WebAssembly.Memory({ initial: lim.initial, maximum: lim.maximum, shared: true });
+      this.sharedMem = newSharedMemory({ initial: lim.initial, maximum: lim.maximum, shared: true });
     }
     return this.sharedMem;
   }
@@ -5845,6 +5925,10 @@ self.onmessage = async (ev) => {
     let code;
     try { code = await root.run(); }
     finally { clearInterval(statsTimer); try { self.postMessage(Object.assign(statsSnapshot(t0), { lag: 0, done: true })); } catch (_) {} }
+    for (let i = 0; pendingLinks.size && i < 100000; i++) {   // pending link() copies (see pendingLinks)
+      const pb = pendingLinks.keys().next().value;
+      try { linkMaterialize(pb); } catch (e) { if (e instanceof NeedAsync) await e.promise; else { const pl = pendingLinks.get(pb); if (pl) clearTimeout(pl.timer); pendingLinks.delete(pb); } }
+    }
     if (opfsBr) { try { opfsBr.call(OFS.RELEASE, 0, 0, 0, null); } catch {}
       for (const f of files.values()) { if (f.brRel) { clearTimeout(f.brRel); f.brRel = 0; } if (f.brId) f.brId = 0; } }
     straceFlush();

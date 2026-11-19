@@ -1182,7 +1182,12 @@ async function handle(C, op) {
         await writeWhole(newRel, bytes);
         await loadModes(C);
         const om = modes.get(normRel(oldRel)); if (om !== undefined) setMode(newRel, om);
-        try { const lm = (await (await fileHandleOf(newRel)).getFile()).lastModified; setMtime(newRel, [mtimeOf(normRel(oldRel), src.lastModified), lm]); } catch (_) {}
+        // Only a source with an EXPLICIT mtime needs a record; otherwise the copy's own
+        // lastModified (now) is the time. An IndexedDB write per link made every git object
+        // write (link tmp -> object, then unlink tmp) slower.
+        if (mtimes.has(normRel(oldRel))) {
+          try { const lm = (await (await fileHandleOf(newRel)).getFile()).lastModified; setMtime(newRel, [mtimeOf(normRel(oldRel), src.lastModified), lm]); } catch (_) {}
+        }
         tombs.delete(String(newRel).replace(/^\/+/, '').toLowerCase()); reportChange(C, newRel); caseClash(C, newRel);
         return finish(C, 0, bytes.length);
       }
@@ -1440,8 +1445,7 @@ function initRoot(subdir) {
     // delete the host app's OPFS data (same origin). terminal.html passes subdir.
     if (root && subdir) { for (const s of subdir.split('/').filter(Boolean)) root = await root.getDirectoryHandle(s, { create: true }); }
     // (The legacy full-root mount used to plant a demo hello-from-opfs.txt at the workspace
-    // root on every boot. It was clutter in the user's home, synced to their cloud; the
-    // workspace check (organize.js) removes any left behind.)
+    // root on every boot. It was clutter in the user's home, synced to their cloud.)
   })();
   return rootReady;
 }
