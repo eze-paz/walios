@@ -306,6 +306,10 @@ if [ \$link = 1 ]; then
       case "\$y" in /*) [ -f "\$y" ] || { z=""; for d in "\${dirs[@]}"; do [ -f "\$d/\${y##*/}" ] && { z=\$d/\${y##*/}; break; }; done; [ -n "\$z" ] || continue; y=\$z; };; esac
       NEEDED+=("\$y"); todo+=("\$y"); done < <($L/llvm-ar p "\$f" __wali_needed 2>/dev/null)
   done
+  # likewise a recorded -l that no dir has (a library this build did not produce: libucontext)
+  K=(); for y in "\${NEEDED[@]}"; do
+    case "\$y" in -l*) z=""; for d in "\${dirs[@]}"; do [ -f "\$d/lib\${y#-l}.a" ] || [ -f "\$d/lib\${y#-l}.so" ] && { z=1; break; }; done; [ -n "\$z" ] || continue;; esac
+    K+=("\$y"); done; NEEDED=("\${K[@]}")
   A+=("\${NEEDED[@]}")
   if [ \${#G[@]} -gt 0 ]; then
     # With the overlay group first; if anything in it breaks the link, the same link without

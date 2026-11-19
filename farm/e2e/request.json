@@ -5,7 +5,7 @@
   "perl": "runtimes-ilp32-2026-11-03-8",
   "lua": "runtimes-ilp32-2026-11-02-3",
   "shards": 12,
-  "note": "R63+R64 merged; TC v46: libtest links no longer fail on __wali_needed archive paths from the farm runner overlay (136 libs lost: libX11.a missing)",
+  "note": "R63+R64 merged; TC v47: also drop recorded -l names no dir has (-lucontext broke 136 libtests after v46)",
   "overlays": [
     "farm-2026-11-19-69",
     "farm-2026-11-19-70"
