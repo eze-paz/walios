@@ -48,19 +48,21 @@ MAKEVARS=(
   ZLIB_PATH="$PWD/../zinst" CFLAGS="-O2 -I$PWD/../zinst/include" LDFLAGS="-L$PWD/../zinst/lib -Wl,--export=__stack_pointer -Wl,--export-if-defined=__tls_base"
   SHELL_PATH=/bin/sh TAR=tar
 )
-make -j"$(nproc)" "${MAKEVARS[@]}" t/helper/test-tool t/helper/test-fake-ssh GIT-BUILD-OPTIONS
+# t/unit-tests/bin/t-basic: t0080 checks the unit-test framework's TAP output against it
+make -j"$(nproc)" "${MAKEVARS[@]}" t/helper/test-tool t/helper/test-fake-ssh t/unit-tests/bin/t-basic GIT-BUILD-OPTIONS
 # templates/blt: test-lib.sh points GIT_TEMPLATE_DIR there (and bails out without it)
 make "${MAKEVARS[@]}" -C templates SHELL_PATH=/bin/sh PERL_PATH=/usr/bin/perl
 test -d templates/blt || { echo "!! templates/blt missing"; exit 1; }
-for b in t/helper/test-tool t/helper/test-fake-ssh; do
+for b in t/helper/test-tool t/helper/test-fake-ssh t/unit-tests/bin/t-basic; do
   head -c4 "$b" | od -An -tx1 | grep -qi "00 61 73 6d" || { echo "!! $b is not wasm"; exit 1; }
 done
-ls -la t/helper/test-tool t/helper/test-fake-ssh
+ls -la t/helper/test-tool t/helper/test-fake-ssh t/unit-tests/bin/t-basic
 # The package: t/ (minus perf), the helpers in place, GIT-BUILD-OPTIONS, templates dir for
 # GIT_TEST_TEMPLATE_DIR. Paths stay relative to the git tree (test-lib.sh expects ../ layout).
 # contrib: tests call contrib/workdir/git-new-workdir etc.; Makefile and COPYING: tests use them as
-# sample data (t4023's COPYING_test_data cats ../Makefile); mergetools: t7609 sources $GIT_BUILD_DIR/mergetools/vimdiff
-tar czf "$OUT/git-tests-$GITV.tar.gz" --exclude='t/perf' t GIT-BUILD-OPTIONS templates contrib Makefile COPYING mergetools
+# sample data (t4023's COPYING_test_data cats ../Makefile); mergetools: t7609 sources $GIT_BUILD_DIR/mergetools/vimdiff;
+# po/is.po: t0200 checks its xgettext-extracted TRANSLATORS comments ($GIT_PO_PATH = $GIT_BUILD_DIR/po)
+tar czf "$OUT/git-tests-$GITV.tar.gz" --exclude='t/perf' t GIT-BUILD-OPTIONS templates contrib Makefile COPYING mergetools po/is.po
 # git's scripted commands (git submodule, git-sh-setup, mergetool, ...) for walios's exec path:
 # walios shipped only the git binary, so `git submodule` was "not a git command". Installed at
 # /usr/libexec/git-core (GIT_EXEC_PATH) by sandpie's walios-backend.js.
