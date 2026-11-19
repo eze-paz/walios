@@ -51,6 +51,8 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: 22 }
       - name: Playwright
+        # (an apt/CDN stall once held two shards here for 5 h 50 min with no test run)
+        timeout-minutes: 15
         run: |
           cd farm/ci/gittests && npm init -y >/dev/null && npm i --no-save playwright@1.63.0 >/dev/null
           npx playwright install --with-deps chromium >/dev/null
