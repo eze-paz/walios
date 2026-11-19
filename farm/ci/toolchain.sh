@@ -173,10 +173,9 @@ done
 # XSIMD_WITH_EMULATED=1: xsimd only takes its wasm backend under Emscripten, and with no
 # architecture it declares no API at all (pandas' scalar kernels use it); this is its own
 # switch for the portable one.
-# The sysroot's headers come last (-idirafter), after the build's own -I and -isystem dirs, as
-# /usr/include does for gcc: libbsd's overlay <sys/stat.h> (include/bsd, S_ISTXT) wraps libc's
-# with #include_next, and an -isystem sysroot ahead of it hid the wrapper (netcat-openbsd too).
-F=($TGT --sysroot=$S -nostdlibinc $cxx -idirafter $S/include -D_GNU_SOURCE -DXSIMD_WITH_EMULATED=1
+# (Not -idirafter, R66: clang's own headers then come first, autoconf's C23 probe passes, and
+# C23 has no implicit declarations -- coreutils' getprogname, libcap's probe.)
+F=($TGT --sysroot=$S -nostdlibinc $cxx -isystem $S/include -D_GNU_SOURCE -DXSIMD_WITH_EMULATED=1
    -D__STDC_ISO_10646__=201206L '-D__builtin_return_address(x)=((void *)0)' \$OPT -mllvm -wasm-enable-sjlj -fwasm-exceptions -matomics -mbulk-memory -mexception-handling -msimd128 -pthread
    -Wno-implicit-function-declaration -Wno-int-conversion -Wno-incompatible-pointer-types
    -Wno-incompatible-function-pointer-types -Wno-unused-command-line-argument -Wno-ignored-optimization-argument
@@ -194,7 +193,7 @@ LATE=(\${WALI_LATE_CFLAGS:-})
 F+=(-fPIC); [ -n "\${WALI_SIDE:-}" ] && F+=(-fvisibility=default)
 A=(); skip=0
 for a in "\$@"; do case "\$a" in
-  -rdynamic|-static|-s|-fPIC|-fpic|-fPIE|-fpie|-pie|-flto|-flto=*|-fprofile-generate|-fprofile-generate=*|-fprofile-use|-fprofile-use=*|-fprofile-instr-generate*|-fprofile-instr-use*|-ffat-lto-objects|-fuse-linker-plugin|-fstack-protector*|-fstack-clash-protection|-fcommon) ;;   # -fcommon: wasm objects have no common symbols;   # (host perl Config ldflags in Makefile.PL probes)
+  -rdynamic|-static|-s|-fPIC|-fpic|-fPIE|-fpie|-pie|-flto|-flto=*|-fprofile-generate|-fprofile-generate=*|-fprofile-use|-fprofile-use=*|-fprofile-instr-generate*|-fprofile-instr-use*|-fprofile-arcs|-ftest-coverage|--coverage|-ffat-lto-objects|-fuse-linker-plugin|-fstack-protector*|-fstack-clash-protection|-fcommon) ;;   # -fcommon: wasm objects have no common symbols;   # (host perl Config ldflags in Makefile.PL probes)
   # the build host's headers and libraries (Pillow's setup.py adds /usr/include and /usr/lib):
   # a subdirectory means the overlay's copy (lpeg's -I/usr/include/lua5.4), the rest is dropped
   -I/usr/include/*|-I/usr/local/include/*|-L/usr/lib/*|-L/usr/local/lib/*)
@@ -364,6 +363,12 @@ if [ -n "${PKG_CONFIG_SYSROOT_DIR:-}" ] && [ -n "${PKG_CONFIG_PATH:-}" ]; then
   IFS=$oldifs
   [ -n "$nosys" ] && unset PKG_CONFIG_SYSROOT_DIR
 fi
+# An install destination asked of a dep (lua5.4's INSTALL_CMOD, bash-completion's
+# completionsdir, systemd's unitdirs, gio's giomoduledir) is a path on the TARGET system: with
+# the overlay in front, lua-pc and lua-subprocess installed into pkg/<overlay>/usr/lib/lua.
+for a in "$@"; do case "$a" in
+  --variable=INSTALL_*|--variable=*completionsdir|--variable=*unitdir|--variable=udevdir|--variable=*moduledir|--variable=*modulesdir)
+    unset PKG_CONFIG_SYSROOT_DIR;; esac; done
 case " $* " in *" --libs "*|*" --libs-only-L "*) ;; *) exec /usr/bin/pkg-config "$@";; esac
 out=$(/usr/bin/pkg-config "$@") || exit $?
 d=${PKG_CONFIG_SYSROOT_DIR:-}
@@ -417,6 +422,8 @@ NOELF_EXT=$ext perl -0pi -e '
     else { $m }
   }ge;
   s/__attribute__\s*\(\(\s*(?:__)?section(?:__)?\s*\(\s*"\.gnu\.warning\.[^)]*\)\s*\)\)//g;
+  my $src = $_;   # (not where the name has a definition of its own: fuse3's static inline)
+  @al = grep { my $n = $_->[1]; $src !~ /\b\Q$n\E\s*\([^;{]*\)\s*\{/ } @al;
   $_ .= join "", map { "\nextern __typeof($_->[0]) $_->[1] __attribute__((alias(\"$_->[0]\")));\n" } @al;
 ' "$t/s.$ext"
 # 3. compile the result, without the dependency/preprocessor-only flags
@@ -782,6 +789,10 @@ set(CMAKE_FIND_ROOT_PATH $S \$ENV{WALI_OVERLAY} \$ENV{WALI_OVERLAY}/usr)
 set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
 set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY BOTH)
 set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE BOTH)
+# Config packages (find_package's <Name>Config.cmake) only from the sysroot and overlay: the
+# runner's own /usr/lib/llvm-17/cmake is an x86 LLVM (clang2x/lld2x/lldb built against its
+# headers and AddLLVM.cmake and failed).
+set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "")
 # Not ELF: cmake cannot rewrite RPATHs at install time, and walios binaries are static anyway.
 set(CMAKE_SKIP_RPATH ON CACHE BOOL "")

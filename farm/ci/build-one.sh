@@ -206,6 +206,13 @@ if [ -n "$PYPKG" ]; then
     echo "farm: host numpy headers <- walios numpy" >>"$log"
   fi
 fi
+# Build-time Perl modules (makedepends perl-foo-bar: DBI for the DBD::* Makefile.PLs,
+# Path::Class, ExtUtils::CChecker, Net::DNS for spamassassin's configure, XML::Parser for
+# intltool) run on the HOST perl, as a native build has them installed: Ubuntu's
+# libfoo-bar-perl. (Their pure-Perl copies in the overlay are not enough: DBI is XS.)
+PM=""; for d in $(apk makedepends); do case "$d" in perl-*) n=${d#perl-}; PM="$PM lib${n%-dev}-perl";; esac; done
+for p in $PM; do sudo timeout 120 apt-get install -y -qq --no-install-recommends "$p" >/dev/null 2>&1 ||
+  echo "farm: no host perl package $p" >>"$log"; done
 # Lua C modules (recipes looping over $_luaversions): built for Lua 5.4 only, what walios'
 # lua.wasm is, as wasm side modules it dlopen()s -- PIC, importing only lua.wasm's exports
 # (lua-exports.txt, from walios/build/lua in sandpie). Alpine installs them from the
