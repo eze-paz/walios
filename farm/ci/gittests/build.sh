@@ -59,8 +59,8 @@ ls -la t/helper/test-tool t/helper/test-fake-ssh
 # The package: t/ (minus perf), the helpers in place, GIT-BUILD-OPTIONS, templates dir for
 # GIT_TEST_TEMPLATE_DIR. Paths stay relative to the git tree (test-lib.sh expects ../ layout).
 # contrib: tests call contrib/workdir/git-new-workdir etc.; Makefile and COPYING: tests use them as
-# sample data (t4023's COPYING_test_data cats ../Makefile)
-tar czf "$OUT/git-tests-$GITV.tar.gz" --exclude='t/perf' t GIT-BUILD-OPTIONS templates contrib Makefile COPYING
+# sample data (t4023's COPYING_test_data cats ../Makefile); mergetools: t7609 sources $GIT_BUILD_DIR/mergetools/vimdiff
+tar czf "$OUT/git-tests-$GITV.tar.gz" --exclude='t/perf' t GIT-BUILD-OPTIONS templates contrib Makefile COPYING mergetools
 # git's scripted commands (git submodule, git-sh-setup, mergetool, ...) for walios's exec path:
 # walios shipped only the git binary, so `git submodule` was "not a git command". Installed at
 # /usr/libexec/git-core (GIT_EXEC_PATH) by sandpie's walios-backend.js.
