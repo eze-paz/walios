@@ -28,7 +28,7 @@ const [SHARD, NSHARD] = arg('shard', '0/1').split('/').map(Number);
 const ONLY = arg('only') ? arg('only').split(',').filter(Boolean) : null;
 const TIMEOUT_S = +arg('timeout', 1800);
 const OUT = arg('out', 'gittests-results.json');
-const LOG_TAIL = 24000;
+const LOG_TAIL = +arg('logtail', 24000);
 
 // ---- the script list, from the tarball (t/tNNNN-*.sh) ----
 function tarNames(file) {
