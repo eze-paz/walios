@@ -220,13 +220,24 @@ let chromium;
 try { ({ chromium } = require('playwright')); } catch { ({ chromium } = require(path.join(execSync('npm root -g').toString().trim(), 'playwright'))); }
 
 const results = {};
+// A fresh browser every FRESH_EVERY cases, and a case whose process could not get its shared memory
+// is run again once in a fresh one: the coi kernel loses address space over a long session (after
+// ~100 programs in one page: "WebAssembly.Memory(): could not allocate memory"), a kernel bug of
+// its own -- counted in `leakRetries`, not charged to the package that happened to run next.
+const FRESH_EVERY = +(arg('fresh-every') || 20);
+const OOM = /could not allocate memory|Out of memory/i;
+let leakRetries = 0;
 for (const eng of ENGINES) {
   const server = serve(eng === 'coi'); await new Promise((r) => server.listen(0, '127.0.0.1', r));
-  const browser = await chromium.launch({ headless: true });
-  const page = await browser.newPage();
-  await page.goto(`http://127.0.0.1:${server.address().port}/harness.html`);
-  const got = await page.evaluate(() => window.walEngine);
-  if (got !== eng) throw new Error(`harness came up as ${got}, wanted ${eng}`);
+  let browser = null, page = null, used = 0;
+  const fresh = async () => {
+    if (browser) await browser.close().catch(() => {});
+    browser = await chromium.launch({ headless: true }); page = await browser.newPage(); used = 0;
+    await page.goto(`http://127.0.0.1:${server.address().port}/harness.html`);
+    const got = await page.evaluate(() => window.walEngine);
+    if (got !== eng) throw new Error(`harness came up as ${got}, wanted ${eng}`);
+  };
+  await fresh();
   const t0 = Date.now();
   for (const c of cases) {
     const row = (results[c.pkg] = results[c.pkg] || { kind: P[c.pkg].kind });
@@ -234,15 +245,21 @@ for (const eng of ENGINES) {
     row.case = c.kind;
     if (c.skip) { row[eng] = ['skip', c.skip]; continue; }
     if (c.fail) { row[eng] = ['fail', c.fail, 0]; continue; }
+    if (used >= FRESH_EVERY) await fresh();
     const t = Date.now();
-    const r = await page.evaluate(([m]) => window.walRun(m, 45000), [runMsg(c)]);
-    row[eng] = [...judge(c, r), Date.now() - t];
+    let r = await page.evaluate(([m]) => window.walRun(m, 45000), [runMsg(c)]); used++;
+    let j = judge(c, r);
+    if (j[0] !== 'pass' && OOM.test(JSON.stringify(r))) {
+      leakRetries++; await fresh();
+      r = await page.evaluate(([m]) => window.walRun(m, 45000), [runMsg(c)]); used++; j = judge(c, r);
+    }
+    row[eng] = [...j, Date.now() - t];
     if (process.env.E2E_VERBOSE) console.log(eng, c.pkg, row[eng][0], row[eng][1] || '');
   }
-  console.log(`${eng}: ${cases.length} cases in ${((Date.now() - t0) / 1000).toFixed(0)}s`);
+  console.log(`${eng}: ${cases.length} cases in ${((Date.now() - t0) / 1000).toFixed(0)}s, ${leakRetries} retried after an address-space failure`);
   await browser.close(); server.close();
 }
-fs.writeFileSync(OUT, JSON.stringify({ tag: index.tag, shard: `${SHARD}/${NSHARD}`, engines: ENGINES, results }, null, 1));
+fs.writeFileSync(OUT, JSON.stringify({ tag: index.tag, shard: `${SHARD}/${NSHARD}`, engines: ENGINES, leakRetries, results }, null, 1));
 const both = Object.entries(results).filter(([, r]) => ENGINES.every((e) => r[e] && r[e][0] === 'pass'));
 const tally = {}; for (const r of Object.values(results)) for (const e of ENGINES) { const s = r[e] ? r[e][0] : 'none'; tally[e + ':' + s] = (tally[e + ':' + s] || 0) + 1; }
 const shadowed = Object.values(results).filter((r) => r.shadowed).length;

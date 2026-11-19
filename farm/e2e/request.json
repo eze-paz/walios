@@ -5,7 +5,7 @@
   "perl": "runtimes-ilp32-2026-11-03-8",
   "lua": "runtimes-ilp32-2026-11-02-3",
   "shards": 12,
-  "note": "R63+R64 merged, kernel = sandpie main 60836ec8 + spare pool capped at 8 modules (coi ran out of shared-memory address space after ~100 programs per page)",
+  "note": "R63+R64 merged; harness: fresh browser every 20 cases + one retry after an address-space failure (coi kernel leak counted as leakRetries)",
   "overlays": [
     "farm-2026-11-19-69",
     "farm-2026-11-19-70"
