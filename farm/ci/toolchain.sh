@@ -328,7 +328,7 @@ if [ \$link = 1 ]; then
     e=\$(mktemp)
     $L/$drv "\${F[@]}" "\${A[@]}" "\${LATE[@]}" "\${LINK[@]}" \${WALI_EXTRA_LIBS:-} "\${G[@]}" "\${TAIL[@]}" 2>"\$e" && { rm -f "\$e"; exit 0; }
     $L/$drv "\${F[@]}" "\${A[@]}" "\${LATE[@]}" "\${LINK[@]}" \${WALI_EXTRA_LIBS:-} "\${TAIL[@]}"; rc=\$?
-    if [ \$rc != 0 ]; then echo "farm: the same link with the deps' archives failed with:" >&2; grep -m8 -E 'error|warning' "\$e" >&2; fi
+    if [ \$rc != 0 ]; then echo "farm: the same link with the deps' archives failed with:" >&2; grep -v __wali_needed "\$e" | grep -m12 -E 'error|warning' >&2; fi
     rm -f "\$e"; exit \$rc
   fi
   exec $L/$drv "\${F[@]}" "\${A[@]}" "\${LATE[@]}" "\${LINK[@]}" \${WALI_EXTRA_LIBS:-} "\${TAIL[@]}"

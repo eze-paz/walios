@@ -211,7 +211,7 @@ fi
 # intltool) run on the HOST perl, as a native build has them installed: Ubuntu's
 # libfoo-bar-perl. (Their pure-Perl copies in the overlay are not enough: DBI is XS.)
 # (perl-dev is perl itself; perl-libwww is Debian's libwww-perl, no second lib)
-PM=""; for d in $(apk makedepends); do case "$d" in perl-dev) ;; perl-lib*) n=${d#perl-}; PM="$PM ${n%-dev}-perl";; perl-*) n=${d#perl-}; PM="$PM lib${n%-dev}-perl";; esac; done
+PM=""; for d in $DEPS $(apk makedepends); do case "$d" in perl-dev) ;; perl-lib*) n=${d#perl-}; PM="$PM ${n%-dev}-perl";; perl-*) n=${d#perl-}; PM="$PM lib${n%-dev}-perl";; esac; done
 for p in $PM; do sudo timeout 120 apt-get install -y -qq --no-install-recommends "$p" >/dev/null 2>&1 ||
   echo "farm: no host perl package $p" >>"$log"; done
 # The overlay's Perl dirs go at the END of @INC (WaliInc.pm, loaded through PERL5OPT): in
@@ -222,7 +222,7 @@ export WALI_PERL_INC="$OVERLAY/usr/share/perl5/vendor_perl:$OVERLAY/usr/share/pe
 # MakeMaker installs where Alpine's perl has its vendor dirs (the runner's are Debian's
 # /usr/share/perl5): spamassassin's package() runs its installed scripts with
 # PERL5LIB=$pkgdir/usr/share/perl5/vendor_perl and found no Mail/SpamAssassin.pm.
-case "$pkg" in perl-*) ;; *) export PERL_MM_OPT="INSTALLDIRS=vendor INSTALLVENDORLIB=/usr/share/perl5/vendor_perl INSTALLVENDORARCH=/usr/lib/perl5/vendor_perl INSTALLVENDORBIN=/usr/bin INSTALLVENDORSCRIPT=/usr/bin";; esac
+case "$pkg" in perl-*) ;; *) export PERL_MM_OPT="CC=$CC LD=$CC INSTALLDIRS=vendor INSTALLVENDORLIB=/usr/share/perl5/vendor_perl INSTALLVENDORARCH=/usr/lib/perl5/vendor_perl INSTALLVENDORBIN=/usr/bin INSTALLVENDORSCRIPT=/usr/bin";; esac
 # Lua C modules (recipes looping over $_luaversions): built for Lua 5.4 only, what walios'
 # lua.wasm is, as wasm side modules it dlopen()s -- PIC, importing only lua.wasm's exports
 # (lua-exports.txt, from walios/build/lua in sandpie). Alpine installs them from the
