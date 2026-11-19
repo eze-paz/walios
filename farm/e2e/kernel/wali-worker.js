@@ -173,7 +173,11 @@ function inoOf(x) {
 // Directory mtimes: stable per kernel (first seen / last changed here), never "now" on every
 // stat -- statPath used to fall back to Date.now() for directories and symlinks.
 const dirMtimes = new Map();
-const dirTouch = (p) => dirMtimes.set(p, Date.now());
+// Strictly increasing per directory (10 us steps past the last stamp): Date.now() is whole
+// milliseconds, so two entries added within one ms left the mtime unchanged -- and git's
+// untracked cache, which trusts a directory whose mtime did not move, listed stale results
+// (t7063, intermittently). Linux stamps in nanoseconds; collisions there do not happen.
+const dirTouch = (p) => { const last = dirMtimes.get(p) || 0, now = Date.now(); dirMtimes.set(p, now > last ? now : last + 0.01); };
 // Directory owners. stat reported every directory as uid/gid 1000 (putStat's fallback) while
 // files and processes are uid 0: git's safe.directory check (owner of the repo dir == euid)
 // then refused every repository whose config did not list it -- "detected dubious ownership",
@@ -1102,25 +1106,9 @@ const modCache = new Map();   // key -> WebAssembly.Module
 const SPARE_POOL = (lim) => (!lim || lim.initial <= 160 ? 2 : 1);   // 160 pages = 10MB
 const SPARE_MAX_PAGES = 512;
 const spares = new Map();          // modKey -> [{ w, ctl, bulk, memory, ready, settle }]
-// Spares are kept for the SPARE_MODULES modules run most recently, not for every module ever run:
-// each holds a shared memory whose maximum (1-2 GB) is reserved address space, and a tab that
-// had run ~100 different programs (the farm e2e: one page, a hundred packages) could no longer
-// allocate the memory of the next process -- "WebAssembly.Memory(): could not allocate memory".
-const SPARE_MODULES = 8;
-function dropSpares(modKey) {
-  for (const sp of spares.get(modKey) || []) { try { sp.w.terminate(); } catch (_) {} }
-  spares.delete(modKey);
-}
 function takeSpare(modKey) {
   const list = spares.get(modKey);
   return list && list.length ? list.shift() : null;
-}
-// A shared memory for a process; when the address space is short, the idle spares go first.
-function newSharedMemory(desc) {
-  try { return new WebAssembly.Memory(desc); }
-  catch (e) { if (!(e instanceof RangeError) || !spares.size) throw e;
-    for (const k of [...spares.keys()]) dropSpares(k);
-    return new WebAssembly.Memory(desc); }
 }
 function prepareSpare(modKey, plan) {
   if (!plan || NODE_STUB_RE.test(modKey)) return;
@@ -1129,8 +1117,7 @@ function prepareSpare(modKey, plan) {
   const lim = plan.memory ? (modSharedMem.get(modKey) || { initial: 256, maximum: 16384 }) : null;
   if (lim && lim.initial > SPARE_MAX_PAGES) return;
   const list = spares.get(modKey) || [];
-  spares.delete(modKey); spares.set(modKey, list);          // most recently used last
-  for (const k of spares.keys()) { if (spares.size <= SPARE_MODULES) break; dropSpares(k); }
+  spares.set(modKey, list);
   while (list.length < SPARE_POOL(lim)) {
     try {
       const memory = lim ? new WebAssembly.Memory({ initial: lim.initial, maximum: lim.maximum, shared: true }) : null;
@@ -1658,6 +1645,7 @@ function unlinkPath(S, p) {
   opfsFault(p); if (!files.has(p)) return err(dirs.has(p) ? E.ISDIR : E.NOENT);
   if (protectedDelete(S, p)) return err(E.PERM);
   const f = files.get(p);
+  if (f.nlinkRef && f.nlinkRef.n > 1) f.nlinkRef.n--;   // one name fewer (st_nlink)
   if (f.pendingFrom) {                       // a pending link alias: never stored, nothing to delete
     const pl = pendingLinks.get(p); if (pl) { clearTimeout(pl.timer); pendingLinks.delete(p); }
     rmEntry(p); return 0n;
@@ -2474,7 +2462,7 @@ class Process {
     let f = files.get(path2); if (!f) return err(E.NOENT);
     if (f.sym !== undefined) { this.putStat(sp, { size: f.sym.length, mode: 0o120777, ino: inoOf(f), mtimeMs: f.mtimeMs, uid: f.uid ?? 0, gid: f.gid ?? 0 }); return 0n; }
     if (f.mtimeDirty) { opfsSettleMtime(f, path2); f = files.get(path2) || f; }
-    this.putStat(sp, { size: f.size, mode: f.mode, mtimeMs: f.mtimeMs, uid: f.uid ?? 0, gid: f.gid ?? 0, ino: inoOf(f) });
+    this.putStat(sp, { size: f.size, mode: f.mode, mtimeMs: f.mtimeMs, uid: f.uid ?? 0, gid: f.gid ?? 0, ino: inoOf(f), nlink: f.nlinkRef ? f.nlinkRef.n : 1 });
     return 0n;
   }
   openAt(path2, flags, mode) {
@@ -2542,8 +2530,16 @@ class Process {
     // O_NOFOLLOW: a symlink as the LAST component is ELOOP (git opens .gitattributes, .gitignore and
     // .mailmap that way so an in-tree symlink cannot point them outside the repo). It was followed.
     if (flags & 0o400000) { const lp = this.followDir(path2); opfsFault(lp); const lf = files.get(lp); if (lf && lf.sym !== undefined) return err(40); }
+    // O_CREAT|O_EXCL never follows a final symlink: the name exists, EEXIST -- even a dangling
+    // link. It was followed and the TARGET created: git apply --reject's .rej went through a
+    // planted symlink into the file it pointed at (t4115), exactly what O_EXCL is there to stop.
+    if ((flags & O_CREAT) && (flags & O_EXCL)) { const lp = this.followDir(path2); opfsFault(lp); const lf = files.get(lp); if (lf && lf.sym !== undefined) return err(E.EXIST); }
     path2 = this.follow(path2);   // a symlink to a directory (/files -> /root) opens the directory it points at
     opfsFault(path2);             // ...and the fault-in must be on the RESOLVED path
+    // A directory opened for writing (or truncated) is EISDIR on Linux; it opened as a directory
+    // fd, so the write silently went nowhere -- git format-patch "wrote" a cover letter onto a
+    // directory and exited 0 (t4014).
+    if (dirs.has(path2) && ((flags & 3) || (flags & O_TRUNC))) return err(E.ISDIR);
     if (dirs.has(path2)) { const g = this.allocFd(); this.fds.set(g, { path: path2, dir: true, cloexec: ce }); return BigInt(g); }
     if (flags & O_DIRECTORY) {   // POSIX: a MISSING dir is ENOENT, not ENOTDIR (git index-pack scans objects/XX and treats ENOTDIR as fatal)
       if (files.has(path2)) return err(E.NOTDIR);                                   // path exists as a file
@@ -2747,7 +2743,7 @@ class Process {
           // current: skip the round trip. Only an fd whose size is older asks again.
           if (f.mtimeDirty) opfsSettleMtime(f, h.path);
           if (id && !(Date.now() - (f.sizeAt || 0) < 25)) { const r = initOpfs().call(OFS.STAT, id, 0, 0, null); if (r.res >= 0) { const ab = auxBig(r); if (ab > 0) { f.size = ab - 1; f.sizeAt = Date.now(); } } }
-          S.putStat(a[1], { size: f.size, mode: f.mode, mtimeMs: f.mtimeMs, uid: f.uid ?? 0, gid: f.gid ?? 0, ino: inoOf(f) });
+          S.putStat(a[1], { size: f.size, mode: f.mode, mtimeMs: f.mtimeMs, uid: f.uid ?? 0, gid: f.gid ?? 0, ino: inoOf(f), nlink: f.nlinkRef ? f.nlinkRef.n : 1 });
           return 0n;
         }
         return S.statPath(h.path, a[1]); }
@@ -2970,13 +2966,16 @@ class Process {
           // Same inode as the source, in this kernel: git's clone --local checks a fresh link by
           // comparing st_ino/mode/size/uid with the source ("hardlink different from source").
           // A pending alias (pendingLinks above): the copy -- or a rename -- comes later.
+          // st_nlink: both names count each other in this kernel (find -links, git's t5605)
+          const ref = f.nlinkRef || (f.nlinkRef = { n: 1 }); ref.n++;
           files.set(pb, { br: opfsRel(pb), size: f.size, mtimeMs: f.mtimeMs, opfsM: undefined, data: null, mode: f.mode,
-                          linkIno: inoOf(f), pendingFrom: f, ...(f.uid !== undefined ? { uid: f.uid, gid: f.gid } : {}) });
+                          linkIno: inoOf(f), pendingFrom: f, nlinkRef: ref, ...(f.uid !== undefined ? { uid: f.uid, gid: f.gid } : {}) });
           pendingLinks.set(pb, { src: f, timer: linkTimer(pb) });
           return 0n;
         }
         const parent = pb.slice(0, pb.lastIndexOf('/')) || '/'; mkdirp(parent);
         dirs.get(parent).add(pb.slice(pb.lastIndexOf('/') + 1));
+        (f.nlinkRef || (f.nlinkRef = { n: 1 })).n++;
         files.set(pb, f); return 0n; } // same object: a real hard link
       case 'truncate': { const p = S.follow(S.atPath(-100, S.cstr(a[0]))); opfsFault(p); linkFlushPath(p);
         const f = files.get(p); if (!f) return err(E.NOENT);
@@ -3004,12 +3003,12 @@ class Process {
       }
       case 'utimensat': case 'utimes': case 'futimesat': { // touch/make set mtimes (atime not modeled)
         const UTIME_NOW = 0x3fffffff, UTIME_OMIT = 0x3ffffffe;
-        let f;
-        if (name !== 'utimes' && !a[1]) { const h = S.fds.get(a[0]); if (!h || !h.file) return err(E.BADF); f = h.file; } // futimens: NULL path = the fd itself
+        let f, dirP = null;
+        if (name !== 'utimes' && !a[1]) { const h = S.fds.get(a[0]); if (!h || (!h.file && !h.dir)) return err(E.BADF); if (h.dir) dirP = h.path; else f = h.file; } // futimens: NULL path = the fd itself
         else { const p = S.follow(name === 'utimes' ? S.atPath(-100, S.cstr(a[0])) : S.atPath(a[0], S.cstr(a[1])));
           opfsFault(p); linkFlushPath(p);
-          if (dirs.has(p)) return 0n;
-          f = files.get(p); if (!f) return err(E.NOENT); }
+          if (dirs.has(p)) dirP = p;
+          else { f = files.get(p); if (!f) return err(E.NOENT); } }
         const tp = name === 'utimes' ? a[1] : a[2];
         let mt = Date.now();
         if (tp) { S.refresh();
@@ -3017,6 +3016,9 @@ class Process {
           else { const ns = S.tsNs(tp + 16);                                                         // timespec[1] = mtime
             if (ns === UTIME_OMIT) return 0n;
             if (ns !== UTIME_NOW) mt = Number(S.r64(tp + 16)) * 1000 + ns / 1e6; } }
+        // A directory's time was ignored: git's untracked cache (t7063) back-dates directories
+        // with chmtime and then expects the change to be seen. Kept in this kernel (dirMtimes).
+        if (dirP !== null) { dirMtimes.set(dirP, mt); return 0n; }
         f.mtimeMs = mt;
         // On the mount the time must outlive this kernel's memory: OPFS keeps its own
         // lastModified, which the next listing reported instead (git's cruft packs, prune and
@@ -4138,7 +4140,7 @@ class Process {
   getSharedMemory() {
     if (!this.sharedMem) {
       const lim = modSharedMem.get(this.modKey) || { initial: 256, maximum: 16384 };
-      this.sharedMem = newSharedMemory({ initial: lim.initial, maximum: lim.maximum, shared: true });
+      this.sharedMem = new WebAssembly.Memory({ initial: lim.initial, maximum: lim.maximum, shared: true });
     }
     return this.sharedMem;
   }

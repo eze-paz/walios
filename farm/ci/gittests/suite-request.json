@@ -1,1 +1,1 @@
-{ "gittests": "gittests-2.45.3-15", "runtimes": "runtimes-wali-2026-11-18-11", "shards": 20, "timeout": 900, "env": "", "why": "final: kernel with fork-from-thread, FIFOs, mtimes, links, exec, nc; git with extras", "try": 3 }
+{ "gittests": "gittests-2.45.3-17", "runtimes": "runtimes-wali-2026-11-18-11", "shards": 20, "timeout": 1800, "why": "after fixing the remaining failures: O_EXCL symlink, nlink, dir utime, EISDIR, ICONV_OMITS_BOM, Makefile/COPYING", "try": 4 }
