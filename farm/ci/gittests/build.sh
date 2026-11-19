@@ -28,12 +28,22 @@ tar xzf z.tgz
 ( cd zlib-$ZV && CHOST=wasm32 CC="$CC" AR="$AR" RANLIB="$RANLIB" ./configure --static --prefix="$PWD/../zinst" >/dev/null \
   && make -j"$(nproc)" libz.a >/dev/null && make install >/dev/null )
 
+# libcurl (static, OpenSSL from the sysroot) for git's http transport: git-remote-http(s) and
+# git-http-fetch below. walios used to ship those as a separate September build in pkgcache,
+# which missed every fix since (env reader, real fork, ...). No threads in curl: its threaded
+# resolver trapped in WALI; the blocking resolver goes through the kernel's getaddrinfo.
+CURLV=8.11.1
+fetch https://curl.se/download/curl-$CURLV.tar.gz c.tgz && gzip -t c.tgz && tar xzf c.tgz
+( cd curl-$CURLV && cross_compiling=yes ./configure --host=wasm32-unknown-linux-musl --build=x86_64-pc-linux-gnu \n    --prefix="$PWD/../cinst" --disable-shared --enable-static --with-openssl --with-zlib="$PWD/../zinst" \n    --disable-threaded-resolver --disable-pthreads --disable-ldap --disable-ldaps --disable-rtsp --disable-dict \n    --disable-telnet --disable-tftp --disable-pop3 --disable-imap --disable-smtp --disable-gopher --disable-mqtt \n    --disable-smb --disable-manual --disable-docs --disable-unix-sockets \n    --without-libpsl --without-brotli --without-zstd --without-nghttp2 --without-libidn2 --without-libssh2 \n    --with-ca-bundle=/etc/ssl/certs/ca-certificates.crt --with-ca-path=/etc/ssl/certs >/dev/null \n    && make -j"$(nproc)" -C lib >/dev/null && make -C lib install >/dev/null && make -C include install >/dev/null \n    && install -m755 curl-config ../cinst/bin/curl-config 2>/dev/null || { mkdir -p ../cinst/bin && install -m755 curl-config ../cinst/bin/curl-config; } )
+test -f cinst/lib/libcurl.a || { echo "!! libcurl.a missing"; exit 1; }
+"$PWD/cinst/bin/curl-config" --static-libs
+
 fetch https://mirrors.edge.kernel.org/pub/software/scm/git/git-$GITV.tar.gz g.tgz && tar xzf g.tgz
 cd git-$GITV
 MAKEVARS=(
   CC="$CC" AR="$AR" RANLIB="$RANLIB"
   uname_S=Linux uname_M=x86_64 uname_R=6.0 HOST_CPU=x86_64
-  NO_CURL=YesPlease NO_OPENSSL=YesPlease NO_GETTEXT=YesPlease NO_EXPAT=YesPlease
+  CURL_CONFIG="$PWD/../cinst/bin/curl-config" CURLDIR= NO_OPENSSL=YesPlease NO_GETTEXT=YesPlease NO_EXPAT=YesPlease
   # musl's iconv writes UTF-16/UTF-32 big-endian WITHOUT a byte-order mark (glibc writes one);
   # git adds the BOM itself for working-tree-encoding=UTF-16 files when told (t0028, t2082)
   ICONV_OMITS_BOM=YesPlease
@@ -95,7 +105,7 @@ ls -la "$OUT/git-asyncfork.wasm"
 # git-daemon in /usr/libexec/git-core. Same tree and flags as git; each forks, so each gets
 # the Asyncify pass too. Their own git-extras.tar.gz (~3 MB): sandpie mounts it when git first
 # runs, so the boot-time git-core.tar.gz (scripts, iconv) stays small.
-EXTRA="scalar git-shell git-http-backend git-daemon"
+EXTRA="scalar git-shell git-http-backend git-daemon git-remote-http git-http-fetch"
 make -j"$(nproc)" "${MAKEVARS[@]}" prefix=/usr CFLAGS="-O2 -I$PWD/../zinst/include -D__WALI_ASYNCIFY_FORK" $EXTRA
 mkdir -p ../gx/usr/bin ../gx/usr/libexec/git-core
 for b in $EXTRA; do
@@ -104,6 +114,10 @@ for b in $EXTRA; do
   chmod 755 "$dst"; ls -la "$dst"
 done
 cp ../gx/usr/bin/git-shell ../gx/usr/libexec/git-core/git-shell
+# git-remote-https/ftp/ftps: the same program, which picks the scheme from argv[0] (make install
+# hardlinks them; links here)
+for s in https ftp ftps; do ln -sf git-remote-http ../gx/usr/libexec/git-core/git-remote-$s; done
+for w in libcurl/ OpenSSL; do strings ../gx/usr/libexec/git-core/git-remote-http | grep -q "$w" || { echo "!! git-remote-http has no $w"; exit 1; }; done
 tar czf "$OUT/git-extras-$GITV.tar.gz" -C ../gx usr
 # iconv(1) (iconv.c, on musl's iconv(3)): Linux has the command, busybox has no applet, and
 # git's tests pipe through it (t7102). Ships in git-core.tar.gz at /usr/bin/iconv. Built here,
