@@ -1,1 +1,6 @@
-{"pkgs":"perl-dbd-sqlite perl-dbd-pg spamassassin memcached graphviz rrdtool perl-dbi perl-json-xs perl-net-ssleay coreutils fuse3 alsa-lib","max":600,"chunk":3,"publish":true,"note":"R69 canary (TC v52): host perl modules from depends too, MakeMaker CC=wasm for non-perl-* recipes, link-error summary without __wali_needed noise"}
+{
+  "all": true,
+  "max": 3000,
+  "publish": true,
+  "note": "R70 full run (TC v53): R65-R69 fixes (noelfasm .symver aliases, -dumpfullversion, coverage flags dropped, host perl modules from depends+makedepends via WaliInc.pm, vendor_perl layout, MakeMaker CC=wasm, CMAKE package root ONLY) + sysroot OpenSSL archives at the end of every program link (memcached via sasl digestmd5)"
+}

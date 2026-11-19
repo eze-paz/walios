@@ -277,7 +277,9 @@ if [ \$link = 1 ]; then
   # libffi is the sysroot's (WALI port, above), so no package's archives carry it: a program
   # linking a library that uses it (glib's gobject-query, via libgobject's fake .so, which holds
   # no record of its -lffi) gets it here -- an archive only contributes what something needs.
-  TAIL=($cxxlibs -lwali-farm \$([ -f $S/lib/libffi.a ] && echo $S/lib/libffi.a) -lc $S/lib/libclang_rt.builtins.a)
+  # Likewise OpenSSL (sysroot): a dep archive using it (cyrus-sasl plugin libdigestmd5.a, pulled
+  # in for memcached) holds no record of -lcrypto.
+  TAIL=($cxxlibs -lwali-farm \$([ -f $S/lib/libffi.a ] && echo $S/lib/libffi.a) \$([ -f $S/lib/libssl.a ] && echo $S/lib/libssl.a $S/lib/libcrypto.a) -lc $S/lib/libclang_rt.builtins.a)
   G=()
   if [ -n "\${WALI_OVERLAY_LIBS+set}" ]; then
     # the package's own deps' archives (build-one.sh, from the plan's dependency closure)
