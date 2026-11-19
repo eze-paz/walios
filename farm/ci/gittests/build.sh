@@ -34,6 +34,9 @@ MAKEVARS=(
   CC="$CC" AR="$AR" RANLIB="$RANLIB"
   uname_S=Linux uname_M=x86_64 uname_R=6.0 HOST_CPU=x86_64
   NO_CURL=YesPlease NO_OPENSSL=YesPlease NO_GETTEXT=YesPlease NO_EXPAT=YesPlease
+  # musl's iconv writes UTF-16/UTF-32 big-endian WITHOUT a byte-order mark (glibc writes one);
+  # git adds the BOM itself for working-tree-encoding=UTF-16 files when told (t0028, t2082)
+  ICONV_OMITS_BOM=YesPlease
   NO_TCLTK=YesPlease NO_PERL=YesPlease NO_PYTHON=YesPlease NO_GITWEB=YesPlease NO_REGEX=YesPlease
   NO_UNIX_SOCKETS=YesPlease NO_INSTALL_HARDLINKS=YesPlease HAVE_ALLOCA_H=YesPlease
   NO_MMAP= NO_PTHREADS=
