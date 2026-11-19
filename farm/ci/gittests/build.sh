@@ -125,7 +125,7 @@ cp ../gx/usr/bin/git-shell ../gx/usr/libexec/git-core/git-shell
 # git-remote-https/ftp/ftps: the same program, which picks the scheme from argv[0] (make install
 # hardlinks them; links here)
 for s in https ftp ftps; do ln -sf git-remote-http ../gx/usr/libexec/git-core/git-remote-$s; done
-for w in libcurl/ OpenSSL; do strings ../gx/usr/libexec/git-core/git-remote-http | grep -q "$w" || { echo "!! git-remote-http has no $w"; exit 1; }; done
+for w in "Could not resolve host" OpenSSL; do strings ../gx/usr/libexec/git-core/git-remote-http | grep -q "$w" || { echo "!! git-remote-http has no $w"; exit 1; }; done
 tar czf "$OUT/git-extras-$GITV.tar.gz" -C ../gx usr
 # iconv(1) (iconv.c, on musl's iconv(3)): Linux has the command, busybox has no applet, and
 # git's tests pipe through it (t7102). Ships in git-core.tar.gz at /usr/bin/iconv. Built here,
