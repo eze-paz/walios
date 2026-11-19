@@ -34,7 +34,15 @@ tar xzf z.tgz
 # resolver trapped in WALI; the blocking resolver goes through the kernel's getaddrinfo.
 CURLV=8.11.1
 fetch https://curl.se/download/curl-$CURLV.tar.gz c.tgz && gzip -t c.tgz && tar xzf c.tgz
-( cd curl-$CURLV && cross_compiling=yes ./configure --host=wasm32-unknown-linux-musl --build=x86_64-pc-linux-gnu \n    --prefix="$PWD/../cinst" --disable-shared --enable-static --with-openssl --with-zlib="$PWD/../zinst" \n    --disable-threaded-resolver --disable-pthreads --disable-ldap --disable-ldaps --disable-rtsp --disable-dict \n    --disable-telnet --disable-tftp --disable-pop3 --disable-imap --disable-smtp --disable-gopher --disable-mqtt \n    --disable-smb --disable-manual --disable-docs --disable-unix-sockets \n    --without-libpsl --without-brotli --without-zstd --without-nghttp2 --without-libidn2 --without-libssh2 \n    --with-ca-bundle=/etc/ssl/certs/ca-certificates.crt --with-ca-path=/etc/ssl/certs >/dev/null \n    && make -j"$(nproc)" -C lib >/dev/null && make -C lib install >/dev/null && make -C include install >/dev/null \n    && install -m755 curl-config ../cinst/bin/curl-config 2>/dev/null || { mkdir -p ../cinst/bin && install -m755 curl-config ../cinst/bin/curl-config; } )
+( cd curl-$CURLV && cross_compiling=yes ./configure --host=wasm32-unknown-linux-musl --build=x86_64-pc-linux-gnu \
+    --prefix="$PWD/../cinst" --disable-shared --enable-static --with-openssl --with-zlib="$PWD/../zinst" \
+    --disable-threaded-resolver --disable-pthreads --disable-ldap --disable-ldaps --disable-rtsp --disable-dict \
+    --disable-telnet --disable-tftp --disable-pop3 --disable-imap --disable-smtp --disable-gopher --disable-mqtt \
+    --disable-smb --disable-manual --disable-docs --disable-unix-sockets \
+    --without-libpsl --without-brotli --without-zstd --without-nghttp2 --without-libidn2 --without-libssh2 \
+    --with-ca-bundle=/etc/ssl/certs/ca-certificates.crt --with-ca-path=/etc/ssl/certs | tail -40 \
+  && make -j"$(nproc)" -C lib >/dev/null && make -C lib install >/dev/null && make -C include install >/dev/null \
+  && mkdir -p ../cinst/bin && install -m755 curl-config ../cinst/bin/curl-config )
 test -f cinst/lib/libcurl.a || { echo "!! libcurl.a missing"; exit 1; }
 "$PWD/cinst/bin/curl-config" --static-libs
 
