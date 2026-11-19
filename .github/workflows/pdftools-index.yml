@@ -30,7 +30,7 @@ jobs:
             const rel = (tag, file) => file.startsWith("../") ? file : "../" + tag + "/" + file;
             for (const e of Object.values(f.packages)) if (e.file) e.file = rel(FARM, e.file);
             let n = 0;
-            for (const [k, e] of Object.entries(p.packages)) { f.packages[k] = { ...e, file: rel(PDF, e.file) }; n++;
+            for (const [k, e] of Object.entries(p.packages)) { f.packages[k] = e.file ? { ...e, file: rel(PDF, e.file) } : e; n++;
               if (f.failed) delete f.failed[k]; if (f.skipped) delete f.skipped[k]; }
             f.tag = TAG; f.merged = { farm: FARM, pdftools: PDF };
             require("fs").writeFileSync("out/index.json", JSON.stringify(f));
