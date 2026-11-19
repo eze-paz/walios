@@ -256,11 +256,18 @@ if [ -n "$srcs" ]; then
              "https://src.fedoraproject.org/repo/pkgs/${src_name%%[-_]*}/$src_name/sha512/$sha/$src_name"; do
       dl "$u" && [ "$(sha512sum "$bdir/$src_name" | cut -d' ' -f1)" = "$sha" ] && { echo "farm: $src_name from $u (sha512 checked)" >> "$log"; return 0; }
     done; return 1; }
+  # Then the farm's own copy (release "sources" on this repo): files whose hosts never answer the
+  # runners (invisible-mirror.net times out for them: ncurses' weekly snapshots, which Alpine's
+  # distfiles lag behind). Taken only when the recipe lists its sha512 and it matches.
+  ghsrc() { local sha; sha=$(apk sha512sums | awk -v n="$src_name" '$2 == n { print $1 }'); [ -n "$sha" ] || return 1
+    dl "https://github.com/eze-paz/walios/releases/download/sources/$src_name" &&
+      [ "$(sha512sum "$bdir/$src_name" | cut -d' ' -f1)" = "$sha" ] && { echo "farm: $src_name from the sources release (sha512 checked)" >> "$log"; return 0; }
+    return 1; }
   SRC=""
   for src_entry in $srcs; do
     src_name="${src_entry%%::*}"; src_url="${src_entry##*::}"
     [ "$src_name" = "$src_url" ] && src_name="$(basename "$src_url")"
-    dl "$src_url" || dl "https://distfiles.alpinelinux.org/distfiles/edge/$src_name"     || dl "https://distfiles.alpinelinux.org/distfiles/v3.22/$src_name" || mirror || emit fail dl-failed
+    dl "$src_url" || dl "https://distfiles.alpinelinux.org/distfiles/edge/$src_name"     || dl "https://distfiles.alpinelinux.org/distfiles/v3.22/$src_name" || mirror || ghsrc || { echo "farm: dl-failed $src_name <- $src_url" >> "$log"; emit fail dl-failed; }
     # tar first; bsdtar for what GNU tar cannot open (.zip, .tar.lz, .7z...)
     before=$(ls "$bdir")
     case "$src_name" in *.tar*|*.tgz|*.tbz*|*.txz|*.zip|*.7z|*.lz|*.zst)

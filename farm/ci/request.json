@@ -1,6 +1,7 @@
 {
-  "all": true,
-  "max": 3000,
+  "pkgs": "ncurses readline 7zip acf-samba alsa-utils awall bash bc dialog dnstop git goaccess htop iftop less libedit lua-bit32 lua-cjson lua-discount lua-expat lua-filesystem lua-iconv lua-luaxml lua-lyaml lua-lzlib lua-md5 lua-posix lua-posixtz lua-pty lua-rex lua-socket lua-struct lua-system lua-yaml lua5.4 lynx minicom nano ncdu nload nmap pcre2 pinentry procps-ng psmisc py3-html5lib py3-jinja2 py3-mako screen sircbot statserial testdisk tig tmux uwsgi yash zsh",
+  "max": 600,
+  "chunk": 3,
   "publish": true,
-  "note": "R63 full run (TC v45): posix_spawn shim, native ELF exec under WALI_HOST_ENV, wali-elfdata; R62 canary: icu installs its .pc files"
+  "note": "R64 canary: sources-release fallback (sha512-checked) for hosts that ignore the runners -- ncurses 6.6-20261114 from invisible-mirror timed out in R63 and cascaded into curses programs, readline/lua5.4 and lua modules, pcre2/git; rebuild ncurses + every package R63 lost vs R50"
 }
