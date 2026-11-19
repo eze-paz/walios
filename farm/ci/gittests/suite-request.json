@@ -1,1 +1,1 @@
-{"gittests":"gittests-2.45.3-19","runtimes":"runtimes-wali-2026-11-18-11","shards":3,"timeout":1800,"why":"t-basic, po/is.po, mergetools in the test package","try":6,"only":"t0080-unit-test-output,t0200-gettext-basic,t7609-mergetool--lib"}
+{"gittests":"gittests-2.45.3-22","runtimes":"runtimes-wali-2026-11-18-11","shards":20,"timeout":1800,"why":"git with libcurl: git-remote-http(s), git-http-fetch from the same tree","try":7}
