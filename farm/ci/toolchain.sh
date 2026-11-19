@@ -300,7 +300,11 @@ if [ \$link = 1 ]; then
     esac
     { [ -n "\$f" ] && [ -f "\$f" ]; } || continue
     case "\$seen" in *" \$f "*) continue;; esac; seen="\$seen\$f "
-    while read -r y; do [ -n "\$y" ] && { NEEDED+=("\$y"); todo+=("\$y"); }; done < <($L/llvm-ar p "\$f" __wali_needed 2>/dev/null)
+    # an archive recorded by path that is not there any more (the overlay unpacked somewhere else,
+    # as farm/e2e/libtest.sh does) is looked for by name in the link's dirs, else left out
+    while read -r y; do [ -n "\$y" ] || continue
+      case "\$y" in /*) [ -f "\$y" ] || { z=""; for d in "\${dirs[@]}"; do [ -f "\$d/\${y##*/}" ] && { z=\$d/\${y##*/}; break; }; done; [ -n "\$z" ] || continue; y=\$z; };; esac
+      NEEDED+=("\$y"); todo+=("\$y"); done < <($L/llvm-ar p "\$f" __wali_needed 2>/dev/null)
   done
   A+=("\${NEEDED[@]}")
   if [ \${#G[@]} -gt 0 ]; then
