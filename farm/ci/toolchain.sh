@@ -422,7 +422,7 @@ NOELF_EXT=$ext perl -0pi -e '
     else { $m }
   }ge;
   s/__attribute__\s*\(\(\s*(?:__)?section(?:__)?\s*\(\s*"\.gnu\.warning\.[^)]*\)\s*\)\)//g;
-  my $src = $_;   # (not where the name has a definition of its own: fuse3's static inline)
+  my $src = $_;   # (not where the name has a definition of its own: a fuse3 static inline)
   @al = grep { my $n = $_->[1]; $src !~ /\b\Q$n\E\s*\([^;{]*\)\s*\{/ } @al;
   $_ .= join "", map { "\nextern __typeof($_->[0]) $_->[1] __attribute__((alias(\"$_->[0]\")));\n" } @al;
 ' "$t/s.$ext"

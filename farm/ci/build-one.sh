@@ -210,9 +210,19 @@ fi
 # Path::Class, ExtUtils::CChecker, Net::DNS for spamassassin's configure, XML::Parser for
 # intltool) run on the HOST perl, as a native build has them installed: Ubuntu's
 # libfoo-bar-perl. (Their pure-Perl copies in the overlay are not enough: DBI is XS.)
-PM=""; for d in $(apk makedepends); do case "$d" in perl-*) n=${d#perl-}; PM="$PM lib${n%-dev}-perl";; esac; done
+# (perl-dev is perl itself; perl-libwww is Debian's libwww-perl, no second lib)
+PM=""; for d in $(apk makedepends); do case "$d" in perl-dev) ;; perl-lib*) n=${d#perl-}; PM="$PM ${n%-dev}-perl";; perl-*) n=${d#perl-}; PM="$PM lib${n%-dev}-perl";; esac; done
 for p in $PM; do sudo timeout 120 apt-get install -y -qq --no-install-recommends "$p" >/dev/null 2>&1 ||
   echo "farm: no host perl package $p" >>"$log"; done
+# The overlay's Perl dirs go at the END of @INC (WaliInc.pm, loaded through PERL5OPT): in
+# front, the walios copy of an XS module (DBI) hid the host's, and `use DBI` failed in the
+# DBD::* Makefile.PLs ("DBI 1.57 is required to configure this module").
+pinc=$(mktemp -d); printf 'push @INC, grep length, split /:/, ($ENV{WALI_PERL_INC} || "");\n1;\n' > "$pinc/WaliInc.pm"
+export WALI_PERL_INC="$OVERLAY/usr/share/perl5/vendor_perl:$OVERLAY/usr/share/perl5" PERL5LIB="$pinc${PERL5LIB:+:$PERL5LIB}" PERL5OPT="-MWaliInc"
+# MakeMaker installs where Alpine's perl has its vendor dirs (the runner's are Debian's
+# /usr/share/perl5): spamassassin's package() runs its installed scripts with
+# PERL5LIB=$pkgdir/usr/share/perl5/vendor_perl and found no Mail/SpamAssassin.pm.
+case "$pkg" in perl-*) ;; *) export PERL_MM_OPT="INSTALLDIRS=vendor INSTALLVENDORLIB=/usr/share/perl5/vendor_perl INSTALLVENDORARCH=/usr/lib/perl5/vendor_perl INSTALLVENDORBIN=/usr/bin INSTALLVENDORSCRIPT=/usr/bin";; esac
 # Lua C modules (recipes looping over $_luaversions): built for Lua 5.4 only, what walios'
 # lua.wasm is, as wasm side modules it dlopen()s -- PIC, importing only lua.wasm's exports
 # (lua-exports.txt, from walios/build/lua in sandpie). Alpine installs them from the
@@ -236,7 +246,8 @@ if [ -z "$NOARCH" ] && case "$pkg" in perl-*) true;; *) false;; esac; then
   # Makefile.PL's compiler probes (ExtUtils::CBuilder, Config::AutoConf) link with $LD, which
   # the toolchain sets to the bare wasm-ld wrapper; and they `use` build-time modules the
   # farm built as pure-Perl packages (Canary::Stability...), in the overlay's noarch dir.
-  export LD="$CC" PERL5LIB="$OVERLAY/usr/share/perl5/vendor_perl:$OVERLAY/usr/share/perl5${PERL5LIB:+:$PERL5LIB}"
+  # (those reach @INC through WaliInc.pm above, after the host's own dirs)
+  export LD="$CC"
   pc=$WALI_TC/perl-core/5.44.0/wasm32-linux/CORE
   PERLXS_MAKE="PERL_HDRS= PERL_INC=$pc PERL_INCDEP=$pc CC=$CC LD=$CC CCFLAGS=-D_GNU_SOURCE OPTIMIZE=-O2 CCCDLFLAGS=-fPIC LDDLFLAGS=-shared LDFLAGS= INSTALLVENDORARCH=/usr/lib/perl5/vendor_perl INSTALLVENDORLIB=/usr/share/perl5/vendor_perl"
 fi
