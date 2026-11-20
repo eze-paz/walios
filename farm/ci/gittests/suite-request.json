@@ -1,1 +1,1 @@
-{"gittests":"gittests-2.45.3-23","runtimes":"runtimes-wali-2026-11-18-11","shards":20,"timeout":2700,"why":"kernel: FUTEX_REQUEUE (t7810 condvar deadlock), sub-ms CLOCK_REALTIME (t4020); stackhop git","try":14}
+{"gittests":"gittests-2.45.3-23","runtimes":"runtimes-wali-2026-11-18-11","shards":20,"timeout":2700,"why":"link copies on the mount keep the source mtime (t7701); vfs8 kernel as deployed","try":15}

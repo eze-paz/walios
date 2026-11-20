@@ -616,6 +616,14 @@ function linkMaterialize(pb) {        // make the pending alias pb a real store 
     const r = br.call(OFS.LINK, pbb.length, 0, 0, pbb);   // may throw NeedAsync: the entry stays for the replay
     ok = r.res >= 0 || r.res === -E.EXIST;
     if (!ok) post(`[host] link: could not copy ${pb} (errno ${-r.res}); the new name is dropped\n`, 2);
+    // The copy carries the mtime OPFS has for the source -- its flush time, which can be a
+    // second past the write time this kernel reports for it. A hard link is one inode, so pin
+    // the copy to the source's time as this kernel knows it (t7701: objects loosened from a
+    // pack got the pack's time, and its link reported a second later).
+    if (r.res >= 0 && fa.mtimeMs !== undefined) {
+      const ms = Math.max(0, Math.round(fa.mtimeMs)), nb = te.encode(opfsRel(pb));
+      try { const r2 = br.call(OFS.SETMTIME, nb.length, Math.floor(ms / 1000) | 0, ms % 1000, nb); if (r2.res >= 0) fa.opfsM = ms; } catch (_) {}
+    }
   }
   clearTimeout(pl.timer); pendingLinks.delete(pb); delete fa.pendingFrom;
   if (!ok) rmEntry(pb);
@@ -1126,7 +1134,7 @@ function prepareSpare(modKey, plan) {
       try { bulk = new SharedArrayBuffer(1 << 20, { maxByteLength: 64 << 20 }); }
       catch (_) { bulk = new SharedArrayBuffer(32 << 20); }
       const ctl = new SharedArrayBuffer(KCTL.BYTES);
-      const w = new Worker('wali-proc-worker.js?v=tfork4');
+      const w = new Worker('wali-proc-worker.js?v=tfork5');
       let settle;
       const ready = new Promise((res) => { settle = res; });
       const sp = { w, ctl, bulk, memory, ready, settle: (m) => settle(m) };
@@ -4236,7 +4244,7 @@ class Process {
     }
     this._bulk = bulk;
     const ctl = spare ? spare.ctl : new SharedArrayBuffer(KCTL.BYTES);
-    const w = spare ? spare.w : new Worker(NODE_STUB_RE.test(this.modKey) ? NODE_WORKER_URL : 'wali-proc-worker.js?v=tfork4');
+    const w = spare ? spare.w : new Worker(NODE_STUB_RE.test(this.modKey) ? NODE_WORKER_URL : 'wali-proc-worker.js?v=tfork5');
     this.procWorker = w;
     const st = { exit: null };
     const ready = spare ? spare.ready : new Promise((res) => { this._procReady = res; });
@@ -4348,7 +4356,7 @@ class Process {
     const tid = this._nextTid = (this._nextTid || 1) + 1;
     if (this.sig.masks) this.sig.masks.set(tid, this.sig.mask);   // a new thread starts with its creator's mask
     const ctl = new SharedArrayBuffer(KCTL.BYTES);
-    const w = new Worker('wali-proc-worker.js?v=tfork4');
+    const w = new Worker('wali-proc-worker.js?v=tfork5');
     w._ph = 'new';   // thread startup phase, shown in the stats list: new -> ready -> run
     (this._threads = this._threads || []).push(w);
     const st = { exit: null };
