@@ -1063,7 +1063,8 @@ function statsSnapshot(t0) {
     const pm = procMemBytes(P);
     try { if (P.memory && !seen.has(P.memory)) { seen.add(P.memory); mem += pm; } } catch (_) {}
     running += e.running; threads += 1 + ((P._threads && P._threads.length) || 0);
-    list.push({ pid: P.pid, comm: procComm(P), mem: pm, cpu: Math.round((P.cpuMs || 0) + e.cpu), run: e.running });
+    list.push({ pid: P.pid, comm: procComm(P), mem: pm, cpu: Math.round((P.cpuMs || 0) + e.cpu), run: e.running,
+                 ...(P._threads && P._threads.length ? { thr: P._threads.map((w) => w._ph || '?').join(',') } : {}) });
   }
   let cpuLiveMs = 0; for (const r of cpuLive) cpuLiveMs += cpuOfRec(r);
   return { t: 'stats', mem, procs: procs.size, syscalls: syscallTotal, ms: performance.now() - t0,
@@ -4325,11 +4326,12 @@ class Process {
     if (this.sig.masks) this.sig.masks.set(tid, this.sig.mask);   // a new thread starts with its creator's mask
     const ctl = new SharedArrayBuffer(KCTL.BYTES);
     const w = new Worker('wali-proc-worker.js?v=tfork4');
+    w._ph = 'new';   // thread startup phase, shown in the stats list: new -> ready -> run
     (this._threads = this._threads || []).push(w);
     const st = { exit: null };
     const ready = new Promise((res) => {
       w.onmessage = (ev) => { const m = ev.data;
-        if (m.t === 'ready') res(m);
+        if (m.t === 'ready') { w._ph = 'ready'; res(m); }
         else if (m.t === 'warn') post('[host] ' + m.s + '\n', 2);
         else if (m.t === 'trap') post(`[host] thread ${tid} of pid ${this.pid}: ${m.error}\n`, 2); };
     });
@@ -4338,7 +4340,7 @@ class Process {
     w.postMessage({ t: 'init', mod, ctl, names: plan.names, sigs: plan.sigv, bulk: this._bulk, memory: this.memory });
     ready.then((r) => {
       if (!r.ok) { post(`[host] thread ${tid} of pid ${this.pid} failed to start: ${r.error}\n`, 2); return; }
-      w.postMessage({ t: 'run', mode: 'thread', entry, tid, startArg: Number(startArg) });
+      w._ph = 'run'; w.postMessage({ t: 'run', mode: 'thread', entry, tid, startArg: Number(startArg) });
       return this._serve(w, ctl, plan, this._bulk, st, false, tid);
     }).catch((e) => post(`[host] thread ${tid} of pid ${this.pid}: ${(e && e.stack) || e}\n`, 2))
       .finally(() => { try { w.terminate(); } catch (_) {} const i = (this._threads || []).indexOf(w); if (i >= 0) this._threads.splice(i, 1); });

@@ -1,1 +1,1 @@
-{"gittests":"gittests-2.45.3-23","runtimes":"runtimes-wali-2026-11-18-11","shards":5,"timeout":2700,"why":"clock fix (t4020), t1092 near limit, t7810 kernel stats at timeout","try":12,"only":"t7810-grep,t1092-sparse-checkout-compatibility,t4020-diff-external,t4020-diff-external,t6700-tree-depth"}
+{"gittests":"gittests-2.45.3-23","runtimes":"runtimes-wali-2026-11-18-11","shards":1,"timeout":600,"why":"t7810: thread startup phases at timeout","try":13,"only":"t7810-grep"}

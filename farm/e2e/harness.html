@@ -42,7 +42,7 @@ const walRun1 = (msg, ms) => new Promise((resolve) => {
   // On a timeout the kernel's last stats snapshot (it posts one every few seconds) is appended:
   // which processes were alive, their threads and CPU -- what a hung script was waiting on.
   const statsText = () => !stats ? '' : `\n[harness] last kernel stats: procs ${stats.procs} threads ${stats.threads} running ${stats.running} lag ${stats.lag}ms kBusy ${Math.round(stats.kBusyMs)}ms\n`
-    + (stats.list || []).map((p) => `[harness]   pid ${p.pid} ${p.comm} cpu ${p.cpu}ms run ${p.run} mem ${Math.round(p.mem / 1048576)}M`).join('\n') + '\n';
+    + (stats.list || []).map((p) => `[harness]   pid ${p.pid} ${p.comm} cpu ${p.cpu}ms run ${p.run} mem ${Math.round(p.mem / 1048576)}M${p.thr ? ' threads ' + p.thr : ''}`).join('\n') + '\n';
   const timer = setTimeout(() => { w.terminate(); resolve({ out: out + statsText(), code: -1, timeout: true }); }, ms);
   w.onmessage = (ev) => {
     const m = ev.data;
