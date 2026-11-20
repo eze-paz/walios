@@ -16,7 +16,7 @@ const DENY = new Set(['autoconf', 'automake', 'libtool', 'pkgconf', 'pkgconfig',
   'meson', 'ninja', 'samurai', 'bison', 'gettext', 'gettext-tiny', 'gettext-dev', 'texinfo',
   'perl', 'python3', 'py3-setuptools', 'linux-headers', 'musl-dev', 'gcc', 'g++', 'clang', 'llvm',
   'bsd-compat-headers', 'byacc', 'gperf', 'help2man', 'doxygen', 'groff', 'scdoc', 'asciidoc',
-  'coreutils', 'grep', 'sed', 'gzip', 'xz', 'zstd', 'brotli', 'go', 'rust', 'cargo', 'ca-certificates',
+  'coreutils', 'grep', 'sed', 'gzip', 'go', 'rust', 'cargo', 'ca-certificates',
   'openrc', 'lang', 'bash', 'sh']);
 const clean = (d) => d.replace(/[<>=~].*$/, '').replace(/-dev$/, '');
 const skip = (d) => !d || d.includes(':') || d.startsWith('!') || d.startsWith('$') || DENY.has(d) ||
