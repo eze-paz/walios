@@ -12,7 +12,7 @@
 const fs = require('fs'), path = require('path');
 const { execFileSync } = require('child_process');
 const APORTS = 'https://git.alpinelinux.org/aports/plain';
-const DENY = new Set(['autoconf', 'automake', 'libtool', 'pkgconf', 'pkgconfig', 'make', 'cmake',
+const DENY = new Set(['autoconf', 'automake', 'pkgconf', 'pkgconfig', 'make', 'cmake',
   'meson', 'ninja', 'samurai', 'bison', 'gettext', 'gettext-tiny', 'gettext-dev', 'texinfo',
   'perl', 'python3', 'py3-setuptools', 'linux-headers', 'musl-dev', 'gcc', 'g++', 'clang', 'llvm',
   'bsd-compat-headers', 'byacc', 'gperf', 'help2man', 'doxygen', 'groff', 'scdoc', 'asciidoc',
