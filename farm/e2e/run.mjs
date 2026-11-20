@@ -61,9 +61,26 @@ const norm = (s) => String(s || '').replace(/\s+/g, ' ').trim();
 // sometimes another one's ("../farm-2026-11-04-42-b/tree.wasm", a re-built package patched
 // in). Its local copy is that URL flattened into one name.
 const loc = (f) => f.replace(/[\/\\]/g, '__');
+// A dep as the recipe names it (its runtime depends=) -> the index entry that provides it:
+// itself, a subpackage alias (index.aliases), or a Lua module subpackage (lua5.4-posix is the
+// aport lua-posix, as plan.js maps it).
+const ALIASES = index.aliases || {};
+const provider = (d) => {
+  for (const c of [d, ALIASES[d], d.replace(/^lua5\.\d-/, 'lua-'), d.replace(/-lua5\.\d$/, '')]) if (c && P[c]) return c;
+  return null;
+};
 const modDeps = (pkg, seen = new Set()) => {
-  for (const d of (P[pkg] && P[pkg].deps) || []) if (P[d] && P[d].kind === 'mod' && !seen.has(d)) { seen.add(d); modDeps(d, seen); }
+  for (const x of (P[pkg] && P[pkg].deps) || []) { const d = provider(x); if (d && P[d].kind === 'mod' && !seen.has(d)) { seen.add(d); modDeps(d, seen); } }
   return seen;
+};
+// The programs a package (or one of its mod deps) runs: `apk add` installs them with it
+// (dns-root-hints and tpaste call curl, bats-core is a bash script; R70 e2e had them failing
+// "curl: not found", "can't execute 'bash'"). Mounted at /bin/<prog>, the name the farm ran.
+const progOf = (d) => { const m = /^([^:\s]+):/.exec(P[d].smoke || ''); return m ? m[1] : d; };
+const exeDeps = (pkg) => {
+  const out = new Set();
+  for (const p of [pkg, ...modDeps(pkg)]) for (const x of P[p].deps || []) { const d = provider(x); if (d && P[d].kind === 'exe' && P[d].file) out.add(d); }
+  return out;
 };
 
 function buildCase(pkg) {
@@ -85,6 +102,7 @@ function buildCase(pkg) {
   }
   if (r.kind !== 'mod') return null;
   const tars = [pkg, ...modDeps(pkg)].filter((d) => P[d].file).map((d) => ['/f/' + loc(P[d].file), '/']);
+  const progs = Object.fromEntries([...exeDeps(pkg)].map((d) => [progOf(d), '/f/' + loc(P[d].file)]));
   const names = tarNames(path.join(FARM, loc(r.file)));
   // The language comes from what the package installs, not its name (meson, scons and cython
   // are Python; acf-* are Lua web apps; fonts are just files).
@@ -97,19 +115,19 @@ function buildCase(pkg) {
   const luas = names.map((n) => /^usr\/(?:share|lib)\/lua\/(?:5\.4|common)\/(.+?)(?:\/init)?\.(?:lua|so)$/.exec(n)).filter(Boolean).map((m) => m[1].replace(/\//g, '.'));
   if (tops.size) {
     const list = JSON.stringify([...tops]);
-    return { pkg, kind: 'py', tars, tops: [...tops],
+    return { pkg, kind: 'py', tars, manifest: progs, tops: [...tops],
       cmd: `python3 -c 'import importlib, json\nok = []\nfor n in ${list}:\n    try:\n        importlib.import_module(n); ok.append(n)\n    except BaseException as e:\n        print("IMPORT-FAIL", n, type(e).__name__, str(e)[:300])\nprint("__imported", len(ok), "of", len(${list}))'` };
   }
   if (pms.length) {
     const want = pkg.replace(/^perl-/, '').toLowerCase().replace(/-/g, '/');
     const main = pms.find((p) => p.toLowerCase() === want) || pms.sort((a, b) => a.split('/').length - b.split('/').length || a.length - b.length)[0];
     const mod = main.replace(/\//g, '::');
-    return { pkg, kind: 'perl', tars, mod, cmd: `perl -e 'require ${mod}; print "__ok ${mod}\\n"' 2>&1` };
+    return { pkg, kind: 'perl', tars, manifest: progs, mod, cmd: `perl -e 'require ${mod}; print "__ok ${mod}\\n"' 2>&1` };
   }
   if (luas.length) {
     const want = pkg.replace(/^lua-/, '').toLowerCase();
     const main = luas.find((m) => m.toLowerCase() === want) || luas.sort((a, b) => a.length - b.length)[0];
-    return { pkg, kind: 'lua', tars, mod: main, cmd: `lua -e 'require("${main}") print("__ok ${main}")' 2>&1` };
+    return { pkg, kind: 'lua', tars, manifest: progs, mod: main, cmd: `lua -e 'require("${main}") print("__ok ${main}")' 2>&1` };
   }
   // Any other package of files (an architecture-independent one: scripts, data, fonts). One
   // that installs a command: it must start -- its interpreter found, its own imports resolved;
@@ -120,11 +138,11 @@ function buildCase(pkg) {
   const bins = files.filter((n) => /^(usr\/)?s?bin\/[^/]+$/.test(n));
   if (bins.length) {
     const bin = bins.find((b) => path.posix.basename(b) === pkg) || bins[0];
-    return { pkg, kind: 'files-bin', tars, bin,
+    return { pkg, kind: 'files-bin', tars, manifest: progs, bin,
       cmd: `/${bin} --version >/tmp/o 2>&1 </dev/null; echo "__rc=$?"; head -c 600 /tmp/o` };
   }
   const probe = [files[0], files[Math.floor(files.length / 2)], files[files.length - 1]];
-  return { pkg, kind: 'files-data', tars, cmd: probe.map((f) => `test -e '/${f}' || echo "MISSING /${f}"`).join('; ') + `; echo __checked` };
+  return { pkg, kind: 'files-data', tars, manifest: progs, cmd: probe.map((f) => `test -e '/${f}' || echo "MISSING /${f}"`).join('; ') + `; echo __checked` };
 }
 // A script that could not start: its interpreter or one of its own modules is missing.
 const NOSTART = /not found|No such file or directory|can't open|Can't locate|ModuleNotFoundError|ImportError|SyntaxError|syntax error|Traceback \(most recent|Exec format error|Permission denied|applet not found|bad interpreter|cannot execute/i;
@@ -199,7 +217,7 @@ pkgs = pkgs.filter((_, i) => i % NSHARD === SHARD);
 const FETCH = arg('fetch');
 if (FETCH) {
   const need = new Set();
-  for (const k of pkgs) for (const d of [k, ...(P[k].kind === 'mod' ? modDeps(k) : [])]) if (P[d] && P[d].file) need.add(P[d].file);
+  for (const k of pkgs) for (const d of [k, ...(P[k].kind === 'mod' ? [...modDeps(k), ...exeDeps(k)] : [])]) if (P[d] && P[d].file) need.add(P[d].file);
   const todo = [...need].filter((f) => !fs.existsSync(path.join(FARM, loc(f))));
   let n = 0;
   await Promise.all(Array.from({ length: 8 }, async () => {
