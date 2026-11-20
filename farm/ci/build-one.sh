@@ -367,7 +367,9 @@ default_prepare() { cd "$builddir"; for p in $source; do case "${p%%::*}" in
 cd "$BDIR"
 source ./APKBUILD
 : "${builddir:=$SRC}"
-( if type prepare >/dev/null 2>&1; then prepare; else default_prepare; fi )
+# abuild runs prepare() in $builddir too (nspr's "mkdir build inst" there, then build()'s
+# cd "$builddir"/build: "No such file or directory" when prepare ran in $srcdir)
+( cd "$builddir" 2>/dev/null; if type prepare >/dev/null 2>&1; then prepare; else default_prepare; fi )
 cd "$builddir" 2>/dev/null || cd "$SRC"
 # Samba's waf (talloc, tdb, tevent, ldb) refuses --build != --host without its own cross options;
 # the build host runs wasm (binfmt wali-run), so it configures as a native build and runs its

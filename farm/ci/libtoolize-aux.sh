@@ -14,8 +14,20 @@ aux_src=/usr/local/share/libtool/build-aux
 out=$("$real" "$@" 2>&1); rc=$?
 [ -n "$out" ] && printf '%s\n' "$out"
 [ $rc = 0 ] || exit $rc
-case "$out" in *"Remember to add 'LT_INIT'"*) ;; *) exit 0;; esac
 for a in "$@"; do case "$a" in -n|--dry-run|--dry*) exit 0;; esac; done
+# A project that keeps its own aclocal.m4 and runs autoconf without aclocal (openldap: libtoolize
+# --force, then autoconf) gets the new ltmain.sh but keeps the old LT_INIT in aclocal.m4 ("This is
+# libtool 2.6.2, but the definition of this LT_INIT comes from libtool 2.4.6"). libtoolize says
+# what to do: "You should add the contents of the following files to 'aclocal.m4'" -- appended,
+# the later definitions win (and an aclocal run afterwards rewrites the file anyway).
+case "$out" in *"to 'aclocal.m4'"*)
+  if [ -f aclocal.m4 ] && ! grep -q 'generated automatically by aclocal' aclocal.m4; then
+    printf '%s\n' "$out" | sed -n "s/^[^ ]*:[[:space:]]*'\(\/[^']*\.m4\)'\$/\1/p" | while read -r m; do
+      [ -f "$m" ] && { printf '\n# farm libtoolize: from %s\n' "$m"; cat "$m"; } >> aclocal.m4 && echo "farm libtoolize: aclocal.m4 += $m"
+    done
+  fi;;
+esac
+case "$out" in *"Remember to add 'LT_INIT'"*) ;; *) exit 0;; esac
 ca=configure.ac; [ -f "$ca" ] || ca=configure.in; [ -f "$ca" ] || exit 0
 grep -qE '^[[:space:]]*(LT_INIT|AC_PROG_LIBTOOL|AM_PROG_LIBTOOL)\b' "$ca" || exit 0
 aux=$(sed -n 's/^[[:space:]]*AC_CONFIG_AUX_DIR([[]*\([^])]*\)[]]*).*/\1/p' "$ca" | head -n 1)

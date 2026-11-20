@@ -65,9 +65,15 @@ if (ADIR) for (const sub of ['main', 'community']) {
     // mpfr4 when they shared a wave (R49: "mpfr.h not found").
     const pv = t.match(/^provides="([^"]*)"/m);
     if (pv) for (const s of pv[1].split(/\s+/).map((x) => x.replace(/[<>=~].*$/, ''))) if (own(s)) origin[s] = origin[s] || dir;
-    const m = t.match(/^subpackages="([^"]*)"/m);
-    if (!m) continue;
-    for (let s of m[1].split(/\s+/)) {
+    // every subpackages="..." assignment, also a conditional one: postgresql18's
+    // `$_default_ver && subpackages="libpq libpq-dev:libpq_dev ..."` (pspg, perl-dbd-pg, postfix:
+    // libpq-dev mapped to nothing, so they were planned without postgresql and found no libpq-fe.h)
+    // (not when its condition is a variable the recipe sets false: postgresql17 has the same line
+    // with _default_ver=false and does not ship libpq)
+    const subs = [...t.matchAll(/^(?:\$\{?(\w+)\}?\s*&&\s*)?subpackages="([^"]*)"/gm)]
+      .filter((x) => !x[1] || !new RegExp(`^${x[1]}=["']?false`, 'm').test(t)).map((x) => x[2]).join(' ');
+    if (!subs.trim()) continue;
+    for (let s of subs.split(/\s+/)) {
       s = s.split(':')[0].replace(/\$\{?pkgname\}?/g, name);
       if (own(s)) origin[s] = origin[s] || dir;
       const b = s && s.replace(/-dev$/, '');
