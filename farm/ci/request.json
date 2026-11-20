@@ -1,6 +1,1 @@
-{
-  "all": true,
-  "max": 3000,
-  "publish": true,
-  "note": "R70 full run (TC v53): R65-R69 fixes (noelfasm .symver aliases, -dumpfullversion, coverage flags dropped, host perl modules from depends+makedepends via WaliInc.pm, vendor_perl layout, MakeMaker CC=wasm, CMAKE package root ONLY) + sysroot OpenSSL archives at the end of every program link (memcached via sasl digestmd5)"
-}
+{"pkgs":"lksctp-tools pcre2 patchutils gensio ser2net glib curl bash coreutils memcached libxml2 udns","max":600,"chunk":3,"publish":true,"note":"R71 canary (TC v54): program links read a static lib's needs from its fake .so beside it (gensio -lsctp: ser2net); a library's sibling .so by relative path is recorded (pcre2-posix -> pcre2-8: patchutils)"}

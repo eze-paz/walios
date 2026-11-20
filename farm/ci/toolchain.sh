@@ -256,6 +256,9 @@ if [ \$link = 1 ] && [ \$shared = 1 ]; then
     -lc|-lm|-ldl|-lpthread|-lrt|-lutil|-lxnet|-lresolv|-lcrypt) ;;
     -l*) echo "\$a" >> "\$nd/__wali_needed";;
     /*.a|/*.so|/*.so.*) [ -f "\$a" ] && echo "\$a" >> "\$nd/__wali_needed";;
+    # a sibling library of the same build by relative path (libtool: libpcre2-posix links
+    # .libs/libpcre2-8.so), recorded absolute; program links find it again by name
+    *.so|*.so.*) [ -f "\$a" ] && echo "\$(cd "\$(dirname "\$a")" && pwd)/\$(basename "\$a")" >> "\$nd/__wali_needed";;
   esac; done
   rm -f "\$out"; $L/llvm-ar rcs "\$out" "\${objs[@]}" || exit 1
   for x in "\${ars[@]}"; do $L/llvm-ar qL "\$out" "\$x" || exit 1; done
@@ -311,7 +314,10 @@ if [ \$link = 1 ]; then
     # as farm/e2e/libtest.sh does) is looked for by name in the link's dirs, else left out
     while read -r y; do [ -n "\$y" ] || continue
       case "\$y" in /*) [ -f "\$y" ] || { z=""; for d in "\${dirs[@]}"; do [ -f "\$d/\${y##*/}" ] && { z=\$d/\${y##*/}; break; }; done; [ -n "\$z" ] || continue; y=\$z; };; esac
-      NEEDED+=("\$y"); todo+=("\$y"); done < <($L/llvm-ar p "\$f" __wali_needed 2>/dev/null)
+      NEEDED+=("\$y"); todo+=("\$y"); done < <($L/llvm-ar p "\$f" __wali_needed 2>/dev/null
+        # libtool's static lib.a has no record; its fake lib.so beside it (the -shared link) does:
+        # libgensioosh.a needs -lsctp, which gensio's configure found in the overlay (ser2net)
+        case "\$f" in *.a) [ -f "\${f%.a}.so" ] && $L/llvm-ar p "\${f%.a}.so" __wali_needed 2>/dev/null;; esac)
   done
   # likewise a recorded -l that no dir has (a library this build did not produce: libucontext)
   K=(); for y in "\${NEEDED[@]}"; do

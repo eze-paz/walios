@@ -1,13 +1,9 @@
 {
-  "tag": "farm-2026-11-19-69-70",
+  "tag": "farm-2026-11-20-76",
   "busybox": "runtimes-ilp32-2026-11-03-7",
   "python": "runtimes-ilp32-2026-11-03-6",
   "perl": "runtimes-ilp32-2026-11-03-8",
   "lua": "runtimes-ilp32-2026-11-02-3",
   "shards": 12,
-  "note": "R63+R64 merged; TC v47: also drop recorded -l names no dir has (-lucontext broke 136 libtests after v46)",
-  "overlays": [
-    "farm-2026-11-19-69",
-    "farm-2026-11-19-70"
-  ]
+  "note": "R70 full run (TC v53): 1320 built"
 }
