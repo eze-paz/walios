@@ -247,6 +247,25 @@ if [ \$link = 1 ] && [ \$shared = 1 ]; then
       @*) [ -f "\${a#@}" ] && for x in \$(cat "\${a#@}"); do case "\$x" in *.o|*.lo|*.obj) objs+=("\$x");; /*.a) ;; *.a) [ -f "\$x" ] && ars+=("\$x");; esac; done;;   # cmake/ninja response files
     esac
   done
+  # Sources compiled and linked in the same command (RHash: "cc -fpic algorithms.c ... -shared
+  # -o librhash.so.1.4.6"): compiled here first, or the archive holds none of them (rhash, R70:
+  # "undefined symbol: rhash_ctrl").
+  srcs=(); CA=(); sk=0
+  for a in "\${A[@]}"; do
+    if [ \$sk = 1 ]; then sk=0; continue; fi
+    case "\$a" in
+      -o) sk=1;;
+      -shared|-l*|-L*|-Wl,*|*.o|*.lo|*.obj|*.a|*.so|*.so.*|@*) ;;
+      *.c|*.cc|*.cpp|*.cxx|*.C|*.s|*.S) [ -f "\$a" ] && srcs+=("\$a") || CA+=("\$a");;
+      *) CA+=("\$a");;
+    esac
+  done
+  sod=""
+  if [ \${#srcs[@]} -gt 0 ]; then
+    sod=\$(mktemp -d); i=0
+    for s in "\${srcs[@]}"; do i=\$((i+1)); o="\$sod/\$i-\$(basename "\$s").o"
+      $L/$drv "\${F[@]}" "\${CA[@]}" "\${LATE[@]}" -c "\$s" -o "\$o" || exit 1; objs+=("\$o"); done
+  fi
   # What the library itself was linked against -- an ELF .so keeps it as DT_NEEDED + RUNPATH --
   # goes in as a text member, __wali_needed, that program links read back (wali_needed below):
   # a program linking libgio's archive got no -lz, one linking libelf's no -lzstd (glib, R54).
@@ -264,7 +283,7 @@ if [ \$link = 1 ] && [ \$shared = 1 ]; then
   for x in "\${ars[@]}"; do $L/llvm-ar qL "\$out" "\$x" || exit 1; done
   oa=\$(cd "\$(dirname "\$out")" && pwd)/\$(basename "\$out")
   [ -s "\$nd/__wali_needed" ] && (cd "\$nd" && $L/llvm-ar q "\$oa" __wali_needed)
-  rm -rf "\$nd"
+  rm -rf "\$nd"; [ -n "\$sod" ] && rm -rf "\$sod"
   $L/llvm-ranlib "\$out"
   # -lfoo only searches lib*.a here (no dynamic linking), so give the archive that name too.
   case "\$out" in *lib*.so*) cp -f "\$out" "\${out%%.so*}.a";; esac
