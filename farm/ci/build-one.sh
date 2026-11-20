@@ -329,6 +329,17 @@ for d in "$OVERLAY"/usr/lib/*/; do
   case "$n" in pkgconfig|cmake|python*|perl*|lua*|girepository-1.0) continue;; esac
   [ -e "/usr/lib/$n" ] || sudo -n ln -s "$OVERLAY/usr/lib/$n" "/usr/lib/$n" 2>/dev/null || true
 done
+# A dep's *-config script where recipes name it by its Alpine path: --with-apr=/usr is
+# /usr/bin/apr-1-config (apr-util, apache2 and its modules: "the --with-apr parameter is
+# incorrect"). A wrapper, not a symlink: apr-1-config finds its tree from its own path ($0),
+# so it must run from the overlay. Only shell scripts, and only where the host has none.
+for c in "$OVERLAY"/usr/bin/*-config; do
+  [ -f "$c" ] && head -c2 "$c" | grep -q '#!' || continue; n=$(basename "$c")
+  if [ ! -e "/usr/bin/$n" ]; then
+    printf '#!/bin/sh\nexec "%s" "$@"\n' "$c" | sudo -n tee "/usr/bin/$n" >/dev/null 2>&1 && sudo -n chmod 755 "/usr/bin/$n" 2>/dev/null
+    echo "farm: /usr/bin/$n -> overlay" >> "$log"
+  fi
+done
 cat > "$bdir/.farm-build.sh" <<'EOS'
 set +u
 # (Lua modules: 5.4's headers before /usr/include, which holds lua5.1's lua.h.)
