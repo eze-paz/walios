@@ -2533,7 +2533,8 @@ class Process {
     // O_CREAT|O_EXCL never follows a final symlink: the name exists, EEXIST -- even a dangling
     // link. It was followed and the TARGET created: git apply --reject's .rej went through a
     // planted symlink into the file it pointed at (t4115), exactly what O_EXCL is there to stop.
-    if ((flags & O_CREAT) && (flags & O_EXCL)) { const lp = this.followDir(path2); opfsFault(lp); const lf = files.get(lp); if (lf && lf.sym !== undefined) return err(E.EXIST); }
+    if ((flags & O_CREAT) && (flags & O_EXCL)) { const lf = files.get(this.followDir(path2));   // no opfsFault: for a missing name it re-lists the directory (every exclusive create -- git gc ran 60% slower); opfsFault(path2) at the top already listed it
+      if (lf && lf.sym !== undefined) return err(E.EXIST); }
     path2 = this.follow(path2);   // a symlink to a directory (/files -> /root) opens the directory it points at
     opfsFault(path2);             // ...and the fault-in must be on the RESOLVED path
     // A directory opened for writing (or truncated) is EISDIR on Linux; it opened as a directory
@@ -3921,6 +3922,9 @@ class Process {
         wali[name] = (_entryFn, args) => S.threadSpawn(Number(args), '__wasm_thread_start_libc');
       }
       else if (name === 'longjmp' || name === 'siglongjmp' || name === '_longjmp') wali[name] = () => { throw new Error('host-import longjmp (old binary)'); };
+      // a fresh stack for a deep recursion (farm/ci/stackhop.mjs): served where the instance is
+      // -- wali-proc-worker.js stackHop, or _makeInProcImports -- never by the kernel.
+      else if (name === '__stackhop') wali[name] = () => { throw new Error('[host] wali.__stackhop reached the kernel'); };
       else if (name.startsWith('SYS_')) {
         const sysname = name.slice(4);
         const map = (a2) => a2.map(x => typeof x === 'bigint' && sysname !== 'mmap' ? i64arg(x) : x);
@@ -4770,6 +4774,17 @@ class Process {
     // stacks of their own so a callee's syscall can still suspend.
     if (envI) { const ffi = waliFfiImports(() => S.inst.exports, true); for (const k of Object.keys(ffi)) if (k in envI) envI[k] = ffi[k];
       if ('__wali_ffi_table_alloc' in envI) envI.__wali_ffi_table_alloc = (...a) => { S.snapUnsafe = S.snapUnsafe || 'libffi closure'; return ffi.__wali_ffi_table_alloc(...a); }; }
+    // wali.__stackhop (farm/ci/stackhop.mjs; the worker engine's twin is wali-proc-worker.js
+    // stackHop): continue a deep recursion on a fresh JSPI stack. Here the guest itself runs on
+    // a promising stack and its syscalls may suspend, so the hop is a Suspending import that
+    // awaits the new stack: a suspension inside suspends the outer one too, and an exit or trap
+    // arrives through the await. A fork() unwinding inside returns early with
+    // __stackhop_done 0 and Asyncify carries on unwinding the outer frames.
+    if ('__stackhop' in wali) wali.__stackhop = new WebAssembly.Suspending(async () => {
+      const ex = S.inst.exports;
+      await WebAssembly.promising(ex.__stackhop_enter)();
+      ex.__stackhop_done.value = 0;
+    });
     // WASI: fd_read blocks BEFORE the sync shim runs (the worker loop parks in waitReadable).
     const wasi = imp.wasi_snapshot_preview1;
     if (wasi && wasi.fd_read) { const fdRead = wasi.fd_read; wasi.fd_read = new WebAssembly.Suspending(async (fd, ...rest) => { await S.waitReadable(fd); return fdRead(fd, ...rest); }); }

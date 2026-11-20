@@ -105,7 +105,12 @@ cd "$(dirname "$OUT")/work/git-$GITV"
 make "${MAKEVARS[@]}" prefix=/usr CFLAGS="-O2 -I$PWD/../zinst/include -D__WALI_ASYNCIFY_FORK" clean-obj >/dev/null 2>&1 || make "${MAKEVARS[@]}" clean >/dev/null 2>&1 || true
 # prefix=/usr: its exec-path is /usr/libexec/git-core (where walios installs git-core.tar.gz)
 make -j"$(nproc)" "${MAKEVARS[@]}" prefix=/usr CFLAGS="-O2 -I$PWD/../zinst/include -D__WALI_ASYNCIFY_FORK" git
-"$TC/binaryen/bin/wasm-opt" --asyncify --pass-arg=asyncify-imports@wali.SYS_fork -O2 git -o "$OUT/git-asyncfork.wasm"
+# stackhop (farm/ci/stackhop.mjs): a deep recursion continues on a fresh stack instead of
+# overflowing the browser's ~1 MB one (fast-import writing a 4100-deep tree, t6700). Before
+# Asyncify, which then also unwinds through wali.__stackhop (a fork() inside a hopped segment).
+( cd "$HERE/.." && [ -d node_modules/binaryen ] || npm i --no-save --no-audit --no-fund binaryen@123.0.0 >/dev/null )
+node "$HERE/../stackhop.mjs" git git.sh.wasm
+"$TC/binaryen/bin/wasm-opt" --asyncify --pass-arg=asyncify-imports@wali.SYS_fork,wali.__stackhop -O2 git.sh.wasm -o "$OUT/git-asyncfork.wasm"
 node -e 'const m=new WebAssembly.Module(require("fs").readFileSync(process.argv[1])); const i=WebAssembly.Module.imports(m).map(x=>x.name); console.log("env import:", i.filter(n=>/init_envfile/.test(n)).join(","))' "$OUT/git-asyncfork.wasm"
 ls -la "$OUT/git-asyncfork.wasm"
 # git's other programs, where a Linux install puts them (git 2.45 `make install`, prefix=/usr):

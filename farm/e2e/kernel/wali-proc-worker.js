@@ -107,6 +107,32 @@ function waliFfiImports(exp, jspi) {
 const dlHandles = [];
 let forkState = 'none', forkRet = 0n, asyncifyBuf = 0;
 
+// wali.__stackhop: a deep recursion continues on a FRESH stack. A browser gives a thread about
+// 1 MB of native stack (a worker less than a page), Linux gives a process 8 MB; git fast-import
+// writing a 4100-deep tree overflowed it (t6700). Binaries run through farm/ci/stackhop.mjs
+// count the stack their recursive functions use and, past a budget, call this import with the
+// target and its arguments parked in globals. WebAssembly.promising runs __stackhop_enter on a
+// new stack; nothing in this engine suspends (syscalls block on Atomics), so the call finishes
+// synchronously and __stackhop_done says how: 1 = returned (reset for the next hop), 0 = it
+// left early -- an Asyncify unwind for fork() (Asyncify then unwinds the outer frames too,
+// because the binary lists this import in asyncify-imports), an exit, or a trap. Without JSPI
+// the target runs on the same stack: the program behaves as if never wrapped.
+// (hopThrown: the exit a guest raised on a hopped stack -- the promise carries it, but only
+// asynchronously, so each level of hops rethrows it from here instead.)
+let hopP = null, hopThrown = null;
+class HopTrap extends WebAssembly.RuntimeError {}
+function stackHop() {
+  const ex = inst.exports;
+  if (typeof WebAssembly.promising !== 'function') { ex.__stackhop_enter(); return; }
+  const p = (hopP = hopP || WebAssembly.promising(ex.__stackhop_enter))();
+  if (ex.__stackhop_done.value) { ex.__stackhop_done.value = 0; return; }
+  // the real error, for the log (an inner hop's own HopTrap only repeats it)
+  p.catch((e) => { if (!(e instanceof ProcExit) && !(e instanceof HopTrap)) self.postMessage({ t: 'trap', error: 'on a hopped stack: ' + errText(e).slice(0, 400) }); });
+  if (forkState === 'unwinding') return;
+  if (hopThrown) throw hopThrown;
+  throw new HopTrap('trap on a hopped stack segment (deep recursion)');
+}
+
 // ---- process snapshot (python3 starts from a saved, already-imported interpreter) ----
 // What the loader did, so a restored instance can be re-linked to the SAME addresses:
 // each side module with its memory/table/TLS bases and GOT.func slots, and every table slot
@@ -148,7 +174,7 @@ function hostCall(idx, args) {
     if (st === ST_REPLY) break;
     // The kernel answers DIE for exit/exit_group/__proc_exit: those calls must never
     // return to the guest, and the kernel can no longer unwind our stack for us.
-    if (st === ST_DIE) throw new ProcExit(Atomics.load(i32, 3) & 0xff);
+    if (st === ST_DIE) throw (hopThrown = new ProcExit(Atomics.load(i32, 3) & 0xff));
     // SIGNAL: run a signal handler here, because the indirect function table is ours.
     // The handler makes its OWN host calls, which reuse this control block -- so the
     // in-flight request has to be saved and put back before we resume waiting for it.
@@ -362,6 +388,7 @@ self.onmessage = async (ev) => {
       if (full === 'env.__wali_dlopen') { imports[mod][nm] = (p) => dlopen(Number(p)); continue; }
       if (full === 'env.__wali_dlsym') { imports[mod][nm] = (h, sp) => dlsym(Number(h), Number(sp)); continue; }
       if (full.startsWith('env.__wali_ffi_')) { ffiImp = ffiImp || waliFfiImports(() => inst.exports, false); imports[mod][nm] = ffiImp[nm]; continue; }   // libffi (walios/build/libffi)
+      if (full === 'wali.__stackhop') { imports[mod][nm] = stackHop; continue; }   // a fresh stack for a deep recursion (farm/ci/stackhop.mjs)
       if (full.startsWith('@.')) continue;             // kernel-only op, not a wasm import
       if (nm === 'SYS_fork' && WebAssembly.Module.exports(m.mod).some((e) => e.name === 'asyncify_start_unwind')) {
         // fork() has to unwind the calling stack, and the stack lives here now -- so the
@@ -386,7 +413,7 @@ self.onmessage = async (ev) => {
         continue;
       }
       if (nm === '__proc_exit') {
-        imports[mod][nm] = (code) => { hostCall(idx, [code]); throw new ProcExit(Number(code) & 0xff); };
+        imports[mod][nm] = (code) => { hostCall(idx, [code]); throw (hopThrown = new ProcExit(Number(code) & 0xff)); };
       } else if (sig === 1) {
         imports[mod][nm] = (...a) => hostCall(idx, a);
       } else {
