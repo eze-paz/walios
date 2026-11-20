@@ -1941,7 +1941,7 @@ class Process {
     this.stopped = 0; this.stopReported = false; this.contWaiters = [];
     this.cred = { uid: 0, euid: 0, suid: 0, gid: 0, egid: 0, sgid: 0, groups: [] }; // root by default
     this.shmAt = new Map();          // SysV shm attachments: base -> segment
-    this.futexWaiters = new Map();   // pthread futexes: uaddr -> [resolver] (see sysAsync 'futex')
+    this.futexWaiters = new Map();   // pthread futexes: uaddr -> [{fin, addr, gone, woken}] (see sysAsync 'futex')
     this.curTid = 0;                 // tid of the thread whose syscall is being served (0 = main)
     this.umask = 0o22;
     procs.set(this.pid, this);
@@ -3637,22 +3637,45 @@ class Process {
         const uaddr = a[0] >>> 0, fop = a[1] & 0x7f, val = a[2] | 0;
         S.refresh();
         for (const [b, x] of S.shmAt) if (uaddr >= b && uaddr < b + x.seg.size) return (back(), S).sys(name, a);
-        if (fop === 1 || fop === 10) {                       // FUTEX_WAKE / WAKE_BITSET
-          const wl = S.futexWaiters.get(uaddr); let n = 0;
-          if (wl) { while (wl.length && n < val) { wl.shift()('wake'); n++; } if (!wl.length) S.futexWaiters.delete(uaddr); }
-          return BigInt(n); }
+        // A waiter is { fin, addr, gone, woken }: addr changes when REQUEUE moves it; gone is set
+        // the moment it stops waiting (woken, timed out, signal), so a WAKE never spends itself
+        // on a waiter that is already leaving -- that lost the wake for the next one in line.
+        const fwWake = (addr, max) => {
+          const wl = S.futexWaiters.get(addr); let n = 0;
+          while (wl && wl.length && n < max) { const e = wl.shift(); if (e.gone) continue; e.gone = e.woken = true; e.fin('wake'); n++; }
+          if (wl && !wl.length) S.futexWaiters.delete(addr);
+          return n;
+        };
+        if (fop === 1 || fop === 10) return BigInt(fwWake(uaddr, val));   // FUTEX_WAKE / WAKE_BITSET
+        if (fop === 3 || fop === 4) {                        // FUTEX_REQUEUE / CMP_REQUEUE
+          // musl's condition variables hand a signalled waiter over to the mutex with REQUEUE
+          // (pthread_cond_timedwait.c unlock_requeue). Answering it with "0, nothing moved" left
+          // that waiter asleep on the condvar word, which nobody wakes again: git grep's work
+          // queue deadlocked under contention (t7810 --threads=8..10 on 4-core CI runners).
+          if (fop === 4 && S.dv.getInt32(uaddr, true) !== (a[5] | 0)) return err(E.AGAIN);
+          const uaddr2 = a[4] >>> 0, nMove = Number(a[3]) | 0;
+          let n = fwWake(uaddr, val), m = 0;
+          const wl = S.futexWaiters.get(uaddr);
+          if (wl && nMove > 0 && uaddr2 !== uaddr) {
+            let wl2 = S.futexWaiters.get(uaddr2); if (!wl2) S.futexWaiters.set(uaddr2, wl2 = []);
+            while (wl.length && m < nMove) { const e = wl.shift(); if (e.gone) continue; e.addr = uaddr2; wl2.push(e); m++; }
+            if (!wl.length) S.futexWaiters.delete(uaddr);
+          }
+          return BigInt(n + m); }
         if (fop === 0 || fop === 9) {                        // FUTEX_WAIT / WAIT_BITSET (absolute time)
           if (S.dv.getInt32(uaddr, true) !== val) return err(E.AGAIN);
           let ms = Infinity;
           if (a[3]) { const abs = fop === 9, realtime = !!(a[1] & 0x100);
             ms = Number(S.r64(a[3])) * 1000 + S.tsNs(a[3]) / 1e6;
-            if (abs) ms -= realtime ? Date.now() : performance.now(); }
+            if (abs) ms -= realtime ? nowEpoch() : performance.now(); }
           let wl = S.futexWaiters.get(uaddr); if (!wl) S.futexWaiters.set(uaddr, wl = []);
-          let mine = null;
-          const w = await S.sigRace((fin) => { mine = fin; wl.push(fin); if (Number.isFinite(ms)) setTimeout(() => fin('t'), Math.max(0, Math.min(ms, 3600000))); });
-          const k = wl.indexOf(mine); if (k >= 0) wl.splice(k, 1);
-          if (!wl.length && S.futexWaiters.get(uaddr) === wl) S.futexWaiters.delete(uaddr);
-          if (w === 'wake') return 0n;
+          const e = { fin: null, addr: uaddr, gone: false, woken: false };
+          const w = await S.sigRace((fin) => { e.fin = fin; wl.push(e);
+            if (Number.isFinite(ms)) setTimeout(() => { if (!e.gone) { e.gone = true; fin('t'); } }, Math.max(0, Math.min(ms, 3600000))); });
+          e.gone = true;
+          const cur = S.futexWaiters.get(e.addr);
+          if (cur) { const k = cur.indexOf(e); if (k >= 0) cur.splice(k, 1); if (!cur.length) S.futexWaiters.delete(e.addr); }
+          if (w === 'wake' || e.woken) return 0n;
           if (w === 't') return err(E.TIMEDOUT);
           const v = await (back(), S).onSigWakeAsync(false); if (v !== null) return v;
           return err(E.INTR); }
