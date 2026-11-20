@@ -3200,9 +3200,12 @@ class Process {
         return 0n; }
       case 'flock': return lockTry(S, 'flock', a);
       case 'clock_gettime': { if (a[0] === 1 || a[0] === 4) { const ms = performance.now(); S.i64(a[1], BigInt(Math.floor(ms / 1000))); S.i64(a[1] + 8, BigInt(Math.floor((ms % 1000) * 1e6))); return 0n; }
-        const ms = Date.now(); S.i64(a[1], BigInt(Math.floor(ms / 1000))); S.i64(a[1] + 8, BigInt((ms % 1000) * 1e6)); return 0n; }
-      case 'gettimeofday': { const ms = Date.now(); S.i64(a[0], BigInt(Math.floor(ms / 1000))); S.i64(a[0] + 8, BigInt((ms % 1000) * 1000)); return 0n; }
-      case 'clock_getres': { if (a[1]) { S.i64(a[1], 0n); S.i64(a[1] + 8, 1000000n); } return 0n; }
+        // CLOCK_REALTIME with sub-ms resolution, as on Linux: musl's mkdtemp/mkstemp name their
+        // retries from tv_nsec, and Date.now()'s whole ms gave all 100 retries in one ms the same
+        // name (git's mks_tempfile_dt died "unable to create temp-file: File exists", t4020)
+        const ms = nowEpoch(); S.i64(a[1], BigInt(Math.floor(ms / 1000))); S.i64(a[1] + 8, BigInt(Math.floor((ms % 1000) * 1e6))); return 0n; }
+      case 'gettimeofday': { const ms = nowEpoch(); S.i64(a[0], BigInt(Math.floor(ms / 1000))); S.i64(a[0] + 8, BigInt(Math.floor((ms % 1000) * 1000))); return 0n; }
+      case 'clock_getres': { if (a[1]) { S.i64(a[1], 0n); S.i64(a[1] + 8, 1000n); } return 0n; }
       case 'times': { if (a[0]) { S.refresh(); S.u8.fill(0, a[0], a[0] + 4 * S.L); } return BigInt(Math.floor(performance.now() / 10) & 0x7fffffff); }
       case 'setitimer': { const which = a[0] | 0; S.refresh();
         if (a[2]) S.wrItimer(a[2], which);
