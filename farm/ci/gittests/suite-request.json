@@ -1,1 +1,1 @@
-{"gittests":"gittests-2.45.3-22","runtimes":"runtimes-wali-2026-11-18-11","shards":20,"timeout":1800,"why":"git with libcurl: git-remote-http(s), git-http-fetch from the same tree","try":7}
+{"gittests":"gittests-2.45.3-22","runtimes":"runtimes-wali-2026-11-18-11","shards":3,"timeout":900,"why":"t7810 hung at --threads=8 on gittests-22: flaky or regression?","try":8,"only":"t7810-grep,t7810-grep,t7810-grep"}
