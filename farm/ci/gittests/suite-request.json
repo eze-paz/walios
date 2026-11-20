@@ -1,1 +1,1 @@
-{"gittests":"gittests-2.45.3-23","runtimes":"runtimes-wali-2026-11-18-11","shards":5,"timeout":2700,"why":"kernel: sub-ms CLOCK_REALTIME (mkdtemp retries, t4020); t1092 near limit","try":10,"only":["t1092-sparse-checkout-compatibility","t4020-diff-external","t4020-diff-external","t6700-tree-depth","t7810-grep"]}
+{"gittests":"gittests-2.45.3-23","runtimes":"runtimes-wali-2026-11-18-11","shards":1,"timeout":600,"why":"t7810 hang: kernel stats at timeout","try":11,"only":["t7810-grep"]}

@@ -109,7 +109,8 @@ function judge(name, r) {
   const host = (out.match(/\[host\][^\n]*/g) || []).filter((l) => !/OPFS lazily mounted|engine:/.test(l)).slice(0, 8);
   return { status, pass: ok.length - skipped.length, fail: failed.length, skip: skipped.length, known: known.length, rc,
     failures: failed.map((l) => l.replace(/^not ok /, '')).slice(0, 40), host,
-    ...(status !== 'ok' ? { log: (log || '').slice(-LOG_TAIL), tail: status === 'ok' ? '' : tap.slice(-3000) } : {}) };
+    ...(status !== 'ok' ? { log: (log || '').slice(-LOG_TAIL), tail: status === 'ok' ? '' : tap.slice(-3000),
+      ...(r.timeout ? { stats: (out.match(/\[harness\][^\n]*/g) || []).slice(-40).join('\n') } : {}) } : {}) };
 }
 
 const require = createRequire(import.meta.url);

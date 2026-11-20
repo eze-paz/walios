@@ -32,7 +32,7 @@ let logs = '';
 for (const n of bad) {
   const r = results[n];
   logs += `\n\n======== ${n}: ${r.status} (pass ${r.pass} fail ${r.fail})\n` + (r.failures || []).join('\n')
-    + (r.host && r.host.length ? '\n-- host:\n' + r.host.join('\n') : '') + '\n-- tap tail:\n' + (r.tail || '') + '\n-- log tail:\n' + (r.log || '');
+    + (r.host && r.host.length ? '\n-- host:\n' + r.host.join('\n') : '') + '\n-- tap tail:\n' + (r.tail || '') + '\n-- log tail:\n' + (r.log || '') + (r.stats ? '\n-- kernel at timeout:\n' + r.stats : '');
 }
 fs.writeFileSync(path.join(out, 'failures.log'), logs);
 console.log(md);

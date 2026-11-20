@@ -38,11 +38,16 @@ window.walRun = async (msg, ms = 30000) => {
 };
 const walRun1 = (msg, ms) => new Promise((resolve) => {
   const w = new Worker('wali-worker.js');
-  let out = '';
-  const timer = setTimeout(() => { w.terminate(); resolve({ out, code: -1, timeout: true }); }, ms);
+  let out = '', stats = null;
+  // On a timeout the kernel's last stats snapshot (it posts one every few seconds) is appended:
+  // which processes were alive, their threads and CPU -- what a hung script was waiting on.
+  const statsText = () => !stats ? '' : `\n[harness] last kernel stats: procs ${stats.procs} threads ${stats.threads} running ${stats.running} lag ${stats.lag}ms kBusy ${Math.round(stats.kBusyMs)}ms\n`
+    + (stats.list || []).map((p) => `[harness]   pid ${p.pid} ${p.comm} cpu ${p.cpu}ms run ${p.run} mem ${Math.round(p.mem / 1048576)}M`).join('\n') + '\n';
+  const timer = setTimeout(() => { w.terminate(); resolve({ out: out + statsText(), code: -1, timeout: true }); }, ms);
   w.onmessage = (ev) => {
     const m = ev.data;
-    if (m.t === 'out') out += m.s;
+    if (m.t === 'stats') stats = m;
+    else if (m.t === 'out') out += m.s;
     else if (m.t === 'exit') { clearTimeout(timer); w.terminate(); resolve({ out, code: m.code }); }
   };
   w.onerror = (e) => { clearTimeout(timer); w.terminate(); resolve({ out: out + '\n[harness] worker error: ' + (e.message || e), code: -2 }); };
