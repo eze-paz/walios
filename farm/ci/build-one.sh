@@ -432,6 +432,24 @@ find "$pkgdir" -path '*/cmake/*' -name '*.cmake' -type f 2>/dev/null | while rea
   rel=$(dirname "${c#"$pkgdir"/}" | sed 's|[^/][^/]*|..|g')
   sed -i -e "s|\"/usr/|\"\${CMAKE_CURRENT_LIST_DIR}/$rel/usr/|g" -e "s|;/usr/|;\${CMAKE_CURRENT_LIST_DIR}/$rel/usr/|g" "$c"
 done
+# Under --disable-shared libtool makes lib.a with plain ar (never wali-cc -shared), so the archive
+# has no __wali_needed record (toolchain.sh) -- its deps live only in the .la's dependency_libs:
+# libpcre2-posix.a needs libpcre2-8, libgensioosh.a -lsctp (patchutils, ser2net: undefined
+# pcre2_compile_8 / sctp_bindx). Copy them in as the record, by name (-lfoo), before the .la goes.
+for la in $(find "$pkgdir" -name 'lib*.la' 2>/dev/null); do
+  a="${la%.la}.a"; [ -f "$a" ] || continue
+  $AR t "$a" 2>/dev/null | grep -qx __wali_needed && continue
+  dl=$(sed -n "s/^dependency_libs='\(.*\)'.*/\1/p" "$la")
+  rec=$(mktemp -d); : > "$rec/__wali_needed"
+  for d in $dl; do case "$d" in
+    -lc|-lm|-ldl|-lpthread|-lrt|-lutil|-lxnet|-lresolv|-lcrypt) ;;
+    -l*) echo "$d" >> "$rec/__wali_needed";;
+    *.la) n=$(basename "$d" .la); echo "-l${n#lib}" >> "$rec/__wali_needed";;
+    /*.a) echo "$d" >> "$rec/__wali_needed";;
+  esac; done
+  [ -s "$rec/__wali_needed" ] && (cd "$rec" && $AR q "$(cd "$(dirname "$a")" && pwd)/$(basename "$a")" __wali_needed) && echo "farm: $(basename "$a") records $(tr '\n' ' ' < "$rec/__wali_needed")" >> "$log"
+  rm -rf "$rec"
+done
 # libtool .la files name /usr/lib/... paths, which then break every dependent's libtool link
 # ("'/usr/lib/libXdmcp.la' is not a valid libtool archive"); Alpine deletes them too.
 find "$pkgdir" -name '*.la' -delete 2>/dev/null
