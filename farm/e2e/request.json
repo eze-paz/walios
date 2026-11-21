@@ -5,5 +5,5 @@
   "perl": "runtimes-ilp32-2026-11-03-8",
   "lua": "runtimes-ilp32-2026-11-02-3",
   "shards": 12,
-  "note": "R78: libc env reader, fpcast-emu retry, libtoolize in-tree macros, overlays in parts"
+  "note": "R78 rerun: libtest reads the overlay parts dir for each lib too"
 }

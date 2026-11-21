@@ -33,7 +33,7 @@ printf 'int puts(const char *);\nint main(void) { puts("__libok"); return 0; }\n
 : > "$W/rows.tsv"
 for lib in $LIBS; do
   d="$W/l/$lib"; mkdir -p "$d"; reason=""; n=0; na=0
-  if [ -f "$W/ov/$lib.overlay.tar.gz" ]; then tar xzf "$W/ov/$lib.overlay.tar.gz" -C "$d" 2>/dev/null; else reason="no overlay"; fi
+  if [ -f "$W_OV/$lib.overlay.tar.gz" ]; then tar xzf "$W_OV/$lib.overlay.tar.gz" -C "$d" 2>/dev/null; else reason="no overlay"; fi
   mapfile -t A < <(find "$d" -name '*.a' -type f 2>/dev/null | sort)
   na=${#A[@]}
   [ -z "$reason" ] && [ "$na" = 0 ] && reason="no archive"
