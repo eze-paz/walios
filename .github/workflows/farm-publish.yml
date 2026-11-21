@@ -1,0 +1,33 @@
+# Publish (or finish publishing) a farm run's release from that run's artifacts: for a publish
+# job cut short (R78: GitHub's API rate limit mid-upload). Trigger: push
+# farm/ci/publish-request.json = {"run_id": <farm run id>, "tag": "<farm-YYYY-MM-DD-N>"}.
+name: farm-publish
+on:
+  push:
+    branches: [main]
+    paths: [farm/ci/publish-request.json]
+  workflow_dispatch:
+permissions: { contents: write, actions: read }
+concurrency: { group: farm-publish, cancel-in-progress: false }
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+      - name: Request
+        run: |
+          echo "RUN_ID=$(node -p 'require("./farm/ci/publish-request.json").run_id')" >> "$GITHUB_ENV"
+          echo "TAG=$(node -p 'require("./farm/ci/publish-request.json").tag')" >> "$GITHUB_ENV"
+      - uses: actions/download-artifact@v4
+        with: { pattern: 'res-*', path: res, merge-multiple: true, run-id: '${{ env.RUN_ID }}', github-token: '${{ github.token }}' }
+      - uses: actions/download-artifact@v4
+        with: { name: aliases, path: ., run-id: '${{ env.RUN_ID }}', github-token: '${{ github.token }}' }
+      - name: Index + summary
+        run: |
+          node farm/ci/make-index.js res "$TAG" > index.json 2> summary.md
+          cat summary.md >> "$GITHUB_STEP_SUMMARY"
+          tar czf logs.tar.gz -C res $(cd res && ls *.log)
+      - name: Release
+        env: { GH_TOKEN: '${{ github.token }}' }
+        run: bash farm/ci/publish.sh "$TAG"
