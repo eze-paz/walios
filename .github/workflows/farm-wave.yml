@@ -27,6 +27,11 @@ jobs:
         with: { path: '${{ env.TC }}', key: '${{ env.TC_KEY }}' }
       - if: steps.tc.outputs.cache-hit != 'true'
         run: bash farm/ci/toolchain.sh "$TC"
+      # walios' env reader (NUL-separated, so values may contain newlines: bash's exported
+      # functions BASH_FUNC_x%%, which bats needs; autoconf's as_nl) -- the sysroot release
+      # predates it. Idempotent (replaces libc.a's initenv member), so a cached toolchain is fine.
+      - name: libc env reader (musl-patches/src/env/initenv.c)
+        run: bash farm/ci/libc-envpatch.sh "$TC"
       # Python recipes build on Python 3.14, the version walios runs (same extension suffix);
       # first on PATH, so `python3`/`gpep517` in the recipes are this one.
       - uses: actions/setup-python@v5

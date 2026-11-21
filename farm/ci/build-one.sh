@@ -567,6 +567,17 @@ if [ -n "$exe" ]; then
   fi
   st=$(cd /tmp && timeout 60 $HOST "$OUT/$pkg.wasm" --version </dev/null 2>&1)
   printf '%s\n' "$st" | head -30 | sed "s/^/farm smoke: /" >> "$log"  # a trap's message, for the log (the index keeps only the reason)
+  # C that calls through a function pointer cast to another type (rhash's option table) is
+  # fine on every native ABI but a wasm call_indirect traps on it. binaryen's fpcast-emu
+  # gives every table entry one uniform signature (Emscripten's EMULATE_FUNCTION_POINTER_CASTS).
+  if printf '%s' "$st" | grep -q 'function signature mismatch'; then
+    "${TC:?}/binaryen/bin/wasm-opt" --fpcast-emu --pass-arg=max-func-params@16 -O2 \
+      "$OUT/$pkg.wasm" -o "$OUT/$pkg.fpc.wasm" >> "$log" 2>&1 && mv "$OUT/$pkg.fpc.wasm" "$OUT/$pkg.wasm" &&
+      { echo "farm: function pointer casts emulated (fpcast-emu)" >> "$log"
+        st=$(cd /tmp && timeout 60 $HOST "$OUT/$pkg.wasm" --version </dev/null 2>&1)
+        printf '%s\n' "$st" | head -30 | sed "s/^/farm smoke (fpcast): /" >> "$log"; }
+    rm -f "$OUT/$pkg.fpc.wasm"
+  fi
   smoke="$(basename "$exe"): $(printf '%s\n' "$st" | grep -vE 'wali-host\]|ENOSYS|stub' | head -1)"
   if printf '%s' "$st" | grep -qE 'trap in pid|LinkError|CompileError|RuntimeError'; then rm -f "$OUT/$pkg.wasm"; emit fail smoke-trap exe "$smoke"
   elif printf '%s' "$st" | grep -qE 'exit=[0-9]+ procs'; then emit pass ok exe "$smoke"

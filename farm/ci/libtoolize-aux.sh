@@ -21,7 +21,8 @@ for a in "$@"; do case "$a" in -n|--dry-run|--dry*) exit 0;; esac; done
 # what to do: "You should add the contents of the following files to 'aclocal.m4'" -- appended,
 # the later definitions win (and an aclocal run afterwards rewrites the file anyway).
 case "$out" in *"to 'aclocal.m4'"*)
-  if [ -f aclocal.m4 ] && ! grep -q 'generated automatically by aclocal' aclocal.m4; then
+  # (also when aclocal wrote it: openldap's is aclocal's, but its recipe never reruns aclocal)
+  if [ -f aclocal.m4 ]; then
     printf '%s\n' "$out" | sed -n "s/^[^ ]*:[[:space:]]*'\(\/[^']*\.m4\)'\$/\1/p" | while read -r m; do
       [ -f "$m" ] && { printf '\n# farm libtoolize: from %s\n' "$m"; cat "$m"; } >> aclocal.m4 && echo "farm libtoolize: aclocal.m4 += $m"
     done
