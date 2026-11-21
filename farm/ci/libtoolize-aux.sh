@@ -21,6 +21,15 @@ for a in "$@"; do case "$a" in -n|--dry-run|--dry*) exit 0;; esac; done
 # what to do: "You should add the contents of the following files to 'aclocal.m4'" -- appended,
 # the later definitions win (and an aclocal run afterwards rewrites the file anyway).
 case "$out" in *"to 'aclocal.m4'"*)
+  # The tree's own copies of those macro files (openldap: build/libtool.m4 2.4.6, which its
+  # acinclude.m4 includes) win over aclocal.m4 at the next aclocal (autoreconf reruns it),
+  # so they become 2.6.2's too -- they must match the ltmain.sh libtoolize just installed.
+  printf '%s\n' "$out" | sed -n "s/^[^ ]*:[[:space:]]*'\(\/[^']*\.m4\)'\$/\1/p" | while read -r m; do
+    [ -f "$m" ] || continue
+    find . -maxdepth 3 -name "$(basename "$m")" -type f ! -path './autom4te.cache/*' 2>/dev/null | while read -r t; do
+      cp "$m" "$t" && echo "farm libtoolize: $t from $m"
+    done
+  done
   # (also when aclocal wrote it: openldap's is aclocal's, but its recipe never reruns aclocal)
   if [ -f aclocal.m4 ]; then
     printf '%s\n' "$out" | sed -n "s/^[^ ]*:[[:space:]]*'\(\/[^']*\.m4\)'\$/\1/p" | while read -r m; do
