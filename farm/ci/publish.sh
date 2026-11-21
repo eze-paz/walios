@@ -24,7 +24,10 @@ ensure() {  # ensure <release> <create args...>
     wait_limit
   done; return 1
 }
-have() { gh release view "$1" --json assets -q '.assets[] | select(.state == "uploaded") | .name' 2>/dev/null; }
+have() {  # the release's uploaded assets, all pages (a release object alone may list only some)
+  local id; id=$(gh api "repos/{owner}/{repo}/releases/tags/$1" -q .id 2>/dev/null) || return 1
+  gh api --paginate "repos/{owner}/{repo}/releases/$id/assets?per_page=100" -q '.[] | select(.state == "uploaded") | .name' 2>/dev/null
+}
 upload() {  # upload <release> <files...>: only the missing ones, 10 at a time
   local r=$1; shift
   local tries=0
