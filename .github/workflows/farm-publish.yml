@@ -19,10 +19,9 @@ jobs:
         run: |
           echo "RUN_ID=$(node -p 'require("./farm/ci/publish-request.json").run_id')" >> "$GITHUB_ENV"
           echo "TAG=$(node -p 'require("./farm/ci/publish-request.json").tag')" >> "$GITHUB_ENV"
-      - uses: actions/download-artifact@v4
-        with: { pattern: 'res-*', path: res, merge-multiple: true, run-id: '${{ env.RUN_ID }}', github-token: '${{ github.token }}' }
-      - uses: actions/download-artifact@v4
-        with: { name: aliases, path: ., run-id: '${{ env.RUN_ID }}', github-token: '${{ github.token }}' }
+      - name: 'Artifacts (throttled, ~430 at once trips the secondary rate limit)'
+        env: { GH_TOKEN: '${{ github.token }}' }
+        run: bash farm/ci/fetch-artifacts.sh "$RUN_ID"
       - name: Index + summary
         run: |
           node farm/ci/make-index.js res "$TAG" > index.json 2> summary.md
