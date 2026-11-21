@@ -55,7 +55,19 @@ if [ -n "$sp" ]; then
   ensure "$TAG-b" --title "walios farm $TAG (b)" --notes "Packages of $TAG past the first release's file limit; see $TAG/index.json." --prerelease || exit 1
   upload "$TAG-b" $sp || exit 1
 fi
-ls res/*.overlay.tar.gz >/dev/null 2>&1 && tar czf overlays.tar.gz -C res $(cd res && ls *.overlay.tar.gz)
+# the overlays in parts under GitHub's 2 GiB asset limit (R78's one tarball, 2.1 GB+, was refused
+# with "422 Validation Failed"): overlays.tar.gz, overlays-2.tar.gz, ... (farm-e2e.yml fetches all)
+ov=(); part=1; sum=0; list=()
+pack() {
+  [ ${#list[@]} = 0 ] && return
+  local n; n=$([ $part = 1 ] && echo overlays.tar.gz || echo "overlays-$part.tar.gz")
+  tar czf "$n" -C res "${list[@]}" && ov+=("$n"); part=$((part + 1)); sum=0; list=()
+}
+for f in $(cd res && ls *.overlay.tar.gz 2>/dev/null); do
+  sz=$(stat -c %s "res/$f")
+  [ $((sum + sz)) -gt 1800000000 ] && pack
+  list+=("$f"); sum=$((sum + sz))
+done; pack
 # the index last: its presence means the release is whole
-upload "$TAG" logs.tar.gz $( [ -f overlays.tar.gz ] && echo overlays.tar.gz ) || exit 1
+upload "$TAG" logs.tar.gz "${ov[@]}" || exit 1
 upload "$TAG" index.json

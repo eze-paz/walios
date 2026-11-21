@@ -61,22 +61,20 @@ jobs:
           REL="https://github.com/${{ github.repository }}/releases/download/$TAG"
           curl -fsSL --retry 5 --retry-delay 5 -o index.json "$REL/index.json"
           # a merged index (pdftools-index: a canary over a full run) has no overlays of its own:
-          # "overlays": [tags] names the releases whose overlays.tar.gz, extracted in that order
-          # (later wins), make the one libtest reads
+          # "overlays": [tags] names the releases whose overlays, extracted in that order (later
+          # wins), make the ones libtest reads. A release's overlays come in parts under GitHub's
+          # 2 GiB asset limit (publish.sh): overlays.tar.gz, overlays-2.tar.gz, ...
           OV=$(node -e "console.log((JSON.parse(process.env.REQ).overlays||[]).join(' '))")
-          if [ -n "$OV" ]; then
-            mkdir -p "$RUNNER_TEMP/ov"
-            for t in $OV; do
-              curl -fsSL --retry 5 --retry-delay 10 -o "$RUNNER_TEMP/o.tgz" "https://github.com/${{ github.repository }}/releases/download/$t/overlays.tar.gz"
+          mkdir -p "$RUNNER_TEMP/ov"
+          for t in ${OV:-$TAG}; do
+            for n in "" -2 -3 -4 -5 -6 -7 -8; do
+              curl -fsSL --retry 5 --retry-delay 10 -o "$RUNNER_TEMP/o.tgz" "https://github.com/${{ github.repository }}/releases/download/$t/overlays$n.tar.gz" || break
               tar xzf "$RUNNER_TEMP/o.tgz" -C "$RUNNER_TEMP/ov"; rm -f "$RUNNER_TEMP/o.tgz"
             done
-            tar czf "$RUNNER_TEMP/overlays.tar.gz" -C "$RUNNER_TEMP/ov" . && rm -rf "$RUNNER_TEMP/ov"
-          else
-            curl -fsSL --retry 5 --retry-delay 10 -o "$RUNNER_TEMP/overlays.tar.gz" "$REL/overlays.tar.gz"
-          fi
+          done
           source "$TC/env.sh"
-          bash farm/e2e/libtest.sh index.json "$RUNNER_TEMP/overlays.tar.gz" farm/ci/catalog.txt libtests | tail -200
-          rm -f "$RUNNER_TEMP/overlays.tar.gz"
+          bash farm/e2e/libtest.sh index.json "$RUNNER_TEMP/ov" farm/ci/catalog.txt libtests | tail -200
+          rm -rf "$RUNNER_TEMP/ov"
       - uses: actions/upload-artifact@v4
         with: { name: libtests, path: 'libtests/*', if-no-files-found: ignore, retention-days: 14 }
 

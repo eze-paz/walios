@@ -17,8 +17,9 @@ IDX=$(realpath -m "$1"); OVT=$(realpath -m "$2"); CAT=$(realpath -m "$3"); OUT=$
 : "${WALI_TC:?source the toolchain env.sh first}"
 W=$(mktemp -d); trap 'rm -rf "$W"' EXIT
 mkdir -p "$OUT" "$W/ov" "$W/all" "$W/l"
-tar xzf "$OVT" -C "$W/ov"
-for t in "$W"/ov/*.overlay.tar.gz; do tar xzf "$t" -C "$W/all" 2>/dev/null || true; done
+# <overlays> is the tarball, or a directory of the overlay tarballs (a release's parts, merged)
+if [ -d "$OVT" ]; then W_OV=$OVT; else tar xzf "$OVT" -C "$W/ov"; W_OV=$W/ov; fi
+for t in "$W_OV"/*.overlay.tar.gz; do tar xzf "$t" -C "$W/all" 2>/dev/null || true; done
 # every built package's archives; a library's own come first on the command line
 mapfile -t ALL < <(ls "$W"/all/usr/lib/*.a "$W"/all/lib/*.a 2>/dev/null)
 echo "libtest: ${#ALL[@]} archives in the merged overlays"
