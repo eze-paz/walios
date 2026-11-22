@@ -51,12 +51,24 @@ node "$HERE/patch-xsloader.js" dist/XSLoader/XSLoader_pm.PL
 #  - Perl's own fork, and the implicit fork of open($fh, "-|") with no command, return into
 #    Perl code with the child still running in the parent: ENOSYS, as python's os.fork.
 #  (The same sources build the host miniperl, hence __wali__.)
+# ILP32 (WALI_ABI=ilp32, the ABI walios runs): none of that. -D__WALI_ASYNCIFY_FORK gives
+# musl's real fork() (runtimes/sysroot32) and perl.wasm goes through wasm-opt --asyncify (build,
+# below), as the farm does for the shells (farm/ci/asyncify-fork.txt): the kernel's SYS_fork
+# unwinds, copies and rewinds the whole process, so Perl's fork returns in both -- Net::DNS
+# forks at load time ("Can't fork: Function not implemented": perl-net-dns, perl-mail-spf...).
+# An XS module's own frames are not instrumented: a fork from inside an XS callback still fails.
+ASYNCFORK=""; [ "${WALI_ABI:-wali}" = ilp32 ] && ASYNCFORK=-D__WALI_ASYNCIFY_FORK
+# (through the wali-cc wrapper, not -Accflags: Config's ccflags would hand it to every XS module
+# the farm builds, whose fork+exec needs the vfork-protocol macro -- they are not asyncified)
+export WALI_EXTRA_CFLAGS="${WALI_EXTRA_CFLAGS:+$WALI_EXTRA_CFLAGS }$ASYNCFORK"
+[ -z "$ASYNCFORK" ] && {
 sed -i '/#  define PerlProc_fork()       my_fork()/a #  ifdef __wali__  /* walios: fork() is a vfork-protocol macro, see walios/build/perl/build.sh */\n#    undef PerlProc_fork\n#    define PerlProc_fork() fork()\n#    define PerlProc_fork_noexec() (errno = ENOSYS, -1)\n#  else\n#    define PerlProc_fork_noexec() PerlProc_fork()\n#  endif' iperlsys.h
 sed -i '/^PP_wrapped(pp_fork,/,/^}/ s/childpid = PerlProc_fork();/childpid = PerlProc_fork_noexec();/' pp_sys.c
 sed -i '/^Perl_my_popen(pTHX_/,/^}/ s/(pid = PerlProc_fork())/(pid = doexec ? PerlProc_fork() : PerlProc_fork_noexec())/' util.c
 sed -i '/^Perl_my_fork(void)/,/^}/ s/^    pid = fork();/#ifdef __wali__\n    errno = ENOSYS; pid = -1;\n#else\n    pid = fork();\n#endif/' util.c
 [ "$(grep -c '__wali__' iperlsys.h)" = 1 ] && [ "$(grep -c 'PerlProc_fork_noexec()' pp_sys.c util.c | paste -sd' ')" = "pp_sys.c:2 util.c:1" ] &&
   [ "$(grep -c '__wali__' util.c)" = 2 ] || { echo "fork patches did not apply" >&2; exit 1; }
+}
 
 # ---- dynamic loading: XS modules as wasm side modules ----
 # The core extensions stay compiled in (--all-static); -Dusedl adds DynaLoader with
@@ -109,6 +121,11 @@ INT64=""
 # ---- build ----
 make -j"$(nproc)" >../build.log 2>&1
 "$WALI_LLVM/llvm-strip" --strip-debug -o ../perl.wasm perl
+if [ -n "$ASYNCFORK" ]; then
+  "$WALI_TC/binaryen/bin/wasm-opt" --asyncify --pass-arg=asyncify-imports@wali.SYS_fork -O2 ../perl.wasm -o ../perl.async.wasm
+  echo "perl.wasm asyncify: $(stat -c %s ../perl.wasm) -> $(stat -c %s ../perl.async.wasm) bytes"
+  mv ../perl.async.wasm ../perl.wasm
+fi
 # What an XS module may import: perl.wasm's exports (functions + data addresses).
 node -e 'const m=new WebAssembly.Module(require("fs").readFileSync(process.argv[1]));
   for (const e of WebAssembly.Module.exports(m)) console.log(e.name)' ../perl.wasm | sort > ../perl-exports.txt

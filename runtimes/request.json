@@ -1,1 +1,1 @@
-{ "abi": "ilp32", "only": "cpython", "why": "dlopen(NULL) = the whole program (ctypes.CDLL(None), pythonapi)", "try": 2 }
+{ "abi": "ilp32", "only": "perl", "why": "perl: real fork() via asyncify on ILP32 (Net::DNS: Can not fork: Function not implemented)", "try": 1 }
