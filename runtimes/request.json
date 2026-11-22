@@ -1,1 +1,1 @@
-{ "abi": "wali", "only": "cpython", "cpython_dir": "runtimes/cpython-v11", "why": "python_cxx v11 recipe (sandpie 473f496f) + NUL-separated env reader", "try": 11 }
+{ "abi": "ilp32", "only": "busybox", "why": "busybox: Alpine applet set (310 applets; nproc whoami ps blkid mount stty...)", "try": 1 }

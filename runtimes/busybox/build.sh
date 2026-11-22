@@ -18,7 +18,9 @@
 #
 # applets.txt is the applet set the box served before this recipe existed (the old .config
 # was lost with the machine it lived on); allnoconfig + those applets + the features below
-# reproduce it. A new applet goes into applets.txt.
+# reproduce it. A new applet goes into applets.txt. Since net15 it is also every applet Alpine's
+# own busybox enables (aports main/busybox/busyboxconfig): package scripts expect a real
+# Alpine's nproc, whoami, ps, mount, stty, blkid... (farm e2e R78: akms, byobu, parallel).
 set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 R=$(realpath -m "${1:-$HOME/busybox-wali-build}")
