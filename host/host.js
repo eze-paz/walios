@@ -2005,6 +2005,9 @@ if (process.env.WALI_ARGV0) rootArgv[0] = process.env.WALI_ARGV0; // some progra
   if (exitRing && code !== 0) try {
     fs.appendFileSync(process.env.WALI_EXITLOG, `== exit=${code} argv=${JSON.stringify(process.argv.slice(2))} cwd=${process.cwd()} env=${rootEnv.length} vars/${rootEnv.join('').length}B names=${rootEnv.map(e => e.split('=')[0]).join(',')}\n${exitRing.join('\n')}\n`);
   } catch {}
-  process.stderr.write(`[wali-host] exit=${code} procs=${procCount} syscalls=${syscallTotal} wall=${((Date.now() - t0) / 1000).toFixed(2)}s${JSPI ? ` [jspi] suspends=${pipeSuspends}pipe/${waitSuspends}wait` : ''}\n`);
+  // Only on request: a program's stderr is often captured with its stdout (`foo-config --cflags
+  // 2>&1`: perl-dbd-odbc got "[wali-host] exit=0 ..." among odbc_config's flags), and a real
+  // Linux program prints nothing of the kind.
+  if (process.env.WALI_HOST_STATS) process.stderr.write(`[wali-host] exit=${code} procs=${procCount} syscalls=${syscallTotal} wall=${((Date.now() - t0) / 1000).toFixed(2)}s${JSPI ? ` [jspi] suspends=${pipeSuspends}pipe/${waitSuspends}wait` : ''}\n`);
   process.exit(code);
 })();

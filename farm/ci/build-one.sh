@@ -329,6 +329,14 @@ for d in "$OVERLAY"/usr/lib/*/; do
   case "$n" in pkgconfig|cmake|python*|perl*|lua*|girepository-1.0) continue;; esac
   [ -e "/usr/lib/$n" ] || sudo -n ln -s "$OVERLAY/usr/lib/$n" "/usr/lib/$n" 2>/dev/null || true
 done
+# Likewise a dep's <name>Config.sh (tclConfig.sh, tkConfig.sh, itclConfig.sh): TEA configures
+# take --with-tcl=/usr/lib, Alpine's path, and stop "/usr/lib directory doesn't contain
+# tclConfig.sh" (expect, pgtcl, postgresql). Its -I/-L name /usr, where the farm's compiler
+# also sees the overlay.
+for f in "$OVERLAY"/usr/lib/*Config.sh; do
+  [ -f "$f" ] || continue; n=$(basename "$f")
+  [ -e "/usr/lib/$n" ] || { sudo -n ln -s "$f" "/usr/lib/$n" 2>/dev/null && echo "farm: /usr/lib/$n -> overlay" >> "$log"; }
+done
 # A dep's *-config script where recipes name it by its Alpine path: --with-apr=/usr is
 # /usr/bin/apr-1-config (apr-util, apache2 and its modules: "the --with-apr parameter is
 # incorrect"). A wrapper, not a symlink: apr-1-config finds its tree from its own path ($0),

@@ -1,1 +1,1 @@
-{"all":true,"max":3000,"publish":true,"note":"R78 full: real fork for shells, NUL env in farm libc, libtool macros in-tree (openldap), fpcast-emu retry, apr-config wrappers, zstd/xz/brotli/libtool un-denied, 25-min cap"}
+{"pkgs":"expect pgtcl postgresql17 postgresql18 perl-dbd-odbc perl-xml-parser nsd krb5 hypermail apache2 perl-tk","max":800,"chunk":3,"publish":true,"note":"R79 canary: deps Config.sh (tclConfig.sh) at /usr/lib; [wali-host] exit stats off unless WALI_HOST_STATS (leaked into odbc_config --cflags 2>&1)"}
