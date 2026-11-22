@@ -78,6 +78,12 @@ fi
 # ---- sysroot, with the IEEE-quad long double description ----
 rm -rf "$SYSROOT" && mkdir -p "$SYSROOT" && tar xzf "$SYSROOT_TGZ" -C "$SYSROOT"
 cp wali-musl/arch/aarch64/bits/float.h "$SYSROOT/include/bits/float.h"
+# libffi, WALI port (runtimes/libffi: the kernel does the calls and closures, env.__wali_ffi_*),
+# for _ctypes -- the farm toolchain's sysroot carries the same archive (farm/ci/toolchain.sh)
+FFI_TGZ=libffi-wali$([ "${WALI_ABI:-wali}" = ilp32 ] && echo 32).tar.gz
+[ -f "$FFI_TGZ" ] || curl -sSfL -o "$FFI_TGZ" https://github.com/eze-paz/walios/releases/download/toolchain-2026-10-31/$FFI_TGZ
+tar xzf "$FFI_TGZ" -C "$SYSROOT" --strip-components=1
+[ -f "$SYSROOT/lib/libffi.a" ] && [ -f "$SYSROOT/include/ffi.h" ] || { echo "libffi: not in the sysroot" >&2; exit 1; }
 
 # ---- libc++ / libc++abi / libunwind (static, linked whole into the main) ----
 if [ "$ABI" = ilp32 ]; then
@@ -139,6 +145,7 @@ fi
 # ---- CPython for walios ----
 rm -rf cross-py && mkdir cross-py && cd cross-py
 PKG_CONFIG_LIBDIR=/nonexistent PKG_CONFIG_PATH= CONFIG_SITE="$HERE/config.site" MODULE_BUILDTYPE=static \
+  LIBFFI_CFLAGS="-I$SYSROOT/include" LIBFFI_LIBS="$SYSROOT/lib/libffi.a" \
   CC="$L/clang $WFLAGS" CXX="$L/clang++ $WFLAGS" AR=$L/llvm-ar RANLIB=$L/llvm-ranlib READELF=true \
   CFLAGS="-msimd128 -D__wali_printscan_enable_long_double" \
   LDFLAGS="-L$SYSROOT/lib -nodefaultlibs -Wl,--shared-memory,--import-memory,--export-memory,--max-memory=2147483648,-z,stack-size=8388608,--export-table,--growable-table" \
@@ -146,6 +153,7 @@ PKG_CONFIG_LIBDIR=/nonexistent PKG_CONFIG_PATH= CONFIG_SITE="$HERE/config.site" 
   ../Python-$PY_VER/configure --host=wasm32-unknown-linux-musl --build=x86_64-pc-linux-gnu \
     --with-build-python=$R/host-prefix/bin/python3.14 --prefix=/py --disable-shared --without-ensurepip \
     --with-computed-gotos=no >../cross-cfg.log 2>&1
+grep -q '^MODULE__CTYPES_STATE=yes' Makefile || { echo "cpython: _ctypes not enabled:" >&2; grep -i 'ffi\|ctypes' ../cross-cfg.log >&2; grep '^MODULE__CTYPES' Makefile >&2; exit 1; }
 LF="-Wl,--export-dynamic -Wl,@$R/exports.rsp -Wl,@$R/libc-link.rsp -Wl,--export=__wali_fork_begin -Wl,--wrap=__main_void -Wl,--whole-archive $R/libcxx-prefix/lib/libc++.a $R/libcxx-prefix/lib/libc++abi.a $R/libcxx-prefix/lib/libunwind.a $R/cpp_exc.o $R/wali_dlfcn.o $R/wali_start.o $R/wali_nofork.o $R/wali_spawn.o $R/wali_trampoline.o $R/libc-ldfix.a $R/libz-wali.a -Wl,--no-whole-archive"
 sed -i -e "s/^SOABI=.*/SOABI=\t\tcpython-314-x86_64-linux-gnu/" \
        -e "s/^EXT_SUFFIX=.*/EXT_SUFFIX=\t.cpython-314-x86_64-linux-gnu.so/" \
