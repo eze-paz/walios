@@ -1,1 +1,1 @@
-{ "abi": "ilp32", "only": "busybox", "why": "busybox: Alpine applet set (310 applets; nproc whoami ps blkid mount stty...)", "try": 1 }
+{ "abi": "ilp32", "only": "busybox", "why": "busybox: Alpine applet set (310 applets; nproc whoami ps blkid mount stty...)", "try": 2 }

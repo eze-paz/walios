@@ -101,7 +101,10 @@ unwanted_applets_off() {
   awk 'NR==FNR { want[$1] = 1; next } { sym[$1] = sym[$1] || ($2 in want) } END { for (s in sym) if (!sym[s]) print s }' \
     "$HERE/applets.txt" "$R/applet-syms.txt" | while read -r s; do set_n "CONFIG_$s"; done
 }
-while read -r a; do set_y "CONFIG_$(echo "$a" | tr 'a-z-' 'A-Z_')"; done < "$HERE/applets.txt"
+# each wanted applet's own symbol(s), from the //applet: lines (the name alone does not give it:
+# "[" and "[[" are TEST1/TEST2, mkfs.vfat is MKFS_VFAT); a name with none is a typo: stop
+awk 'NR==FNR { want[$1] = 1; next } ($2 in want) { print $1; seen[$2] = 1 } END { for (a in want) if (!(a in seen)) print "?" a }'   "$HERE/applets.txt" "$R/applet-syms.txt" | sort -u | while read -r s; do
+  case "$s" in "?"*) echo "busybox: applets.txt names no applet: ${s#?}" >&2; exit 1;; esac; set_y "CONFIG_$s"; done
 set_n CONFIG_NOMMU                 # we have real fork() now (Asyncify substrate)
 set_y CONFIG_LFS                   # off_t is 64-bit on every walios ABI (allnoconfig turns it off)
 set_y CONFIG_ASH; set_y CONFIG_SHELL_ASH
