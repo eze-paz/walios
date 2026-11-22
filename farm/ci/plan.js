@@ -48,6 +48,11 @@ function depsOf(txt) {
   const f = path.join(require('os').tmpdir(), `apk-${process.pid}`); fs.writeFileSync(f, txt);
   let d = '';
   try { d = execFileSync('bash', ['-c', `source "${f}" >/dev/null 2>&1; echo "$depends $makedepends $makedepends_host $makedepends_build $depends_dev"`], { encoding: 'utf8' }); } catch {}
+  // A Lua recipe's lua5.X-<name> subpackage function adds its own runtime deps (lua-yaml:
+  // depends="$depends lua$lver lua$lver-lub" -- "module 'lub' not found", R78); the farm runs
+  // the 5.4 one (build-one.sh), so its deps are the recipe's, read textually with X = 5.4.
+  if (/^_luaversions=/m.test(txt)) for (const m of txt.matchAll(/^\s+depends="\$depends ([^"]*)"/gm))
+    d += ' ' + m[1].replace(/\$\{?(lver|_v|luaver|_luaver)\}?/g, '5.4');
   return [...new Set(d.split(/\s+/).map(clean).filter(x => !skip(x)))];
 }
 

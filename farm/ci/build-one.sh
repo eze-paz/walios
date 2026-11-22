@@ -227,10 +227,15 @@ case "$pkg" in perl-*) ;; *) export PERL_MM_OPT="CC=$CC LD=$CC INSTALLDIRS=vendo
 # lua.wasm is, as wasm side modules it dlopen()s -- PIC, importing only lua.wasm's exports
 # (lua-exports.txt, from walios/build/lua in sandpie). Alpine installs them from the
 # lua5.X-<name> subpackage functions, so the farm runs the 5.4 one into $pkgdir.
-LUAMOD=""
+LUAMOD="" LUASUB=""
 if [ -z "$NOARCH" ] && grep -q '^_luaversions=' "$bdir/APKBUILD"; then
   LUAMOD=1; export WALI_SIDE="$HERE/lua-exports$X.txt"
-  sed -i 's/^_luaversions=.*/_luaversions="5.4"/' "$bdir/APKBUILD"
+fi
+# Pure-Lua recipes (noarch) install their .lua files from the same lua5.X-<name> subpackage
+# functions; package() alone gave lua-busted only usr/bin/busted ("module 'busted.runner' not
+# found", R78). Every _luaversions recipe runs the 5.4 one.
+if grep -q '^_luaversions=' "$bdir/APKBUILD"; then
+  LUASUB=1; sed -i 's/^_luaversions=.*/_luaversions="5.4"/' "$bdir/APKBUILD"
 fi
 # Perl XS modules (perl-*, not noarch): side modules perl.wasm's DynaLoader dlopen()s,
 # importing only its exports (perl-exports.txt, from walios/build/perl in sandpie). The
@@ -397,7 +402,7 @@ cd "$builddir" 2>/dev/null || cd "$SRC"
 ( if type build >/dev/null 2>&1; then build; else make; fi )
 cd "$builddir" 2>/dev/null || cd "$SRC"
 ( if type package >/dev/null 2>&1; then package; fi )
-if [ -n "$LUAMOD" ]; then for sp in $subpackages; do case "$sp" in
+if [ -n "$LUASUB" ]; then for sp in $subpackages; do case "$sp" in
   lua5.4-*:*) ( subpkgname=${sp%%:*}; subpkgdir="$PKGDIR"; cd "$builddir" 2>/dev/null || cd "$SRC"; "${sp##*:}" );; esac; done; fi
 EOS
 # Link against this package's deps' archives only (plan.js deps.json + the wave job's
@@ -429,7 +434,7 @@ fi
 _t0=$(date +%s)
 # stdin is /dev/null and the perl/test knobs say "no questions": a Makefile.PL prompt used to
 # hang a job until its timeout.
-ABIFLAGS="$ABIFLAGS" LUAMOD="$LUAMOD" PERLXS="$PERLXS" PERLXS_MAKE="$PERLXS_MAKE" OVERLAY="$OVERLAY" HERE="$HERE" BDIR="$bdir" SRC="$SRC" PKGDIR="$pkgdir"   PERL_MM_USE_DEFAULT=1 AUTOMATED_TESTING=1 NONINTERACTIVE_TESTING=1 DEBIAN_FRONTEND=noninteractive   fakeroot -- bash "$bdir/.farm-build.sh" >>"$log" 2>&1 </dev/null
+ABIFLAGS="$ABIFLAGS" LUAMOD="$LUAMOD" LUASUB="$LUASUB" PERLXS="$PERLXS" PERLXS_MAKE="$PERLXS_MAKE" OVERLAY="$OVERLAY" HERE="$HERE" BDIR="$bdir" SRC="$SRC" PKGDIR="$pkgdir"   PERL_MM_USE_DEFAULT=1 AUTOMATED_TESTING=1 NONINTERACTIVE_TESTING=1 DEBIAN_FRONTEND=noninteractive   fakeroot -- bash "$bdir/.farm-build.sh" >>"$log" 2>&1 </dev/null
 BUILD_SECS=$(( $(date +%s) - _t0 ))
 
 # Only wasm archives may reach the overlay: every later link pulls all overlay archives into
