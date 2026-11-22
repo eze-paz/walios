@@ -1,9 +1,9 @@
 {
   "tag": "farm-2026-11-21-84",
   "busybox": "runtimes-ilp32-2026-11-22-16",
-  "python": "runtimes-ilp32-2026-11-22-17",
+  "python": "runtimes-ilp32-2026-11-22-18",
   "perl": "runtimes-ilp32-2026-11-03-8",
   "lua": "runtimes-ilp32-2026-11-02-3",
   "shards": 12,
-  "note": "R78 + Alpine-applet busybox + CPython with _ctypes"
+  "note": "R78 + busybox Alpine applets + CPython _ctypes + dlopen(NULL)"
 }
