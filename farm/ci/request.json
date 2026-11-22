@@ -1,1 +1,1 @@
-{"pkgs":"expect pgtcl postgresql17 postgresql18 perl-dbd-odbc perl-xml-parser nsd krb5 hypermail apache2 perl-tk","max":800,"chunk":3,"publish":true,"note":"R79 canary: deps Config.sh (tclConfig.sh) at /usr/lib; [wali-host] exit stats off unless WALI_HOST_STATS (leaked into odbc_config --cflags 2>&1)"}
+{"all":true,"max":3000,"publish":true,"note":"R80 full: smoke asks for WALI_HOST_STATS; dep *Config.sh copied with overlay include/lib paths; /usr/share/build-1 (apr) symlinked; setprogname gone (TC v56); Lua subpackages + their deps"}

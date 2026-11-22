@@ -336,11 +336,19 @@ for d in "$OVERLAY"/usr/lib/*/; do
 done
 # Likewise a dep's <name>Config.sh (tclConfig.sh, tkConfig.sh, itclConfig.sh): TEA configures
 # take --with-tcl=/usr/lib, Alpine's path, and stop "/usr/lib directory doesn't contain
-# tclConfig.sh" (expect, pgtcl, postgresql). Its -I/-L name /usr, where the farm's compiler
-# also sees the overlay.
+# tclConfig.sh" (expect, pgtcl, postgresql). A copy, its /usr/include and -L/usr/lib pointed
+# at the overlay: TEA tests the header's path with the shell ("/usr/include directory does not
+# contain tcl.h", R85), not through the compiler that also sees the overlay.
 for f in "$OVERLAY"/usr/lib/*Config.sh; do
   [ -f "$f" ] || continue; n=$(basename "$f")
-  [ -e "/usr/lib/$n" ] || { sudo -n ln -s "$f" "/usr/lib/$n" 2>/dev/null && echo "farm: /usr/lib/$n -> overlay" >> "$log"; }
+  [ -e "/usr/lib/$n" ] || { sed -e "s|/usr/include|$OVERLAY/usr/include|g" -e "s|-L/usr/lib|-L$OVERLAY/usr/lib|g" "$f" | sudo -n tee "/usr/lib/$n" >/dev/null 2>&1 && echo "farm: /usr/lib/$n from overlay" >> "$log"; }
+done
+# apr's build tree (libtool, make_exports.awk, apr_rules.mk) sits at /usr/share/build-1 on
+# Alpine and apr-1-config --installbuilddir names that path: apr-util ran "/usr/share/build-1/
+# libtool: No such file" (R85). Symlinked like the lib dirs above.
+for d in "$OVERLAY"/usr/share/build-*/; do
+  [ -d "$d" ] || continue; n=$(basename "$d")
+  [ -e "/usr/share/$n" ] || { sudo -n ln -s "$OVERLAY/usr/share/$n" "/usr/share/$n" 2>/dev/null && echo "farm: /usr/share/$n -> overlay" >> "$log"; }
 done
 # A dep's *-config script where recipes name it by its Alpine path: --with-apr=/usr is
 # /usr/bin/apr-1-config (apr-util, apache2 and its modules: "the --with-apr parameter is
@@ -578,7 +586,7 @@ if [ -n "$exe" ]; then
       "$OUT/$pkg.wasm" -o "$OUT/$pkg.async.wasm" >> "$log" 2>&1 && mv "$OUT/$pkg.async.wasm" "$OUT/$pkg.wasm" \
       || { rm -f "$OUT/$pkg.wasm" "$OUT/$pkg.async.wasm"; emit fail asyncify-failed exe ""; }
   fi
-  st=$(cd /tmp && timeout 60 $HOST "$OUT/$pkg.wasm" --version </dev/null 2>&1)
+  st=$(cd /tmp && WALI_HOST_STATS=1 timeout 60 $HOST "$OUT/$pkg.wasm" --version </dev/null 2>&1)
   printf '%s\n' "$st" | head -30 | sed "s/^/farm smoke: /" >> "$log"  # a trap's message, for the log (the index keeps only the reason)
   # C that calls through a function pointer cast to another type (rhash's option table) is
   # fine on every native ABI but a wasm call_indirect traps on it. binaryen's fpcast-emu
@@ -587,7 +595,7 @@ if [ -n "$exe" ]; then
     "${TC:?}/binaryen/bin/wasm-opt" --fpcast-emu --pass-arg=max-func-params@16 -O2 \
       "$OUT/$pkg.wasm" -o "$OUT/$pkg.fpc.wasm" >> "$log" 2>&1 && mv "$OUT/$pkg.fpc.wasm" "$OUT/$pkg.wasm" &&
       { echo "farm: function pointer casts emulated (fpcast-emu)" >> "$log"
-        st=$(cd /tmp && timeout 60 $HOST "$OUT/$pkg.wasm" --version </dev/null 2>&1)
+        st=$(cd /tmp && WALI_HOST_STATS=1 timeout 60 $HOST "$OUT/$pkg.wasm" --version </dev/null 2>&1)
         printf '%s\n' "$st" | head -30 | sed "s/^/farm smoke (fpcast): /" >> "$log"; }
     rm -f "$OUT/$pkg.fpc.wasm"
   fi
