@@ -14,10 +14,14 @@ int __wali_dlsym(int handle, const char *sym);
 
 static char errbuf[512];
 static int have_err;
+/* dlopen(NULL) is the whole program, as on Linux: dlsym on it (or on RTLD_DEFAULT/RTLD_NEXT)
+ * searches the main program's exports and then every loaded module -- kernel handle -1.
+ * ctypes.CDLL(None) and ctypes.pythonapi are this (freezegun, time-machine, py-cpuinfo). */
+static char self_handle;
 
 void *dlopen(const char *path, int flags)
 {
-	if (!path) { snprintf(errbuf, sizeof errbuf, "dlopen(NULL): no handle for the main program"); have_err = 1; return 0; }
+	if (!path) return &self_handle;
 	int h = __wali_dlopen(path, flags);
 	if (h == -2) { snprintf(errbuf, sizeof errbuf, "%s: built for the other walios ABI (this program's long is %d-bit)", path, (int)(8 * sizeof(long))); have_err = 1; return 0; }
 	if (h < 0) { snprintf(errbuf, sizeof errbuf, "%s: cannot load shared object", path); have_err = 1; return 0; }
@@ -26,8 +30,9 @@ void *dlopen(const char *path, int flags)
 
 void *dlsym(void *restrict handle, const char *restrict sym)
 {
-	int h = (int)(intptr_t)handle - 1;
-	int f = h < 0 ? -1 : __wali_dlsym(h, sym);
+	int global = handle == &self_handle || handle == RTLD_DEFAULT || handle == RTLD_NEXT;
+	int h = global ? -1 : (int)(intptr_t)handle - 1;
+	int f = (h < 0 && !global) ? -1 : __wali_dlsym(h, sym);
 	if (f < 0) { snprintf(errbuf, sizeof errbuf, "%s: undefined symbol", sym); have_err = 1; return 0; }
 	return (void *)(intptr_t)f;
 }

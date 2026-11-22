@@ -2395,6 +2395,15 @@ class Process {
     }
   }
   dlsym(handle, sym) {
+    // -1: the whole program (dlopen(NULL), RTLD_DEFAULT; wali_dlfcn.c) -- the main's exports,
+    // then each loaded module's, as Linux's global symbol search goes
+    if (handle === -1) {
+      const c = this.dlGlobal || (this.dlGlobal = new Map());
+      if (c.has(sym)) return c.get(sym);
+      let at = -1, fn = this.inst.exports[sym];
+      if (typeof fn !== 'function') { at = this.dlHandles.findIndex((x) => typeof x.inst.exports[sym] === 'function'); if (at < 0) return -1; fn = this.dlHandles[at].inst.exports[sym]; }
+      const idx = this.funcIdx(fn, { h: at, name: sym }); c.set(sym, idx); return idx;
+    }
     const h = this.dlHandles[handle]; if (!h) return -1;
     if (h.symCache.has(sym)) return h.symCache.get(sym);
     const fn = h.inst.exports[sym]; if (typeof fn !== 'function') return -1;

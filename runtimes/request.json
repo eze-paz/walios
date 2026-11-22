@@ -1,1 +1,1 @@
-{ "abi": "ilp32", "only": "cpython", "why": "CPython with _ctypes on the WALI libffi (nftables, py3-py-cpuinfo: No module named _ctypes)", "try": 1 }
+{ "abi": "ilp32", "only": "cpython", "why": "dlopen(NULL) = the whole program (ctypes.CDLL(None), pythonapi)", "try": 2 }
