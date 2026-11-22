@@ -214,6 +214,7 @@ make CC="$CC" LD="$LD" HOSTCC=$HOSTCC LDFLAGS="" SKIP_STRIP=y -j"$(nproc)" busyb
 #   recursive_action*, fileAction*, exec_actions                   find: the walker and -exec
 #   get_header_tar                                                 tar --to-command (data_extract_to_command)
 #   xargs_main, child                                              their own callbacks, kept to be safe
+#   ifupdown_main, iface_up/down, execute, <method>_up/down       ifup/ifdown: cmds(), method->up(iface, doit), exec()
 # Left out on purpose: xfunc_die (calling it from every die path instrumented nearly
 # everything again, 1.56MB). It only reaches fork through hush's restore_ttypgrp_and__exit,
 # which sets G.exiting first so the EXIT trap -- the part that could fork -- never runs.
@@ -227,7 +228,7 @@ diff "$HERE/fork-entries.txt" "$R/fork-entries.txt" >&2 ||
          "give each new one's indirect caller to asyncify-addlist below, then update fork-entries.txt" >&2; exit 1; }
 "$WO" --asyncify --pass-arg=asyncify-imports@wali.SYS_fork --pass-arg=asyncify-ignore-indirect \
   --pass-arg=asyncify-propagate-addlist \
-  '--pass-arg=asyncify-addlist@main,run_applet_no_and_exit,run_applet_main,evaltree,evalbltin,run_pipe,exec_builtin*,recursive_action*,fileAction*,exec_actions,get_header_tar,xargs_main,child' \
+  '--pass-arg=asyncify-addlist@main,run_applet_no_and_exit,run_applet_main,evaltree,evalbltin,run_pipe,exec_builtin*,recursive_action*,fileAction*,exec_actions,get_header_tar,xargs_main,child,ifupdown_main,iface_up,iface_down,execute,loopback_*,static_up*,static_down*,dhcp_up,dhcp_down,bootp_up,ppp_up,ppp_down,wvdial_*,v4tunnel_up' \
   busybox -o "$R/busybox.wasm"
 
 # The applet LINK LIST. Real busybox is installed with `busybox --install -s`, which drops a
