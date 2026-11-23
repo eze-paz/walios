@@ -286,11 +286,19 @@ if [ -n "$srcs" ]; then
     dl "https://github.com/eze-paz/walios/releases/download/sources/$src_name" &&
       [ "$(sha512sum "$bdir/$src_name" | cut -d' ' -f1)" = "$sha" ] && { echo "farm: $src_name from the sources release (sha512 checked)" >> "$log"; return 0; }
     return 1; }
+  # GNU's mirror network for a ftp.gnu.org URL (it timed out for the runners all R80 long:
+  # readline's patches, then lua5.4 and bash without readline). Checked like mirror().
+  gnumirror() { local sha p u; case "$src_url" in *://ftp.gnu.org/gnu/*|*://ftpmirror.gnu.org/*) ;; *) return 1;; esac
+    sha=$(apk sha512sums | awk -v n="$src_name" '$2 == n { print $1 }'); [ -n "$sha" ] || return 1
+    p=${src_url#*://*/}; p=${p#gnu/}
+    for u in "https://ftpmirror.gnu.org/gnu/$p" "https://mirrors.kernel.org/gnu/$p" "https://mirror.csclub.uwaterloo.ca/gnu/$p" "https://ftp.fau.de/gnu/$p"; do
+      dl "$u" && [ "$(sha512sum "$bdir/$src_name" | cut -d' ' -f1)" = "$sha" ] && { echo "farm: $src_name from $u (sha512 checked)" >> "$log"; return 0; }
+    done; return 1; }
   SRC=""
   for src_entry in $srcs; do
     src_name="${src_entry%%::*}"; src_url="${src_entry##*::}"
     [ "$src_name" = "$src_url" ] && src_name="$(basename "$src_url")"
-    dl "$src_url" || dl "https://distfiles.alpinelinux.org/distfiles/edge/$src_name"     || dl "https://distfiles.alpinelinux.org/distfiles/v3.22/$src_name" || mirror || ghsrc || { echo "farm: dl-failed $src_name <- $src_url" >> "$log"; emit fail dl-failed; }
+    dl "$src_url" || dl "https://distfiles.alpinelinux.org/distfiles/edge/$src_name"     || dl "https://distfiles.alpinelinux.org/distfiles/v3.22/$src_name" || gnumirror || mirror || ghsrc || { echo "farm: dl-failed $src_name <- $src_url" >> "$log"; emit fail dl-failed; }
     # tar first; bsdtar for what GNU tar cannot open (.zip, .tar.lz, .7z...)
     before=$(ls "$bdir")
     case "$src_name" in *.tar*|*.tgz|*.tbz*|*.txz|*.zip|*.7z|*.lz|*.zst)
