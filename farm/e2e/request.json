@@ -1,9 +1,13 @@
 {
-  "tag": "farm-2026-11-23-86",
+  "tag": "farm-2026-11-23-86m",
   "busybox": "runtimes-ilp32-2026-11-22-16",
   "python": "runtimes-ilp32-2026-11-22-18",
   "perl": "runtimes-ilp32-2026-11-22-19",
   "lua": "runtimes-ilp32-2026-11-02-3",
   "shards": 12,
-  "note": "R80 (farm-86) full run; Lua modules missing (readline dl-failed), canary R81 rebuilds them"
+  "note": "R80 full (farm-86) + R81 canary (farm-87: readline/lua5.4/bash/Lua modules via GNU mirrors)",
+  "overlays": [
+    "farm-2026-11-23-86",
+    "farm-2026-11-23-87"
+  ]
 }
