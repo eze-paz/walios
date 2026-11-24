@@ -9,7 +9,7 @@ mkdir -p "$HERE/artifacts"
 exec > >(tee "$HERE/artifacts/build.log") 2>&1
 emit_fail() {
   rc=$1
-  grep -iaE "error|fatal|cannot find|undefined reference|not found" "$HERE/artifacts/build.log" | tail -n 5 |
+  grep -iaE "error|fatal|cannot find|undefined reference|not found" "$HERE/artifacts/build.log" | grep -viaE "strerror" | tail -n 4 |
     while IFS= read -r l; do printf '::error::build: %s\n' "$l"; done
   for f in $(find "$HERE/texlive-src/build" -name config.log -type f 2>/dev/null | head -2); do
     grep -iaE "error|cannot" "$f" | tail -n 2 |
@@ -57,6 +57,7 @@ cd texlive-src/build
   --without-x \
   --disable-shared \
   --disable-all-pkgs \
+  --enable-web2c \
   --enable-pdftex \
   --enable-missing \
   --disable-synctex \
@@ -74,7 +75,7 @@ if ! make -j"$(nproc)"; then
 fi
 cd ../..
 ENGINE=texlive-src/build/texk/web2c/pdftex
-[ -f "$ENGINE" ]
+[ -f "$ENGINE" ] || { echo "FATAL: pdftex engine binary missing at $ENGINE"; exit 1; }
 cp "$ENGINE" artifacts/pdftex.wasm
 node -e 'const b=require("fs").readFileSync(process.argv[1]);const m=new WebAssembly.Module(b);if(b.subarray(0,4).toString("hex")!=="0061736d"||!WebAssembly.Module.exports(m).some(x=>x.name==="_start"))throw Error("not an executable Wasm");console.log({bytes:b.length,start:true});' artifacts/pdftex.wasm
 cd /tmp
