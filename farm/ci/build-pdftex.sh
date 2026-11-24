@@ -59,6 +59,8 @@ cd texlive-src/build
   --disable-all-pkgs \
   --enable-web2c \
   --enable-pdftex \
+  --disable-lua53 \
+  --disable-luajit \
   --enable-missing \
   --disable-synctex \
   --disable-xetex \
