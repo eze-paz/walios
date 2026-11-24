@@ -8,9 +8,6 @@ on:
   workflow_dispatch:
 
 # Superseded attempts on this experiment branch should not spend more runner time.
-concurrency:
-  group: farm-${{ github.ref }}
-  cancel-in-progress: true
 
 permissions:
   contents: read
