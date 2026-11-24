@@ -5,6 +5,7 @@ set -euo pipefail
 HERE=$PWD
 . "$TC/env.sh"
 export CONFIG_SITE="$HERE/farm/ci/config.site"
+export FARM_CI_DIR="$HERE/farm/ci"
 export CFLAGS=-O2 CXXFLAGS=-O2 LDFLAGS= CPPFLAGS=
 export BUILDCC=/usr/bin/gcc CC_FOR_BUILD=/usr/bin/gcc
 export BUILDCPPFLAGS= BUILDLDFLAGS=
