@@ -126,7 +126,17 @@ CNF
 # Debian keeps the generated font map in /var/lib/texmf (outside texmf-dist);
 # put it next to the engine so TEXFONTMAPS . finds it.
 MAPSRC=$(find /var/lib/texmf /etc/texmf -name pdftex.map -type f 2>/dev/null | head -1)
-[ -n "$MAPSRC" ] && cp "$MAPSRC" pdftex.map || echo "NOTE: no system pdftex.map found"
+if [ -n "$MAPSRC" ]; then cp "$MAPSRC" pdftex.map
+else
+  # no updmap output anywhere: generate a minimal CM map from the tree itself
+  M=/usr/share/texlive/texmf-dist
+  : > pdftex.map
+  for f in "$M"/fonts/tfm/public/cm/*.tfm; do
+    n=$(basename "$f" .tfm)
+    [ -f "$M/fonts/type1/public/amsfonts/cm/$n.pfb" ] && echo "$n $n <cm/$n.pfb" >> pdftex.map
+  done
+  echo "generated minimal pdftex.map with $(wc -l < pdftex.map) entries"
+fi
 env TEXMFCNF="$TEXMF_SRC/web2c" TEXMF="$TEXMF_SRC" \
   timeout 1200 node "$HERE/host/host.js" ./pdftex \
   -ini -etex -progname=latex -jobname=latex '*latex.ini' < /dev/null || true
@@ -166,7 +176,7 @@ cp latex.fmt bundle/web2c/latex.fmt
 # The generated pdftex font map lives in the runner's TEXMFVAR after apt
 # triggers ran updmap-sys; without it pdftex would try mktexpk and fail.
 MAPSRC=$(find /var/lib/texmf /etc/texmf "$TEXMF_SRC" -name pdftex.map -type f 2>/dev/null | head -1)
-[ -n "$MAPSRC" ] && { mkdir -p bundle/fonts/map/pdftex/updmap; cp "$MAPSRC" bundle/fonts/map/pdftex/updmap/pdftex.map; } || echo "NOTE: no pdftex.map found"
+[ -f "$MAPSRC" ] && { mkdir -p bundle/fonts/map/pdftex/updmap; cp "$MAPSRC" bundle/fonts/map/pdftex/updmap/pdftex.map; } || { mkdir -p bundle/fonts/map/pdftex/updmap; cp pdftex.map bundle/fonts/map/pdftex/updmap/; }
 cat > bundle/web2c/texmf.cnf <<'EOF'
 % Minimal self-contained walios texmf tree (installed under /usr/share/texmf).
 TEXMF = /usr/share/texmf
