@@ -101,6 +101,27 @@ echo "=== building latex.fmt with the wasm engine ==="
 cd "$HERE/artifacts"
 rm -f latex.fmt latex.log
 cp pdftex.wasm pdftex   # kpathsea resolves the engine name in cwd
+# host.js does not forward the shell environment, so TEXMFCNF=... never
+# reaches kpathsea; a ./texmf.cnf is found automatically (cwd is searched
+# first) and points the engine at the runner's apt texlive tree.
+cat > texmf.cnf <<'CNF'
+TEXMF = /usr/share/texlive/texmf-dist
+TEXFORMATS = .;$TEXMF/web2c//
+TEXINPUTS = .;$TEXMF/tex/{latex,generic,plain}//
+TEXINPUTS.latex = .;$TEXMF/tex/{latex,generic,plain}//
+TEXINPUTS.pdflatex = .;$TEXMF/tex/{latex,generic,plain}//
+TFMFONTS = .;$TEXMF/fonts/tfm//
+T1FONTS = .;$TEXMF/fonts/type1//
+TEXFONTMAPS = .;$TEXMF/fonts/map//
+main_memory = 12000000
+pool_size = 12500000
+max_strings = 550000
+hash_extra = 1000000
+buf_size = 200000
+save_size = 80000
+param_size = 10000
+expand_depth = 10000
+CNF
 env TEXMFCNF="$TEXMF_SRC/web2c" TEXMF="$TEXMF_SRC" \
   timeout 1200 node "$HERE/host/host.js" ./pdftex \
   -ini -etex -progname=latex -jobname=latex '*latex.ini' < /dev/null || true
