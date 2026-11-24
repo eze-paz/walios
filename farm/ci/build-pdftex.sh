@@ -61,6 +61,7 @@ cd texlive-src/build
   --enable-pdftex \
   --disable-lua53 \
   --disable-luajit \
+  --disable-luajithbtex \
   --disable-mflua \
   --disable-mfluajit \
   --enable-missing \
