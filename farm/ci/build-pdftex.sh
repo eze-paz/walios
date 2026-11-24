@@ -130,6 +130,7 @@ env TEXMFCNF="$TEXMF_SRC/web2c" TEXMF="$TEXMF_SRC" \
 ls -la latex.fmt
 echo "=== compiling hello.tex with the wasm engine ==="
 rm -rf hello; mkdir hello; cd hello
+cp ../pdftex ../texmf.cnf .   # engine + cnf must resolve in THIS cwd
 cat > hello.tex <<'EOF'
 \documentclass{article}
 \begin{document}
