@@ -3,6 +3,21 @@
 # Engine output, not a supported package release: no texmf/font bundle is shipped.
 set -euo pipefail
 HERE=$PWD
+# CI runner logs are not downloadable through the API token used to drive this
+# experiment; make failures surface as check-run annotations instead.
+mkdir -p "$HERE/artifacts"
+exec > >(tee "$HERE/artifacts/build.log") 2>&1
+emit_fail() {
+  rc=$1
+  grep -iaE "error|fatal|cannot find|undefined reference|not found" "$HERE/artifacts/build.log" | tail -n 5 |
+    while IFS= read -r l; do printf '::error::build: %s\n' "$l"; done
+  for f in $(find "$HERE/texlive-src/build" -name config.log -type f 2>/dev/null | head -2); do
+    grep -iaE "error|cannot" "$f" | tail -n 2 |
+      while IFS= read -r l; do printf '::error::%s: %s\n' "$f" "$l"; done
+  done
+  printf '::error::build failed rc=%s (full log in build.log artifact)\n' "$rc"
+}
+trap 'emit_fail $?' ERR
 . "$TC/env.sh"
 export CONFIG_SITE="$HERE/farm/ci/config.site"
 export FARM_CI_DIR="$HERE/farm/ci"
