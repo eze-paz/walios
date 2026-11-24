@@ -49,6 +49,6 @@ jobs:
           name: pdftex-walios-probe
           path: |
             artifacts/
-            texlive-src/build/config.log
+            'texlive-src/build/**/config.log'
           if-no-files-found: ignore
           retention-days: 14

@@ -36,7 +36,14 @@ cd texlive-src/build
   --disable-luatex \
   --disable-luajittex \
   --disable-luahbtex
-make -j"$(nproc)"
+if ! make -j"$(nproc)"; then
+  echo '=== Nested native configure logs (failure diagnostics) ==='
+  for f in $(find . -path '*/native/config.log' -type f); do
+    echo "--- $f ---"
+    tail -n 110 "$f"
+  done
+  exit 1
+fi
 cd ../..
 ENGINE=texlive-src/build/texk/web2c/pdftex
 [ -f "$ENGINE" ]
