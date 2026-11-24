@@ -114,6 +114,7 @@ TFMFONTS = .;$TEXMF/fonts/tfm//
 T1FONTS = .;$TEXMF/fonts/type1//
 TEXFONTMAPS = .;$TEXMF/fonts/map//
 main_memory = 12000000
+font_mem_size = 15000000
 pool_size = 12500000
 max_strings = 550000
 hash_extra = 1000000
