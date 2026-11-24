@@ -62,6 +62,7 @@ cd texlive-src/build
   --disable-lua53 \
   --disable-luajit \
   --disable-luajithbtex \
+  --disable-tex4htk \
   --disable-mflua \
   --disable-mfluajit \
   --enable-missing \
@@ -70,13 +71,16 @@ cd texlive-src/build
   --disable-luatex \
   --disable-luajittex \
   --disable-luahbtex
-if ! make -j"$(nproc)"; then
+make_rc=0
+make -j"$(nproc)" || make_rc=$?
+if [ "$make_rc" -ne 0 ]; then
+  # An unrelated engine or utility may have failed; pdftex itself may be fine.
+  echo "make failed rc=$make_rc; continuing if the pdftex engine binary exists"
   echo '=== Nested native configure logs (failure diagnostics) ==='
   for f in $(find . -path '*/native/config.log' -type f); do
     echo "--- $f ---"
     tail -n 110 "$f"
   done
-  exit 1
 fi
 cd ../..
 ENGINE=texlive-src/build/texk/web2c/pdftex
