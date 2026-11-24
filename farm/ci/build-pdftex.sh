@@ -100,8 +100,9 @@ TEXMF_SRC=/usr/share/texlive/texmf-dist
 echo "=== building latex.fmt with the wasm engine ==="
 cd "$HERE/artifacts"
 rm -f latex.fmt latex.log
+cp pdftex.wasm pdftex   # kpathsea resolves the engine name in cwd
 env TEXMFCNF="$TEXMF_SRC/web2c" TEXMF="$TEXMF_SRC" \
-  timeout 1200 node "$HERE/host/host.js" "$HERE/artifacts/pdftex.wasm" \
+  timeout 1200 node "$HERE/host/host.js" ./pdftex \
   -ini -etex -progname=latex -jobname=latex '*latex.ini' < /dev/null || true
 [ -f latex.fmt ] || { printf '::error::latex.fmt was not dumped (see latex.log)\n'; tail -n 40 latex.log; exit 1; }
 ls -la latex.fmt
@@ -115,8 +116,8 @@ Einstein: $E = mc^2$, a square root: $\sqrt{2} \approx 1.41$.
 \end{document}
 EOF
 env TEXMFCNF="$TEXMF_SRC/web2c" TEXMF="$TEXMF_SRC" \
-  timeout 1200 node "$HERE/host/host.js" "$HERE/artifacts/pdftex.wasm" \
-  -progname=latex -fmt="$HERE/artifacts/latex.fmt" -interaction=nonstopmode hello.tex < /dev/null || true
+  timeout 1200 node "$HERE/host/host.js" ./pdftex \
+  -progname=latex -fmt="$HERE/artifacts/latex.fmt" -output-format=pdf -interaction=nonstopmode hello.tex < /dev/null || true
 [ -f hello.pdf ] || { printf '::error::hello.pdf was not produced (hello.log)\n'; tail -n 40 hello.log; exit 1; }
 head -c 5 hello.pdf | grep -q '%PDF'
 echo "hello.pdf: $(stat -c '%s bytes') — wasm LaTeX typesetting works"
@@ -160,12 +161,24 @@ MFBASES = .;$TEXMF/web2c
 MPPOOL = .;$TEXMF/web2c
 SYSTEXMF = $TEXMF
 OSFONTDIR =
+main_memory = 12000000
+extra_mem_top = 10000000
+extra_mem_bot = 40000000
+font_mem_size = 15000000
+pool_size = 12500000
+string_vacancies = 180000
+max_strings = 550000
+hash_extra = 1000000
+buf_size = 200000
+save_size = 80000
+param_size = 10000
+expand_depth = 10000
 EOF
 mkdir -p bundle/bin
 cat > bundle/bin/latex <<'EOF'
 #!/bin/sh
 export TEXMFCNF=/usr/share/texmf/web2c
-exec /bin/pdftex -progname=latex -fmt=latex "$@"
+exec /bin/pdftex -progname=latex -fmt=latex -output-format=pdf "$@"
 EOF
 cat > bundle/bin/pdflatex <<'EOF'
 #!/bin/sh
