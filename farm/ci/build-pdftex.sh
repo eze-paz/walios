@@ -65,7 +65,6 @@ cd texlive-src/build
   --disable-tex4htk \
   --disable-mflua \
   --disable-mfluajit \
-  --enable-missing \
   --disable-synctex \
   --disable-xetex \
   --disable-luatex \
