@@ -123,6 +123,10 @@ save_size = 80000
 param_size = 10000
 expand_depth = 10000
 CNF
+# Debian keeps the generated font map in /var/lib/texmf (outside texmf-dist);
+# put it next to the engine so TEXFONTMAPS . finds it.
+MAPSRC=$(find /var/lib/texmf /etc/texmf -name pdftex.map -type f 2>/dev/null | head -1)
+[ -n "$MAPSRC" ] && cp "$MAPSRC" pdftex.map || echo "NOTE: no system pdftex.map found"
 env TEXMFCNF="$TEXMF_SRC/web2c" TEXMF="$TEXMF_SRC" \
   timeout 1200 node "$HERE/host/host.js" ./pdftex \
   -ini -etex -progname=latex -jobname=latex '*latex.ini' < /dev/null || true
@@ -131,6 +135,7 @@ ls -la latex.fmt
 echo "=== compiling hello.tex with the wasm engine ==="
 rm -rf hello; mkdir hello; cd hello
 cp ../pdftex ../texmf.cnf .   # engine + cnf must resolve in THIS cwd
+[ -f ../pdftex.map ] && cp ../pdftex.map .
 cat > hello.tex <<'EOF'
 \documentclass{article}
 \begin{document}
