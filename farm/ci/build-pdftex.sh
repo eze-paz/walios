@@ -1,6 +1,7 @@
 #!/bin/bash
-# Minimal experiment: pdfTeX only, not the complete Alpine texlive distribution.
-# Engine output, not a supported package release: no texmf/font bundle is shipped.
+# pdfTeX for walios: engine build + a minimal, self-contained LaTeX bundle.
+# The wasm engine itself builds latex.fmt and compiles a real hello.tex, so the
+# artifact is typesetting-capable, not just a --version smoke.
 set -euo pipefail
 HERE=$PWD
 # CI runner logs are not downloadable through the API token used to drive this
@@ -14,6 +15,9 @@ emit_fail() {
   for f in $(find "$HERE/texlive-src/build" -name config.log -type f 2>/dev/null | head -2); do
     grep -iaE "error|cannot" "$f" | tail -n 2 |
       while IFS= read -r l; do printf '::error::%s: %s\n' "$f" "$l"; done
+  done
+  for f in "$HERE"/artifacts/hello/*.log; do
+    [ -f "$f" ] && tail -n 25 "$f" | while IFS= read -r l; do printf '::error::latex: %s\n' "$l"; done
   done
   printf '::error::build failed rc=%s (full log in build.log artifact)\n' "$rc"
 }
@@ -76,11 +80,6 @@ make -j"$(nproc)" || make_rc=$?
 if [ "$make_rc" -ne 0 ]; then
   # An unrelated engine or utility may have failed; pdftex itself may be fine.
   echo "make failed rc=$make_rc; continuing if the pdftex engine binary exists"
-  echo '=== Nested native configure logs (failure diagnostics) ==='
-  for f in $(find . -path '*/native/config.log' -type f); do
-    echo "--- $f ---"
-    tail -n 110 "$f"
-  done
 fi
 cd ../..
 ENGINE=texlive-src/build/texk/web2c/pdftex
@@ -90,4 +89,108 @@ node -e 'const b=require("fs").readFileSync(process.argv[1]);const m=new WebAsse
 cd /tmp
 timeout 120 node "$HERE/host/host.js" "$HERE/artifacts/pdftex.wasm" --version | tee "$HERE/artifacts/smoke.txt"
 grep -q pdfTeX "$HERE/artifacts/smoke.txt"
-printf 'Built and ran pdfTeX under walios host/host.js; no TeX resource bundle included.\n' > "$HERE/artifacts/STATUS.txt"
+printf 'Engine built and ran under walios host/host.js.\n' > "$HERE/artifacts/STATUS.txt"
+
+# ---------- Stage 2: a typesetting-capable LaTeX bundle ----------
+# The runner's apt texlive (texlive-latex-base + texlive-fonts-recommended)
+# provides the texmf tree; the wasm engine builds latex.fmt from it and
+# compiles a real document. Bundle: pruned texmf + texmf.cnf + latex.fmt.
+TEXMF_SRC=/usr/share/texlive/texmf-dist
+[ -d "$TEXMF_SRC/tex/latex/base" ] || { printf '::error::no texmf tree at %s (workflow must apt-install texlive-latex-base)\n' "$TEXMF_SRC"; exit 1; }
+echo "=== building latex.fmt with the wasm engine ==="
+cd "$HERE/artifacts"
+rm -f latex.fmt latex.log
+env TEXMFCNF="$TEXMF_SRC/web2c" TEXMF="$TEXMF_SRC" \
+  timeout 1200 node "$HERE/host/host.js" "$HERE/artifacts/pdftex.wasm" \
+  -ini -etex -progname=latex -jobname=latex '*latex.ini' < /dev/null || true
+[ -f latex.fmt ] || { printf '::error::latex.fmt was not dumped (see latex.log)\n'; tail -n 40 latex.log; exit 1; }
+ls -la latex.fmt
+echo "=== compiling hello.tex with the wasm engine ==="
+rm -rf hello; mkdir hello; cd hello
+cat > hello.tex <<'EOF'
+\documentclass{article}
+\begin{document}
+Hello from pdfTeX compiled to WebAssembly, running inside walios.
+Einstein: $E = mc^2$, a square root: $\sqrt{2} \approx 1.41$.
+\end{document}
+EOF
+env TEXMFCNF="$TEXMF_SRC/web2c" TEXMF="$TEXMF_SRC" \
+  timeout 1200 node "$HERE/host/host.js" "$HERE/artifacts/pdftex.wasm" \
+  -progname=latex -fmt="$HERE/artifacts/latex.fmt" -interaction=nonstopmode hello.tex < /dev/null || true
+[ -f hello.pdf ] || { printf '::error::hello.pdf was not produced (hello.log)\n'; tail -n 40 hello.log; exit 1; }
+head -c 5 hello.pdf | grep -q '%PDF'
+echo "hello.pdf: $(stat -c '%s bytes') — wasm LaTeX typesetting works"
+printf 'Engine + latex.fmt + hello.tex all OK under walios host.js.\n' > "$HERE/artifacts/STATUS.txt"
+
+echo "=== pruning and packing the bundle ==="
+cd "$HERE/artifacts"
+rm -rf bundle; mkdir -p bundle
+cp -a "$TEXMF_SRC/tex"  bundle/tex
+mkdir -p bundle/fonts bundle/bibtex bundle/web2c
+cp -a "$TEXMF_SRC/fonts/tfm"   bundle/fonts/tfm
+cp -a "$TEXMF_SRC/fonts/type1" bundle/fonts/type1
+cp -a "$TEXMF_SRC/fonts/map"   bundle/fonts/map
+cp -a "$TEXMF_SRC/fonts/enc"   bundle/fonts/enc
+cp -a "$TEXMF_SRC/fonts/vf"    bundle/fonts/vf
+cp -a "$TEXMF_SRC/bibtex"      bundle/bibtex
+cp latex.fmt bundle/web2c/latex.fmt
+# The generated pdftex font map lives in the runner's TEXMFVAR after apt
+# triggers ran updmap-sys; without it pdftex would try mktexpk and fail.
+MAPSRC=$(find /var/lib/texmf /etc/texmf "$TEXMF_SRC" -name pdftex.map -type f 2>/dev/null | head -1)
+[ -n "$MAPSRC" ] && { mkdir -p bundle/fonts/map/pdftex/updmap; cp "$MAPSRC" bundle/fonts/map/pdftex/updmap/pdftex.map; } || echo "NOTE: no pdftex.map found"
+cat > bundle/web2c/texmf.cnf <<'EOF'
+% Minimal self-contained walios texmf tree (installed under /usr/share/texmf).
+TEXMF = /usr/share/texmf
+TEXMFCNF = /usr/share/texmf/web2c
+TEXFORMATS = .;$TEXMF/web2c//
+TEXINPUTS.tex = .;$TEXMF/tex/{generic,plain}//
+TEXINPUTS.latex = .;$TEXMF/tex/{latex,generic,plain}//
+TEXINPUTS.pdflatex = .;$TEXMF/tex/{latex,generic,plain}//
+TEXINPUTS = .;$TEXMF/tex/{latex,generic,plain}//
+TEXFONTS = .;$TEXMF/fonts/tfm//
+TFMFONTS = .;$TEXMF/fonts/tfm//
+T1FONTS = .;$TEXMF/fonts/type1//
+TTFONTS = .;$TEXMF/fonts/truetype//
+VFFONTS = .;$TEXMF/fonts/vf//
+ENCFONTS = .;$TEXMF/fonts/enc//
+TEXFONTMAPS = .;$TEXMF/fonts/map/{pdftex,dvips,}//
+TEXPSHEADERS = .;$TEXMF/fonts/{type1,truetype}//
+TEXPOOL = .;$TEXMF/web2c
+MFBASES = .;$TEXMF/web2c
+MPPOOL = .;$TEXMF/web2c
+SYSTEXMF = $TEXMF
+OSFONTDIR =
+EOF
+mkdir -p bundle/bin
+cat > bundle/bin/latex <<'EOF'
+#!/bin/sh
+export TEXMFCNF=/usr/share/texmf/web2c
+exec /bin/pdftex -progname=latex -fmt=latex "$@"
+EOF
+cat > bundle/bin/pdflatex <<'EOF'
+#!/bin/sh
+export TEXMFCNF=/usr/share/texmf/web2c
+exec /bin/pdftex -progname=pdflatex -fmt=latex "$@"
+EOF
+chmod +x bundle/bin/latex bundle/bin/pdflatex
+cat > bundle/install-tex.sh <<'EOF'
+#!/bin/sh
+# install-tex.sh — run INSIDE walios with the bundle tar.gz path as $1.
+# Installs /usr/share/texmf (tree + fmt + texmf.cnf), /bin/pdftex (wasm engine)
+# and the latex/pdflatex wrappers, then smoke-compiles a document.
+set -e
+SRC=${1:?usage: install-tex.sh <texlive-minimal.tar.gz>}
+tar -xzf "$SRC" -C /usr/share
+cp /usr/share/texmf/engine/pdftex.wasm /bin/pdftex
+cp /usr/share/texmf/bin/latex /usr/bin/latex
+cp /usr/share/texmf/bin/pdflatex /usr/bin/pdflatex
+cd "$TMPDIR"
+printf '\\documentclass{article}\\begin{document}walios LaTeX OK.\\end{document}\n' > smoke.tex
+/usr/bin/latex -interaction=nonstopmode smoke.tex < /dev/null > smoke.out 2>&1 || { tail -n 20 smoke.log; exit 1; }
+grep -q '%PDF' smoke.pdf && echo "pdftex+latex installed and verified in walios"
+EOF
+chmod +x bundle/install-tex.sh
+mkdir -p bundle/engine; cp pdftex.wasm bundle/engine/pdftex.wasm
+tar czf texlive-minimal.tar.gz -C bundle .
+echo "bundle: $(du -sh bundle | cut -f1), tar.gz $(stat -c '%s' texlive-minimal.tar.gz) bytes"
+printf 'Bundle stage complete (see artifacts/texlive-minimal.tar.gz).\n' >> "$HERE/artifacts/STATUS.txt"
