@@ -9,6 +9,19 @@ export FARM_CI_DIR="$HERE/farm/ci"
 export CFLAGS=-O2 CXXFLAGS=-O2 LDFLAGS= CPPFLAGS=
 export BUILDCC=/usr/bin/gcc CC_FOR_BUILD=/usr/bin/gcc
 export BUILDCPPFLAGS= BUILDLDFLAGS=
+# TeX's native helper inherits WALI's Wasm linker and otherwise passes
+# `-m elf_x86_64` to it. Dispatch only that native target to the system linker;
+# every Wasm link still goes through WALI's linker.
+mkdir -p "$HERE/bin"
+cat > "$HERE/bin/ld-dispatch" <<'EOF'
+#!/bin/sh
+case "$*" in
+  *"-m elf_x86_64"*) exec /usr/bin/ld "$@" ;;
+esac
+exec "$TC/bin/wali-ld" "$@"
+EOF
+chmod +x "$HERE/bin/ld-dispatch"
+export LD="$HERE/bin/ld-dispatch"
 COMMIT=562901fe3302de1432fb98adcfd4d10a5e140760
 mkdir -p artifacts
 if [ ! -f texlive.tar.gz ]; then
