@@ -1,1 +1,1 @@
-{"pkgs":"py3-matplotlib py3-contourpy py3-kiwisolver py3-pillow","max":800,"chunk":3,"publish":true,"note":"R83 canary: side modules export __wasm_call_ctors (C++ static initializers ran never; ft2font __next_prime overflow)"}
+{"all":true,"max":3000,"publish":true,"note":"R84 full: side modules export __wasm_call_ctors (20c3cde) -- C++ static initializers in every dlopened module now run (ft2font __next_prime overflow); ILP32 runtimes are live in sandpie"}
