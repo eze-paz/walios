@@ -31,23 +31,29 @@ jobs:
           sudo pip3 install -q --break-system-packages --upgrade meson
           printf '#!/bin/sh\nWALI_HOST_ENV=1 exec timeout -k 5 120 node %s "$@"\n' "$PWD/host/host.js" | sudo tee /usr/local/bin/wali-run >/dev/null
           sudo chmod +x /usr/local/bin/wali-run
+      # stdin is /dev/null: a build step that reads stdin (a configure probe run through
+      # wali-run) otherwise waits for ever -- run 2 sat 40 minutes in "Build libfuse".
       - name: Build libfuse
         timeout-minutes: 40
-        run: STAGE=libfuse bash farm/fuse-walios/build.sh "$TC" out
+        run: STAGE=libfuse bash farm/fuse-walios/build.sh "$TC" out < /dev/null
+      # The job summary is public (logs need a login): log tails go there.
       - name: Release (libfuse)
         if: always()
         env: { GH_TOKEN: '${{ github.token }}' }
         run: |
-          cat out/summary.txt >> "$GITHUB_STEP_SUMMARY" || true
-          find out -size 0 -delete
-          gh release create "fuse-walios-${{ github.run_number }}" --prerelease --target "${{ github.sha }}" --title "fuse-walios-${{ github.run_number }}" --notes "FUSE test filesystems for walios: libfuse $(cat farm/fuse-walios/LIBFUSE_VERSION) examples, fusermount3, pjdfstest" out/*
+          mkdir -p out; touch out/summary.txt
+          { echo '## libfuse'; echo '```'; cat out/summary.txt; for l in out/libfuse-setup.log out/libfuse-build.log; do echo "--- $l"; tail -40 "$l" 2>/dev/null; done; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          find out -size 0 -delete; ls -la out
+          gh release create "fuse-walios-${{ github.run_number }}" --prerelease --target "${{ github.sha }}" --title "fuse-walios-${{ github.run_number }}" --notes "FUSE test filesystems for walios: libfuse $(cat farm/fuse-walios/LIBFUSE_VERSION) examples, fusermount3, pjdfstest" out/* \
+            || gh release upload "fuse-walios-${{ github.run_number }}" out/* --clobber
       - name: Build pjdfstest
         timeout-minutes: 50
-        run: STAGE=pjdfstest bash farm/fuse-walios/build.sh "$TC" out2
+        run: STAGE=pjdfstest bash farm/fuse-walios/build.sh "$TC" out2 < /dev/null
       - name: Release (pjdfstest)
         if: always()
         env: { GH_TOKEN: '${{ github.token }}' }
         run: |
-          cat out2/summary.txt >> "$GITHUB_STEP_SUMMARY" || true
+          mkdir -p out2; touch out2/summary.txt
+          { echo '## pjdfstest'; echo '```'; cat out2/summary.txt; for l in out2/pjdfstest-configure.log out2/pjdfstest-build.log; do echo "--- $l"; tail -40 "$l" 2>/dev/null; done; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           find out2 -size 0 -delete
           gh release upload "fuse-walios-${{ github.run_number }}" out2/* --clobber

@@ -18,10 +18,10 @@ if [ "$STAGE" = libfuse ]; then
   ( cd "$W" && curl -sSfL --retry 8 -o fuse.tgz "https://github.com/libfuse/libfuse/releases/download/fuse-$FUSEVER/fuse-$FUSEVER.tar.gz" && tar xzf fuse.tgz ) || { sum "libfuse download FAIL"; exit 1; }
   cd "$W/fuse-$FUSEVER"
   for p in "$HERE"/patches/libfuse-*.patch; do [ -f "$p" ] && { patch -p1 < "$p" || sum "patch $p FAIL"; }; done
-  meson setup --cross-file "$TC/wali.meson" --prefix=/usr --default-library=static \
+  timeout 600 meson setup --cross-file "$TC/wali.meson" --prefix=/usr --default-library=static \
     -Dexamples=true -Dutils=true -Dtests=false -Dinitscriptdir= build > "$OUT/libfuse-setup.log" 2>&1 \
     || { sum "libfuse setup FAIL"; tail -60 "$OUT/libfuse-setup.log"; exit 1; }
-  if timeout 1800 ninja -C build -k 0 > "$OUT/libfuse-build.log" 2>&1; then sum "libfuse build OK"; else sum "libfuse build partial"; grep -B2 -A12 "error:" "$OUT/libfuse-build.log" | head -120; fi
+  if timeout 1200 ninja -C build -k 0 > "$OUT/libfuse-build.log" 2>&1; then sum "libfuse build OK"; else sum "libfuse build partial"; grep -B2 -A12 "error:" "$OUT/libfuse-build.log" | head -120; fi
   for x in hello hello_ll passthrough passthrough_ll passthrough_fh null ioctl poll notify_inval_entry notify_inval_inode invalidate_path; do
     if [ -f "build/example/$x" ]; then cp "build/example/$x" "$OUT/fuse-$x.wasm"; sum "example $x OK ($(stat -c %s "build/example/$x") bytes)"; else sum "example $x missing"; fi
   done
