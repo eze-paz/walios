@@ -4,7 +4,7 @@
 # separate package. The Tcl/Tk script libraries come from tcltk-scripts.
 pkgname=py3-tkinter
 pkgver=3.14.7
-pkgrel=1
+pkgrel=2
 pkgdesc="tkinter (Tk GUI toolkit bindings) for walios Python"
 url="https://docs.python.org/3/library/tkinter.html"
 arch="all"
@@ -16,6 +16,12 @@ source="https://www.python.org/ftp/python/$pkgver/Python-$pkgver.tar.xz"
 builddir="$srcdir/Python-$pkgver"
 
 build() {
+	# python_cxx.wasm exports no pthread_exit, and a side module may import only its exports;
+	# Tcl's TclpThreadExit (Tcl_ExitThread, never reached from tkinter) is the one caller.
+	cat > walios_pthread_exit.c <<'C'
+#include <pthread.h>
+_Noreturn void pthread_exit(void *r) { (void)r; __builtin_trap(); }
+C
 	cat > setup.py <<'PY'
 import os, sysconfig
 from setuptools import setup, Extension
@@ -33,7 +39,7 @@ extra = [a for a in cfg('/usr/lib/tkConfig.sh', 'TK_LIBS') + cfg('/usr/lib/tcl8.
 libs = ['-ltk8.6', '-ltcl8.6'] + list(dict.fromkeys(extra + ['-lX11', '-lxcb', '-lXau', '-lXdmcp', '-lz', '-lm']))
 print('py3-tkinter links:', ' '.join(libs))
 setup(name='tkinter', version='3.14.7', package_dir={'': 'Lib'}, packages=['tkinter'],
-      ext_modules=[Extension('_tkinter', ['Modules/_tkinter.c'],
+      ext_modules=[Extension('_tkinter', ['Modules/_tkinter.c', 'walios_pthread_exit.c'],
                              include_dirs=[ov + '/usr/include/tcl8.6', ov + '/usr/include', 'Modules', os.path.join(inc, 'internal')],
                              library_dirs=[ov + '/usr/lib'], extra_link_args=libs)])
 PY
