@@ -18,7 +18,9 @@ makedepends="
 	xorgproto
 	xtrans
 	"
-source="https://www.x.org/releases/individual/xserver/xorg-server-$pkgver.tar.xz"
+source="https://www.x.org/releases/individual/xserver/xorg-server-$pkgver.tar.xz
+	walios-typed-noops.patch
+	"
 
 build() {
 	abuild-meson \
@@ -74,4 +76,5 @@ package() {
 
 sha512sums="
 dbf13bcfc3f6bcc0d2ad201d993003d0f4e583f1eae8e39f9a4c13418ac1ce459ba3f1f79a060b98f6731839048e1962b2f03e6aaf1b03b3fa83bdfc01eddd86  xorg-server-21.1.26.tar.xz
+2aae404172b5e7c791a6c9276bfba0b85451a9ba6a4e8a7c66cac02792305f05ac26cb0a801b853eb5064bdcd505e629b095cc5abe65191b5eeca48e23da9b9d  walios-typed-noops.patch
 "

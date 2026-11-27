@@ -40,7 +40,11 @@ async function fetchTo(href) {
 const PROGS = { Xvfb: 'xorg-server', xkbcomp: 'xkbcomp', xdpyinfo: 'xdpyinfo', xwd: 'xwd', xeyes: 'xeyes', xclock: 'xclock', xterm: 'xterm', xauth: 'xauth' };
 const DATA = ['xkeyboard-config', 'font-misc-misc', 'font-cursor-misc'];
 const manifest = {}, tars = [], files = {};
+// --local Xvfb=/path/xorg-server.wasm,xwd=/path/xwd.wasm: a build artifact instead of an index's file
+const LOCAL = Object.fromEntries((arg('local', '') || '').split(',').filter(Boolean).map((kv) => kv.split('=')));
+for (const [prog, f] of Object.entries(LOCAL)) { const name = '/f/local-' + prog + '.wasm'; files[name] = path.resolve(f); manifest[prog] = name; console.log(`program ${prog} <- local ${f}`); }
 for (const [prog, pkg] of Object.entries(PROGS)) {
+  if (LOCAL[prog]) continue;
   const r = find(pkg); if (!r) { console.log(`missing program ${prog} (${pkg})`); continue; }
   if (r.kind !== 'exe') { console.log(`${pkg} is kind ${r.kind}, not exe`); continue; }
   const f = await fetchTo(r.href); const name = '/f/' + path.basename(f); files[name] = f; manifest[prog] = name;
@@ -52,6 +56,7 @@ for (const pkg of DATA) {
   console.log(`data ${pkg} ${r.ver} (${r.kind})`);
 }
 
+files['/f/x11-probe.py'] = path.join(HERE, 'x11-probe.py');
 const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.wasm': 'application/wasm', '.gz': 'application/gzip', '.json': 'application/json' };
 const server = http.createServer((req, res) => {
   const u = decodeURIComponent(req.url.split('?')[0]);
@@ -69,12 +74,11 @@ const SCRIPT = `
 for p in xkbcomp Xvfb; do [ -e /usr/bin/$p ] || ln -s /bin/$p /usr/bin/$p 2>/dev/null; done
 ls /usr/share/X11/xkb 2>&1 | head -3; ls /usr/share/fonts/misc 2>&1 | head -3
 echo __START $(date +%s)
-Xvfb :0 -screen 0 640x480x24 -nolisten unix -listen tcp -ac >/tmp/xvfb.log 2>&1 &
+Xvfb :0 -screen 0 640x480x24 -nolisten unix -listen tcp -ac -nolock >/tmp/xvfb.log 2>&1 &
 XP=$!
 export DISPLAY=127.0.0.1:0
-i=0; while [ $i -lt 40 ]; do xdpyinfo >/tmp/dpy 2>&1 && break; sleep 1; i=$((i+1)); done
-echo __UP after $i s $(date +%s)
-head -40 /tmp/dpy
+echo __PROBE; python3 /tmp/x11-probe.py 0 2>&1; echo __probe_rc=$?
+if command -v xdpyinfo >/dev/null; then xdpyinfo >/tmp/dpy 2>&1; echo __xdpyinfo_rc=$?; head -40 /tmp/dpy; fi
 ${arg('cmd', `xeyes -geometry 300x200+20+20 >/tmp/xeyes.log 2>&1 &
 xclock -geometry 200x200+360+20 -update 1 >/tmp/xclock.log 2>&1 &
 xterm -geometry 60x10+20+260 -e sh -c 'echo hello from walios; sleep 30' >/tmp/xterm.log 2>&1 &
@@ -85,9 +89,12 @@ for f in /tmp/xvfb.log /tmp/xeyes.log /tmp/xclock.log /tmp/xterm.log; do echo "=
 kill $XP 2>/dev/null; echo __DONE`;
 const msg = {
   t: 'run', wasm: '/rt/busybox.wasm',
-  manifest: Object.assign({ busybox: '/rt/busybox.wasm', sh: '/rt/busybox.wasm', hush: '/rt/busybox.wasm' }, manifest),
+  manifest: Object.assign({ busybox: '/rt/busybox.wasm', sh: '/rt/busybox.wasm', hush: '/rt/busybox.wasm',
+    python3: '/rt/python_cxx.wasm' }, manifest),
   tars: [['/rt/rootfs.tar.gz', '/'], ...tars],
-  env: { HOME: '/root', PATH: '/bin:/usr/bin', TERM: 'dumb', LC_ALL: 'C.UTF-8' }, cwd: '/',
+  lazyTars: { '/rt/python_cxx.wasm': [['/rt/pylib.tar.gz', '/py']] },
+  blobUrls: { '/tmp/x11-probe.py': '/f/x11-probe.py' },
+  env: { HOME: '/root', PATH: '/bin:/usr/bin', TERM: 'dumb', LC_ALL: 'C.UTF-8', PYTHONHOME: '/py', PYTHONPATH: '/py/Lib', PYTHONDONTWRITEBYTECODE: '1' }, cwd: '/',
   argv: ['busybox', 'sh', '-c', SCRIPT], appletLinks: LINKS,
 };
 
