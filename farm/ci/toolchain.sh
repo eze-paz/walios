@@ -81,7 +81,7 @@ fi
 # walios glue) and include/python3.14, for programs that embed Python -- samba's waf pyembed
 # check links Py_Initialize. python3-config below hands them out. (ILP32 only: the runtimes
 # workflow builds that ABI.)
-PYEMBED_TAG=${WALI_PYEMBED_TAG:-@PYEMBED_TAG@}
+PYEMBED_TAG=${WALI_PYEMBED_TAG:-runtimes-ilp32-2026-11-27-20}
 if [ "$ABI" = ilp32 ] && [ ! -f sysroot/lib/libpython3.14.a ]; then
   fetch $REL/$PYEMBED_TAG/python-embed.tar.gz pe.tgz && tar xzf pe.tgz -C sysroot && rm pe.tgz
 fi
