@@ -1,0 +1,25 @@
+# walios farm override of Alpine's main/libepoxy: no EGL and no GLX (walios has no OpenGL;
+# GTK3 needs epoxy linked but never makes a GL context on its software X11 path).
+pkgname=libepoxy
+pkgver=1.5.10
+pkgrel=1
+pkgdesc="OpenGL function pointer management library (no EGL/GLX: walios)"
+url="https://github.com/anholt/libepoxy"
+arch="all"
+license="MIT"
+options="!check"
+makedepends="libx11-dev meson"
+source="$pkgname-$pkgver.tar.gz::https://github.com/anholt/libepoxy/archive/refs/tags/$pkgver.tar.gz"
+
+build() {
+	abuild-meson -Ddocs=false -Degl=no -Dglx=no -Dx11=false -Dtests=false . output
+	meson compile -C output
+}
+
+package() {
+	DESTDIR="$pkgdir" meson install --no-rebuild -C output
+}
+
+sha512sums="
+6786f31c6e2865e68a90eb912900a86bf56fd3df4d78a477356886ac3b6ef52ac887b9c7a77aa027525f868ae9e88b12e5927ba56069c2e115acd631fca3abee  libepoxy-1.5.10.tar.gz
+"

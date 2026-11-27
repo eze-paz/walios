@@ -4,7 +4,7 @@
 # separate package. The Tcl/Tk script libraries come from tcltk-scripts.
 pkgname=py3-tkinter
 pkgver=3.14.7
-pkgrel=0
+pkgrel=1
 pkgdesc="tkinter (Tk GUI toolkit bindings) for walios Python"
 url="https://docs.python.org/3/library/tkinter.html"
 arch="all"
@@ -17,19 +17,27 @@ builddir="$srcdir/Python-$pkgver"
 
 build() {
 	cat > setup.py <<'PY'
-import os, shlex, subprocess, sysconfig
+import os, sysconfig
 from setuptools import setup, Extension
-def pc(*a):
-    try: return shlex.split(subprocess.check_output(['pkg-config', *a, 'tk']).decode())
-    except Exception: return []
+ov = os.environ.get('OVERLAY', '')
 inc = sysconfig.get_paths()['include']
-libs = pc('--static', '--libs') or ['-ltk8.6', '-ltcl8.6', '-lXft', '-lfontconfig', '-lfreetype', '-lexpat', '-lXrender', '-lX11', '-lxcb', '-lXau', '-lXdmcp', '-lz', '-lm']
+# Tcl 8.6 by name: the farm's tcl9 owns /usr/include/tcl.h and tcl.pc (R91), so no pkg-config;
+# the libraries Tk and Tcl link with are what their *Config.sh say (TK_LIBS, TCL_LIBS).
+def cfg(f, k):
+    try:
+        for l in open(ov + f):
+            if l.startswith(k + "="): return l.split("=", 1)[1].strip().strip("'").split()
+    except OSError: pass
+    return []
+extra = [a for a in cfg('/usr/lib/tkConfig.sh', 'TK_LIBS') + cfg('/usr/lib/tcl8.6/tclConfig.sh', 'TCL_LIBS') if a.startswith('-l')]
+libs = ['-ltk8.6', '-ltcl8.6'] + list(dict.fromkeys(extra + ['-lX11', '-lxcb', '-lXau', '-lXdmcp', '-lz', '-lm']))
+print('py3-tkinter links:', ' '.join(libs))
 setup(name='tkinter', version='3.14.7', package_dir={'': 'Lib'}, packages=['tkinter'],
       ext_modules=[Extension('_tkinter', ['Modules/_tkinter.c'],
-                             include_dirs=['Modules', os.path.join(inc, 'internal')],
-                             extra_compile_args=pc('--cflags'), extra_link_args=libs)])
+                             include_dirs=[ov + '/usr/include/tcl8.6', ov + '/usr/include', 'Modules', os.path.join(inc, 'internal')],
+                             library_dirs=[ov + '/usr/lib'], extra_link_args=libs)])
 PY
-	python3 setup.py build
+	OVERLAY="$OVERLAY" python3 setup.py build
 }
 
 package() {

@@ -1,12 +1,14 @@
 # walios farm override of Alpine's main/tcl: + walios-thread-trampoline.patch (Tcl started its
-# notifier thread through a function pointer cast; wasm traps on it). Otherwise Alpine's recipe.
+# notifier thread through a function pointer cast; wasm traps on it). Headers in /usr/include/tcl8.6
+# and a tclConfig.sh copy in /usr/lib/tcl8.6: the farm's tcl9 installs tcl.h and tclConfig.sh at
+# the shared paths, and tk / py3-tkinter built against Tcl 9 ("tk 8.6 requires Tcl 8.6+", R91).
 # Contributor: Sören Tempel <soeren+alpine@soeren-tempel.net>
 # Contributor: Carlo Landmeter <clandmeter@alpinelinux.org>
 # Contributor: Celeste <cielesti@protonmail.com>
 # Maintainer:
 pkgname=tcl
 pkgver=8.6.18
-pkgrel=1
+pkgrel=2
 _major=${pkgver%.*}
 pkgdesc="The Tcl scripting language"
 url="https://www.tcl-lang.org/"
@@ -41,6 +43,7 @@ build() {
 		--sysconfdir=/etc \
 		--mandir=/usr/share/man \
 		--localstatedir=/var \
+		--includedir=/usr/include/tcl8.6 \
 		--with-system-sqlite \
 		$_64bit
 	make
@@ -50,6 +53,7 @@ package() {
 	make INSTALL_ROOT="$pkgdir" install install-private-headers
 
 	ln -sf tclsh$_major "$pkgdir"/usr/bin/tclsh
+	install -Dm644 tclConfig.sh "$pkgdir"/usr/lib/tcl$_major/tclConfig.sh
 	install -Dm644 ../license.terms \
 		"$pkgdir"/usr/share/licenses/$pkgname/LICENSE
 

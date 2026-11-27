@@ -1,0 +1,43 @@
+# walios farm override of Alpine's community/sdl2: the X11 video backend only, linked in (no
+# dlopen of libX11 at run time), software rendering (no OpenGL/GLES/Vulkan), no Wayland/KMS,
+# no audio backends (SDL's dummy/disk drivers), no udev/dbus/ibus/hidapi. Static library.
+pkgname=sdl2
+pkgver=2.32.10
+pkgrel=0
+pkgdesc="SDL2 for walios: X11 video, software rendering"
+url="https://www.libsdl.org"
+arch="all"
+license="Zlib"
+options="!check"
+makedepends="cmake samurai libx11-dev libxext-dev libxcursor-dev libxrandr-dev libxrender-dev"
+source="https://www.libsdl.org/release/SDL2-$pkgver.tar.gz"
+builddir="$srcdir/SDL2-$pkgver"
+
+build() {
+	if [ "$CBUILD" != "$CHOST" ]; then
+		cmake_crossopts="-DCMAKE_SYSTEM_NAME=Linux -DCMAKE_HOST_SYSTEM_NAME=Linux"
+	fi
+	cmake -B build -G Ninja \
+		-DCMAKE_INSTALL_PREFIX=/usr \
+		-DCMAKE_INSTALL_LIBDIR=lib \
+		-DCMAKE_BUILD_TYPE=MinSizeRel \
+		-DSDL_SHARED=OFF -DSDL_STATIC=ON -DSDL_TEST=OFF -DSDL_TESTS=OFF \
+		-DSDL_X11=ON -DSDL_X11_SHARED=OFF -DSDL_X11_XINPUT=OFF -DSDL_X11_XSCRNSAVER=OFF \
+		-DSDL_X11_XDBE=OFF -DSDL_X11_XFIXES=OFF \
+		-DSDL_WAYLAND=OFF -DSDL_KMSDRM=OFF -DSDL_DIRECTFB=OFF -DSDL_OFFSCREEN=ON \
+		-DSDL_OPENGL=OFF -DSDL_OPENGLES=OFF -DSDL_VULKAN=OFF -DSDL_RENDER_D3D=OFF \
+		-DSDL_ALSA=OFF -DSDL_JACK=OFF -DSDL_PULSEAUDIO=OFF -DSDL_PIPEWIRE=OFF -DSDL_SNDIO=OFF \
+		-DSDL_ARTS=OFF -DSDL_ESD=OFF -DSDL_NAS=OFF -DSDL_LIBSAMPLERATE=OFF \
+		-DSDL_LIBUDEV=OFF -DSDL_DBUS=OFF -DSDL_IBUS=OFF -DSDL_HIDAPI=OFF -DSDL_JOYSTICK=OFF -DSDL_HAPTIC=OFF \
+		-DSDL_CLOCK_GETTIME=ON -DSDL_RPATH=OFF -DSDL_SSE=OFF -DSDL_MMX=OFF -DSDL_3DNOW=OFF -DSDL_ASSEMBLY=OFF \
+		$cmake_crossopts
+	ninja -C build
+}
+
+package() {
+	DESTDIR="$pkgdir" ninja -C build install
+}
+
+sha512sums="
+b67ebdb46bc3b41c974113937e15445e47a6e115692761e2812c3965e85b9ca4d804633de6369fa3dd36cc77f5d08655570c1707245b2c46f88114aa3238fd1b  SDL2-2.32.10.tar.gz
+"

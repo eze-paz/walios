@@ -1,0 +1,79 @@
+# walios farm override of Alpine's main/tk: configured against Tcl 8.6 by name (the farm's tcl9
+# owns /usr/lib/tclConfig.sh and /usr/include/tcl.h): tcl's copy in /usr/lib/tcl8.6, rewritten to
+# the overlay the way build-one.sh rewrites /usr/lib/*Config.sh, and its headers first.
+# Contributor: Celeste <cielesti@protonmail.com>
+# Maintainer:
+pkgname=tk
+pkgver=8.6.18
+pkgrel=1
+_major=${pkgver%.*}
+pkgdesc="GUI toolkit for the Tcl scripting language"
+url="https://www.tcl-lang.org/"
+arch="all"
+options="!check"  # Requires a running X11 server.
+license="TCL"
+depends_dev="
+	fontconfig-dev
+	libx11-dev
+	libxft-dev
+	tcl-dev~$pkgver
+	"
+makedepends="$depends_dev libpng-dev"
+subpackages="$pkgname-doc $pkgname-dev"
+source="https://downloads.sourceforge.net/sourceforge/tcl/tk$pkgver-src.tar.gz"
+builddir="$srcdir/tk$pkgver/unix"
+
+build() {
+	case "$CARCH" in
+		arm*|x86)	_64bit="--disable-64bit" ;;
+		*)		_64bit="--enable-64bit"  ;;
+	esac
+
+	local tc=$srcdir/tclcfg; mkdir -p "$tc"
+	sed -e "s|/usr/include|$OVERLAY/usr/include|g" -e "s|-L/usr/lib|-L$OVERLAY/usr/lib|g" \
+		"$OVERLAY"/usr/lib/tcl8.6/tclConfig.sh > "$tc"/tclConfig.sh
+	CFLAGS="-I$OVERLAY/usr/include/tcl8.6 $CFLAGS" \
+	./configure \
+		--with-tcl="$tc" \
+		--build=$CBUILD \
+		--host=$CHOST \
+		--prefix=/usr \
+		--sysconfdir=/etc \
+		--mandir=/usr/share/man \
+		--localstatedir=/var \
+		$_64bit
+	make
+}
+
+package() {
+	make INSTALL_ROOT="$pkgdir" install install-private-headers
+
+	ln -sf wish$_major "$pkgdir"/usr/bin/wish
+	install -Dm644 ../license.terms \
+		"$pkgdir"/usr/share/licenses/$pkgname/LICENSE
+
+	# remove buildroot traces
+	find "$pkgdir" -name '*Config.sh' -print0 |
+		xargs -0 sed -i -e "s#${srcdir}#/usr/src#"
+
+	# move demos to -doc directory
+	mkdir -p "$pkgdir"/usr/share/doc/$pkgname/examples
+	mv -v "$pkgdir"/usr/lib/tk$_major/demos \
+		"$pkgdir"/usr/share/doc/$pkgname/examples/
+}
+
+dev() {
+	# libtk8.6.so is the only library made and it remains in the mainpackage
+	# so depending on the main package automatically is never done
+	# https://gitlab.alpinelinux.org/alpine/aports/issues/11232#note_68789
+	depends_dev="$depends_dev $pkgname=$pkgver-r$pkgrel"
+	default_dev
+
+	local file; find "$pkgdir" -name '*Config.sh' | while read -r file; do
+		amove "${file#"$pkgdir"}"
+	done
+}
+
+sha512sums="
+117993f8b7130d8c6cebffc49578f17eb6e8986f7bb165a8e541c4791f3091328acd61dd48dc57516607b02c321511a984fc4f17ad09fc06338db2b6d44e6f74  tk8.6.18-src.tar.gz
+"

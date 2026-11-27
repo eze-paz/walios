@@ -1,0 +1,25 @@
+# walios farm: a small SDL2 program for the X display (see demo.c): animation, a box that follows
+# the mouse, clicks/keys and the frame rate on stdout. Built against the farm's sdl2.
+pkgname=sdl2-demo
+pkgver=1
+pkgrel=0
+pkgdesc="SDL2 demo for walios (software rendering on the X display)"
+url="https://github.com/eze-paz/walios"
+arch="all"
+license="MIT"
+options="!check"
+makedepends="sdl2-dev libx11-dev libxext-dev libxcursor-dev libxrandr-dev libxrender-dev"
+source="demo.c"
+builddir="$srcdir"
+
+build() {
+	$CC $CFLAGS demo.c $(pkg-config --cflags sdl2) $(pkg-config --static --libs sdl2) -o sdl2-demo
+}
+
+package() {
+	install -Dm755 sdl2-demo "$pkgdir"/usr/bin/sdl2-demo
+}
+
+sha512sums="
+7d4cd2a3404c80c0684472060a9ea2995616757686b5b89865dca16fc68fa28d54967bb1c377aea29a7dca3ca3d28dc7bbfddee6f384187af98028c804fc799e  demo.c
+"

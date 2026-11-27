@@ -1,0 +1,26 @@
+# walios farm: a small GTK3 program for the X display (see hello.c); clicks, toggles and entry
+# text on stdout. Built against the farm's gtk+3.0 (X11 backend).
+pkgname=gtk3-hello
+pkgver=1
+pkgrel=0
+pkgdesc="GTK3 demo window for walios"
+url="https://github.com/eze-paz/walios"
+arch="all"
+license="MIT"
+options="!check"
+depends="font-dejavu shared-mime-info hicolor-icon-theme"
+makedepends="gtk+3.0-dev"
+source="hello.c"
+builddir="$srcdir"
+
+build() {
+	$CC $CFLAGS hello.c $(pkg-config --cflags gtk+-3.0) $(pkg-config --static --libs gtk+-3.0) -o gtk3-hello
+}
+
+package() {
+	install -Dm755 gtk3-hello "$pkgdir"/usr/bin/gtk3-hello
+}
+
+sha512sums="
+5f64d223e792361287f037f8985f5b89c895826ba6fbc8f4d2df4edd944a80a58d90aaa50ef97caaa1defe0b7850d4aeec264b334c71f3c54cacdc1aa48ab8ad  hello.c
+"
