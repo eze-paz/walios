@@ -175,11 +175,13 @@ done
 # switch for the portable one.
 # (Not -idirafter, R66: clang's own headers then come first, autoconf's C23 probe passes, and
 # C23 has no implicit declarations -- coreutils' getprogname, libcap's probe.)
+# -Wno-error=implicit-int-conversion/shorten-64-to-32: clang's -Wconversion family under a
+# package's -Werror, where Alpine's gcc build does not stop (libwebsockets' htons into __be16, R84).
 F=($TGT --sysroot=$S -nostdlibinc $cxx -isystem $S/include -D_GNU_SOURCE -DXSIMD_WITH_EMULATED=1
    -D__STDC_ISO_10646__=201206L '-D__builtin_return_address(x)=((void *)0)' \$OPT -mllvm -wasm-enable-sjlj -fwasm-exceptions -matomics -mbulk-memory -mexception-handling -msimd128 -pthread
    -Wno-implicit-function-declaration -Wno-int-conversion -Wno-incompatible-pointer-types
    -Wno-incompatible-function-pointer-types -Wno-unused-command-line-argument -Wno-ignored-optimization-argument
-   -Wno-unknown-warning-option -Wno-long-long -Wno-macro-redefined $cxxdefs $ABIDEFS
+   -Wno-unknown-warning-option -Wno-long-long -Wno-macro-redefined -Wno-error=implicit-int-conversion -Wno-error=shorten-64-to-32 $cxxdefs $ABIDEFS
    \${WALI_EXTRA_CFLAGS:-})
 # \$WALI_LATE_CFLAGS go after the package's own flags: the overlay's include dir must not shadow
 # a package's bundled headers of the same name (git's, util-linux's, cmake's own copies).

@@ -217,7 +217,21 @@ for p in $PM; do sudo timeout 120 apt-get install -y -qq --no-install-recommends
 # The overlay's Perl dirs go at the END of @INC (WaliInc.pm, loaded through PERL5OPT): in
 # front, the walios copy of an XS module (DBI) hid the host's, and `use DBI` failed in the
 # DBD::* Makefile.PLs ("DBI 1.57 is required to configure this module").
-pinc=$(mktemp -d); printf 'push @INC, grep length, split /:/, ($ENV{WALI_PERL_INC} || "");\n1;\n' > "$pinc/WaliInc.pm"
+pinc=$(mktemp -d); printf 'push @INC, grep length, split /:/, ($ENV{WALI_PERL_INC} || "");\n' > "$pinc/WaliInc.pm"
+# ExtUtils::HasCompiler (bundled in inc/ by YAML::Syck and others) builds its test object with
+# the wasm compiler, then loads it into the HOST perl ("invalid ELF header", "requires a
+# compiler", R84). An XS build has a compiler: the probe is answered here, and %INC keeps
+# inc/'s copy from replacing the answer.
+cat >> "$pinc/WaliInc.pm" <<'EOP'
+if ($ENV{WALI_PERLXS}) {
+  package ExtUtils::HasCompiler; our $VERSION = '0.025'; require Exporter; our @ISA = ('Exporter');
+  our @EXPORT_OK = qw(can_compile_loadable_object can_compile_static_library can_compile_extension);
+  our %EXPORT_TAGS = (all => \@EXPORT_OK);
+  sub can_compile_loadable_object { 1 } sub can_compile_static_library { 1 } sub can_compile_extension { 1 }
+  $INC{'ExtUtils/HasCompiler.pm'} = __FILE__;
+}
+1;
+EOP
 export WALI_PERL_INC="$OVERLAY/usr/share/perl5/vendor_perl:$OVERLAY/usr/share/perl5" PERL5LIB="$pinc${PERL5LIB:+:$PERL5LIB}" PERL5OPT="-MWaliInc"
 # MakeMaker installs where Alpine's perl has its vendor dirs (the runner's are Debian's
 # /usr/share/perl5): spamassassin's package() runs its installed scripts with
@@ -247,7 +261,7 @@ fi
 # space; perl's -fwrapv -fno-strict-aliasing ride in WALI_EXTRA_CFLAGS instead.
 PERLXS="" PERLXS_MAKE=""
 if [ -z "$NOARCH" ] && case "$pkg" in perl-*) true;; *) false;; esac; then
-  PERLXS=1; export WALI_SIDE="$HERE/perl-exports$X.txt" PERL_MM_OPT="CC=$CC LD=$CC"
+  PERLXS=1; export WALI_SIDE="$HERE/perl-exports$X.txt" PERL_MM_OPT="CC=$CC LD=$CC" WALI_PERLXS=1
   # Makefile.PL's compiler probes (ExtUtils::CBuilder, Config::AutoConf) link with $LD, which
   # the toolchain sets to the bare wasm-ld wrapper; and they `use` build-time modules the
   # farm built as pure-Perl packages (Canary::Stability...), in the overlay's noarch dir.
@@ -356,12 +370,20 @@ done
 # apr's build tree (libtool, make_exports.awk, apr_rules.mk) sits at /usr/share/build-1 on
 # Alpine and apr-1-config --installbuilddir names that path: apr-util ran "/usr/share/build-1/
 # libtool: No such file" (R85). Symlinked like the lib dirs above.
-# Apache's (rules.mk, config_vars.mk at /usr/share/apache2/build; headers apxs -q INCLUDEDIR
-# names as /usr/include/apache2): apache-mod-fcgid "rules.mk: No such file" (R85). And com_err's
-# et/ awk scripts, which the overlay's compile_et reads from /usr/share/et (krb5, R85).
-for d in "$OVERLAY"/usr/share/build-*/ "$OVERLAY"/usr/share/apache2/ "$OVERLAY"/usr/include/apache2/ "$OVERLAY"/usr/share/et/; do
+# Apache's (rules.mk, config_vars.mk at /usr/share/apache2/build): apache-mod-fcgid "rules.mk:
+# No such file" (R85). And com_err's et/ awk scripts, which the overlay's compile_et reads from
+# /usr/share/et (krb5, R85).
+for d in "$OVERLAY"/usr/share/build-*/ "$OVERLAY"/usr/share/apache2/ "$OVERLAY"/usr/share/et/; do
   [ -d "$d" ] || continue; n=${d#"$OVERLAY"/usr/}; n=${n%/}
   [ -e "/usr/$n" ] || { sudo -n ln -s "$OVERLAY/usr/$n" "/usr/$n" 2>/dev/null && echo "farm: /usr/$n -> overlay" >> "$log"; }
+done
+# Deps' headers at their Alpine path, where the host has none: configures that test the file
+# with the shell, not the compiler -- ngx_brotli's /usr/include/brotli/encode.h, nsd's
+# --with-libevent=/usr event.h, apxs -q INCLUDEDIR's /usr/include/apache2 (R85). wali-cc never
+# reads /usr/include (-nostdlibinc; -I/usr/include/<dir> maps to the overlay), so only these
+# shell tests and host-compiler builds see them, and only names the host lacks.
+for h in "$OVERLAY"/usr/include/*; do
+  n=${h##*/}; [ -e "/usr/include/$n" ] || [ -L "/usr/include/$n" ] || sudo -n ln -s "$h" "/usr/include/$n" 2>/dev/null || true
 done
 # A dep's *-config script where recipes name it by its Alpine path: --with-apr=/usr is
 # /usr/bin/apr-1-config (apr-util, apache2 and its modules: "the --with-apr parameter is
