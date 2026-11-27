@@ -13,7 +13,8 @@ source="demo.c"
 builddir="$srcdir"
 
 build() {
-	$CC $CFLAGS demo.c $(pkg-config --cflags sdl2) $(pkg-config --static --libs sdl2) -o sdl2-demo
+	# sdl2.pc's static libs name archives by full path as "-l/abs/libX11.a" (CMake): the path alone
+	$CC $CFLAGS demo.c $(pkg-config --cflags sdl2) $(pkg-config --static --libs sdl2 | sed 's#-l/#/#g') -o sdl2-demo
 }
 
 package() {
