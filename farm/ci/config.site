@@ -33,3 +33,6 @@ fc_cv_c99_vsnprintf=${fc_cv_c99_vsnprintf-yes}
 # openldap: "crossing compiling: use --with-yielding_select=yes|no|manual" (its run test of
 # select() under threads). walios' select() is the kernel's poll, which yields: yes.
 ol_cv_pthread_select_yields=${ol_cv_pthread_select_yields-yes}
+# apache2 (httpd): "Size of void * is less than size of long" -- its run test of
+# sizeof(void *) < sizeof(long). walios wasm32 is ILP32: both are 4 bytes.
+ap_cv_void_ptr_lt_long=${ap_cv_void_ptr_lt_long-no}

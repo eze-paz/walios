@@ -234,7 +234,13 @@ if [ \$link = 1 ] && [ \$shared = 1 ] && [ -n "\${WALI_SIDE:-}" ]; then
   # zero-filled global unordered_map and its first insert threw "__next_prime overflow".
   # Last, compiler-rt's builtins, as a program link has them: the long-double (IEEE quad)
   # helpers clang calls (__trunctfdf2, __multf3... FCGI) are not among the runtimes' exports.
-  exec $L/clang "\${F[@]}" "\${LP[@]}" "\${S2[@]}" "\${LATE[@]}" "\${D2[@]}" $S/lib/libwali-sideunwind.a $S/lib/libclang_rt.builtins.a -nostdlib -Wl,--no-entry,--experimental-pic,--shared-memory,--allow-undefined-file=\$WALI_SIDE,--export-if-defined=__wasm_call_ctors,--export-if-defined=__wasm_init_tls,--export-if-defined=__tls_size,--export-if-defined=__tls_align $SIDEOBJ
+  # A dependency archive whose own deps are OpenSSL (libmysqlclient -> lua-dbi/lua-sql) gets the
+  # sysroot libssl/libcrypto, as a program link does (members only where needed); a runtime
+  # without pthread_create (lua, perl) gets the EAGAIN stub (c-ares, SQLite -> lua-curl/sqlite).
+  X2=(); for a in $S/lib/libssl.a $S/lib/libcrypto.a; do [ -f "\$a" ] && X2+=("\$a"); done
+  grep -qx pthread_create "\$WALI_SIDE" || X2+=($S/lib/libwali-sidenothreads.a)
+  grep -qx dladdr "\$WALI_SIDE" || X2+=($S/lib/libwali-sidedladdr.a)   # lua-cqueues, lua-ossl
+  exec $L/clang "\${F[@]}" "\${LP[@]}" "\${S2[@]}" "\${LATE[@]}" "\${D2[@]}" "\${X2[@]}" $S/lib/libwali-sideunwind.a $S/lib/libclang_rt.builtins.a -nostdlib -Wl,--no-entry,--experimental-pic,--shared-memory,--allow-undefined-file=\$WALI_SIDE,--export-if-defined=__wasm_call_ctors,--export-if-defined=__wasm_init_tls,--export-if-defined=__tls_size,--export-if-defined=__tls_align $SIDEOBJ
 fi
 if [ \$link = 1 ] && [ \$shared = 1 ]; then
   # The objects, and the members of the build's OWN static libraries on the line: a shared
@@ -665,6 +671,18 @@ if [ ! -f $S/lib/libwali-sideunwind.a ]; then
   $L/clang $TGT --sysroot=$S -nostdlibinc -isystem $S/include -O2 -fPIC -fwasm-exceptions -matomics -mbulk-memory -mexception-handling -pthread \
     -c "$HERE"/shim-side/unwind-side.c -o $S/lib/unwind-side.o
   $L/llvm-ar rcs $S/lib/libwali-sideunwind.a $S/lib/unwind-side.o
+fi
+# libwali-sidenothreads.a: pthread_create -> EAGAIN for modules of runtimes without threads
+# (farm/ci/shim-side/nothreads-side.c).
+if [ ! -f $S/lib/libwali-sidenothreads.a ]; then
+  $L/clang $TGT --sysroot=$S -nostdlibinc -isystem $S/include -O2 -fPIC -matomics -mbulk-memory -pthread \
+    -c "$HERE"/shim-side/nothreads-side.c -o $S/lib/nothreads-side.o
+  $L/llvm-ar rcs $S/lib/libwali-sidenothreads.a $S/lib/nothreads-side.o
+fi
+if [ ! -f $S/lib/libwali-sidedladdr.a ]; then
+  $L/clang $TGT --sysroot=$S -nostdlibinc -isystem $S/include -O2 -fPIC -matomics -mbulk-memory -pthread \
+    -c "$HERE"/shim-side/dladdr-side.c -o $S/lib/dladdr-side.o
+  $L/llvm-ar rcs $S/lib/libwali-sidedladdr.a $S/lib/dladdr-side.o
 fi
 # closefrom(), glibc 2.34+'s declaration (libwali-farm.a defines it): xapian-core calls it once
 # configure's link test finds it.
