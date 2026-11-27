@@ -94,10 +94,11 @@ jobs:
       - name: Summary
         run: |
           cd out; ls -l | tee sizes.txt
-          for f in *.build.log; do echo "== $f"; head -40 "$f"; done > build-logs.txt
+          for f in *.build.log; do echo "== $f"; head -60 "$f"; done > build-logs.txt; cat build-logs.txt
           cat probes.txt rclone-tag.txt sizes.txt >> "$GITHUB_STEP_SUMMARY"; echo '```' >> "$GITHUB_STEP_SUMMARY"; head -150 build-logs.txt >> "$GITHUB_STEP_SUMMARY"; echo '```' >> "$GITHUB_STEP_SUMMARY"
       - name: Release
         env: { GH_TOKEN: '${{ github.token }}' }
         run: |
           TAG=go-spike-${{ github.run_number }}
+          find out -size 0 -delete
           gh release create "$TAG" --prerelease --title "$TAG" --notes "Go/rclone wasip1 spike (sandpie docs/plans/walios-fuse-rclone.md)" out/*
