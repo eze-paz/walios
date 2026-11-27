@@ -148,9 +148,9 @@ emit() {  # status reason kind smoke
   deps=$(for d in $DEPS; do d=${d%%[<>=~]*}; case "$d" in ''|*:*|!*) ;; *) printf '"%s",' "$d";; esac; done)
   # abiwarn: format calls whose argument width differs from what the format reads (abiwarn.js);
   # they compile and run, printing garbage, so a built package carries the count.
-  row=$(printf '{"pkg":"%s","ver":"%s","status":"%s","reason":"%s","kind":"%s","secs":%s,"smoke":"%s","abiwarn":%s,"deps":[%s]}' \
+  row=$(printf '{"pkg":"%s","ver":"%s","status":"%s","reason":"%s","kind":"%s","secs":%s,"smoke":"%s","abiwarn":%s,"deps":[%s]%s}' \
     "$pkg" "$pkgver" "$1" "$2" "${3:-}" "$BUILD_SECS" "$(printf '%s' "${4:-}" | tr -d '\000-\037"\\' | cut -c1-80)" \
-    "$(node "$HERE/abiwarn.js" "$log" 2>/dev/null || echo 0)" "${deps%,}")
+    "$(node "$HERE/abiwarn.js" "$log" 2>/dev/null || echo 0)" "${deps%,}" "${BINS:+,\"bins\":[$BINS]}")
   echo "$row" > "$OUT/$pkg.json"; echo "$row"; exit 0
 }
 
@@ -258,6 +258,13 @@ fi
 # found", R78). Every _luaversions recipe runs the 5.4 one.
 if grep -q '^_luaversions=' "$bdir/APKBUILD"; then
   LUASUB=1; sed -i 's/^_luaversions=.*/_luaversions="5.4"/' "$bdir/APKBUILD"
+fi
+# The walios sysroot's OpenSSL 3 is built no-engine (ENGINE is deprecated and its engines are
+# ELF modules loaded by dlopen). A recipe that asks for it outright stops at configure:
+# openssh's --with-ssl-engine -> "OpenSSL ENGINE support not found" (R87). Without the flag
+# openssh builds as on any no-engine OpenSSL.
+if grep -q '^# *define OPENSSL_NO_ENGINE' "$WALI_SYSROOT/include/openssl/configuration.h" 2>/dev/null; then
+  sed -i 's/[[:space:]]*--with-ssl-engine\b//' "$bdir/APKBUILD"
 fi
 # Perl XS modules (perl-*, not noarch): side modules perl.wasm's DynaLoader dlopen()s,
 # importing only its exports (perl-exports.txt, from walios/build/perl in sandpie). The
@@ -552,6 +559,19 @@ pyd=$(cd "$pkgdir" && find . -type d \( -name site-packages -o -name dist-packag
 # takes walios numpy's C headers from there (the runner's Python prefix is no overlay dir,
 # so pandas compiled against x86-64 numpy's, where npy_int64 is a long -- 4 bytes here).
 pyov=; [ -n "$pyd" ] && [ -n "$PYPKG" ] && case "$pyd" in usr/*) ;; *) pyov=$pyd;; esac
+# Real fork: EVERY program the package installs is asyncified, not just the one the index
+# names -- openssh's ssh-agent daemonizes and sshd-session forks its session child, while
+# the index's program is scp. (A wasm program = magic bytes + a _start export.)
+ASYNCDONE=""
+if [ -n "$ASYNCFORK" ]; then
+  for f in $(find "$pkgdir/usr/bin" "$pkgdir/bin" "$pkgdir/usr/sbin" "$pkgdir/sbin" "$pkgdir/usr/lib" "$pkgdir/usr/libexec" -type f 2>/dev/null); do
+    [ "$(head -c4 "$f" 2>/dev/null | od -An -tx1 | tr -d ' \n')" = "0061736d" ] || continue
+    node -e "const m=new WebAssembly.Module(require('fs').readFileSync(process.argv[1]));process.exit(WebAssembly.Module.exports(m).some(e=>e.name==='_start')?0:1)" "$f" 2>/dev/null || continue
+    "${TC:?}/binaryen/bin/wasm-opt" --asyncify --pass-arg=asyncify-imports@wali.SYS_fork -O2 "$f" -o "$f.async" >> "$log" 2>&1 \
+      && mv "$f.async" "$f" && echo "farm: asyncified ${f#$pkgdir/}" >> "$log" || { rm -f "$f.async"; echo "farm: asyncify FAILED ${f#$pkgdir/}" >> "$log"; }
+  done
+  ASYNCDONE=1
+fi
 [ -n "$ovdirs$pyov" ] && tar czf "$OUT/$pkg.overlay.tar.gz" -C "$pkgdir" ${pyov:+--transform "s|^$pyov|usr/lib/python3/site-packages|"} $ovdirs $pyov
 # Scripts the build host's pip/setuptools installed start with ITS interpreter
 # (#!/opt/hostedtoolcache/Python/3.14.9/x64/bin/python3.14): Alpine's say /usr/bin/python3.
@@ -623,6 +643,26 @@ fi
 # A wasm left in the source tree (an example, a test helper) is not the package.
 is_exe() { [ "$(head -c4 "$1" 2>/dev/null | od -An -tx1 | tr -d ' \n')" = "0061736d" ] &&
   node -e "const m=new WebAssembly.Module(require('fs').readFileSync(process.argv[1]));process.exit(WebAssembly.Module.exports(m).some(e=>e.name==='_start')?0:1)" "$1" 2>/dev/null; }
+# A package with more programs than the one the index names (farm/ci/pkg/<pkg>/, README there):
+# also published whole, as kind 'pkg' -- <pkg>.pkg.tar.gz, which `apk add` mounts at / -- with
+# its programs listed in "bins". openssh: ssh, scp, sftp, ssh-keygen, ssh-agent, sshd...
+PKGDEF="$HERE/pkg/$pkg"; BINS=""
+make_pkg() {
+  local st="$bdir/pkgstage" p f; rm -rf "$st"; mkdir -p "$st"
+  cp -a "$pkgdir/." "$st/" && { [ ! -d "$PKGDEF/root" ] || cp -a "$PKGDEF/root/." "$st/"; } || return 1
+  local ex=(--exclude=usr/include --exclude='*.a' --exclude='*.la' --exclude=usr/lib/pkgconfig
+            --exclude=usr/share/doc --exclude=usr/share/info --exclude=__pycache__)
+  if [ -f "$PKGDEF/exclude" ]; then
+    while read -r p; do case "$p" in ''|'#'*) ;; *) ex+=("--exclude=$p");; esac; done < "$PKGDEF/exclude"
+  fi
+  for f in $(find "$st" -type f); do
+    [ "$(head -c4 "$f" 2>/dev/null | od -An -tx1 | tr -d ' \n')" = "0061736d" ] && chmod 755 "$f"
+  done
+  tar czf "$OUT/$pkg.pkg.tar.gz" -C "$st" --owner=0 --group=0 "${ex[@]}" $(cd "$st" && ls -A) || return 1
+  BINS=$(tar tzf "$OUT/$pkg.pkg.tar.gz" | grep -E '^(usr/(local/)?)?s?bin/[^/]+$' | sed 's|.*/||' | sort -u | sed 's/.*/"&"/' | paste -sd, -)
+  echo "farm: pkg $pkg.pkg.tar.gz: $(tar tzf "$OUT/$pkg.pkg.tar.gz" | grep -vc '/$') files, programs $BINS" >> "$log"
+  rm -rf "$st"; [ -n "$BINS" ]
+}
 exe=""
 for f in "$pkgdir/usr/bin/$pkg" "$pkgdir/bin/$pkg" "$pkgdir/usr/sbin/$pkg" "$pkgdir/sbin/$pkg" \
          $(find "$pkgdir/usr/bin" "$pkgdir/bin" "$pkgdir/usr/sbin" "$pkgdir/sbin" -type f 2>/dev/null | sort); do
@@ -630,7 +670,7 @@ for f in "$pkgdir/usr/bin/$pkg" "$pkgdir/bin/$pkg" "$pkgdir/usr/sbin/$pkg" "$pkg
 done
 if [ -n "$exe" ]; then
   cp "$exe" "$OUT/$pkg.wasm"
-  if [ -n "$ASYNCFORK" ]; then
+  if [ -n "$ASYNCFORK" ] && [ -z "$ASYNCDONE" ]; then   # (already done above when it came from pkgdir)
     "${TC:?}/binaryen/bin/wasm-opt" --asyncify --pass-arg=asyncify-imports@wali.SYS_fork -O2 \
       "$OUT/$pkg.wasm" -o "$OUT/$pkg.async.wasm" >> "$log" 2>&1 && mv "$OUT/$pkg.async.wasm" "$OUT/$pkg.wasm" \
       || { rm -f "$OUT/$pkg.wasm" "$OUT/$pkg.async.wasm"; emit fail asyncify-failed exe ""; }
@@ -650,7 +690,12 @@ if [ -n "$exe" ]; then
   fi
   smoke="$(basename "$exe"): $(printf '%s\n' "$st" | grep -vE 'wali-host\]|ENOSYS|stub' | head -1)"
   if printf '%s' "$st" | grep -qE 'trap in pid|LinkError|CompileError|RuntimeError'; then rm -f "$OUT/$pkg.wasm"; emit fail smoke-trap exe "$smoke"
-  elif printf '%s' "$st" | grep -qE 'exit=[0-9]+ procs'; then emit pass ok exe "$smoke"
+  elif printf '%s' "$st" | grep -qE 'exit=[0-9]+ procs'; then
+    if [ -d "$PKGDEF" ]; then
+      make_pkg && emit pass ok pkg "$smoke"
+      rm -f "$OUT/$pkg.pkg.tar.gz"; BINS=""; echo "farm: pkg $pkg FAILED to pack, published as exe" >> "$log"
+    fi
+    emit pass ok exe "$smoke"
   else rm -f "$OUT/$pkg.wasm"; emit fail smoke-crash exe "$smoke"; fi
 fi
 # A NON-EMPTY archive or shared object: a failed compile still leaves `ar` an empty libfoo.a

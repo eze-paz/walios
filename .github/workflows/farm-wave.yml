@@ -6,6 +6,9 @@ on:
     inputs:
       wave:   { type: number, required: true }
       chunks: { type: string, required: true }
+      # a release whose overlays every job starts from (request key "base"): with max 1 a canary
+      # builds just its seeds against packages a recent run already built
+      base:   { type: string, required: false, default: '' }
 
 env:
   TC: ${{ github.workspace }}/../wali-tc
@@ -112,6 +115,15 @@ jobs:
           ls /proc/sys/fs/binfmt_misc/ | tr '\n' ' '; echo
       - uses: actions/download-artifact@v4
         with: { name: aports, path: . }
+      - name: Overlays from the base release
+        if: inputs.base != ''
+        run: |
+          mkdir -p ov
+          for n in "" -2 -3 -4 -5 -6 -7 -8; do
+            curl -fsSL --retry 5 --retry-delay 10 -o "$RUNNER_TEMP/o.tgz" "https://github.com/${{ github.repository }}/releases/download/${{ inputs.base }}/overlays$n.tar.gz" || break
+            tar xzf "$RUNNER_TEMP/o.tgz" -C ov; rm -f "$RUNNER_TEMP/o.tgz"
+          done
+          ls ov | wc -l
       - name: Overlays from earlier waves
         if: inputs.wave > 0
         uses: actions/download-artifact@v4
