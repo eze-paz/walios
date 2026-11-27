@@ -19,6 +19,13 @@ Status 2026-11-27 (probes/): hello, goroutines, file I/O in /tmp and the OPFS /r
 TCP + DNS (needs the walios kernel fix for write() on connected UDP), HTTPS with Go's TLS:
 all pass on both walios engines (COI workers and in-process JSPI).
 
+rclone (farm/go-walios/rclone): v1.76.0 trimmed to the dropbox, http and local backends
+(cmd-walios/main.go), dependencies patched by tools/mkpatched.py from rclone/rules.txt
+(x/sys gets linux/wasm = linux/amd64 tables; `mirror` makes a no-asm package's linux/wasm file
+set equal its linux/amd64 one). 2026-11-27: version, lsf, copy, cat on local files and an
+HTTPS http remote pass on both engines; the dropbox backend reaches the API. Needed a runtime
+change: wasm has no sysmon, so findRunnable polls the network every 10 ms itself.
+
 Not yet: os/exec (no vfork), signals, structs with pointers (iovec, msghdr: walios reads
 4-byte pointers; Go writes 8), x/sys/unix for linux/wasm (rclone needs it).
 

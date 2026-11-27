@@ -1,0 +1,20 @@
+# Dependency patches for building rclone (v1.76.0) for linux/wasm (Go on walios).
+# Applied by ../tools/mkpatched.py to copies of the modules, wired in with go.mod `replace`.
+# golang.org/x/sys: linux/wasm = linux/amd64's generated tables; syscall entry points in Go
+copy   golang.org/x/sys@v0.49.0/unix syscall_linux_amd64.go
+copy   golang.org/x/sys@v0.49.0/unix zerrors_linux_amd64.go
+copy   golang.org/x/sys@v0.49.0/unix zsyscall_linux_amd64.go
+copy   golang.org/x/sys@v0.49.0/unix zsysnum_linux_amd64.go
+copy   golang.org/x/sys@v0.49.0/unix ztypes_linux_amd64.go
+add    golang.org/x/sys@v0.49.0/unix syscall_linux_gc_wasm.go
+tag    golang.org/x/sys@v0.49.0/unix syscall_linux_gc.go && !wasm
+tag    golang.org/x/sys@v0.49.0/unix syscall_unix_gc.go && !(linux && wasm)
+tag    golang.org/x/sys@v0.49.0/unix endian_little.go || wasm
+tag    golang.org/x/sys@v0.49.0/unix syscall_linux_alarm.go || (linux && wasm)
+tag    golang.org/x/sys@v0.49.0/cpu cpu_linux.go && !wasm
+# third-party
+tag    github.com/mattn/go-isatty@v0.0.23 isatty_others.go && !(linux && wasm)
+mirror golang.org/x/net@v0.62.0/internal/socket
+mirror golang.org/x/net@v0.62.0/ipv4
+mirror golang.org/x/net@v0.62.0/ipv6
+copy   github.com/shirou/gopsutil/v4@v4.26.9/host host_linux_amd64.go

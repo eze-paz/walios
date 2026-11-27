@@ -1981,6 +1981,34 @@ index fdbeba70..fe66985a 100644
  
  package runtime
  
+diff --git a/src/runtime/proc.go b/src/runtime/proc.go
+index b8d4d150..5ecbc43e 100644
+--- a/src/runtime/proc.go
++++ b/src/runtime/proc.go
+@@ -3429,6 +3429,23 @@ top:
+ 	// relevant.
+ 	now, pollUntil, _ := pp.timers.check(0, nil)
+ 
++	// linux/wasm has no sysmon thread, which elsewhere polls the network every 10ms
++	// while goroutines keep the scheduler busy. Without it a program that always has
++	// something runnable (rclone's accounting, a TLS handshake next to busy goroutines)
++	// never sees its sockets become ready and every network deadline expires.
++	if GOOS == "linux" && GOARCH == "wasm" && netpollinited() && netpollAnyWaiters() {
++		if now == 0 {
++			now = nanotime()
++		}
++		if last := sched.lastpoll.Load(); last != 0 && now-last > 10*1000*1000 {
++			sched.lastpoll.Store(now)
++			if list, delta := netpoll(0); !list.empty() {
++				injectglist(&list)
++				netpollAdjustWaiters(delta)
++			}
++		}
++	}
++
+ 	// Try to schedule the trace reader.
+ 	if traceEnabled() || traceShuttingDown() {
+ 		gp := traceReader()
 diff --git a/src/runtime/retry.go b/src/runtime/retry.go
 index 2e2f813b..c5bd89c1 100644
 --- a/src/runtime/retry.go
