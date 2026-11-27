@@ -551,6 +551,19 @@ pyd=$(cd "$pkgdir" && find . -type d \( -name site-packages -o -name dist-packag
 # takes walios numpy's C headers from there (the runner's Python prefix is no overlay dir,
 # so pandas compiled against x86-64 numpy's, where npy_int64 is a long -- 4 bytes here).
 pyov=; [ -n "$pyd" ] && [ -n "$PYPKG" ] && case "$pyd" in usr/*) ;; *) pyov=$pyd;; esac
+# Real fork: EVERY program the package installs is asyncified, not just the one the index
+# names -- openssh's ssh-agent daemonizes and sshd-session forks its session child, while
+# the index's program is scp. (A wasm program = magic bytes + a _start export.)
+ASYNCDONE=""
+if [ -n "$ASYNCFORK" ]; then
+  for f in $(find "$pkgdir/usr/bin" "$pkgdir/bin" "$pkgdir/usr/sbin" "$pkgdir/sbin" "$pkgdir/usr/lib" "$pkgdir/usr/libexec" -type f 2>/dev/null); do
+    [ "$(head -c4 "$f" 2>/dev/null | od -An -tx1 | tr -d ' \n')" = "0061736d" ] || continue
+    node -e "const m=new WebAssembly.Module(require('fs').readFileSync(process.argv[1]));process.exit(WebAssembly.Module.exports(m).some(e=>e.name==='_start')?0:1)" "$f" 2>/dev/null || continue
+    "${TC:?}/binaryen/bin/wasm-opt" --asyncify --pass-arg=asyncify-imports@wali.SYS_fork -O2 "$f" -o "$f.async" >> "$log" 2>&1 \
+      && mv "$f.async" "$f" && echo "farm: asyncified ${f#$pkgdir/}" >> "$log" || { rm -f "$f.async"; echo "farm: asyncify FAILED ${f#$pkgdir/}" >> "$log"; }
+  done
+  ASYNCDONE=1
+fi
 [ -n "$ovdirs$pyov" ] && tar czf "$OUT/$pkg.overlay.tar.gz" -C "$pkgdir" ${pyov:+--transform "s|^$pyov|usr/lib/python3/site-packages|"} $ovdirs $pyov
 # Scripts the build host's pip/setuptools installed start with ITS interpreter
 # (#!/opt/hostedtoolcache/Python/3.14.9/x64/bin/python3.14): Alpine's say /usr/bin/python3.
@@ -629,7 +642,7 @@ for f in "$pkgdir/usr/bin/$pkg" "$pkgdir/bin/$pkg" "$pkgdir/usr/sbin/$pkg" "$pkg
 done
 if [ -n "$exe" ]; then
   cp "$exe" "$OUT/$pkg.wasm"
-  if [ -n "$ASYNCFORK" ]; then
+  if [ -n "$ASYNCFORK" ] && [ -z "$ASYNCDONE" ]; then   # (already done above when it came from pkgdir)
     "${TC:?}/binaryen/bin/wasm-opt" --asyncify --pass-arg=asyncify-imports@wali.SYS_fork -O2 \
       "$OUT/$pkg.wasm" -o "$OUT/$pkg.async.wasm" >> "$log" 2>&1 && mv "$OUT/$pkg.async.wasm" "$OUT/$pkg.wasm" \
       || { rm -f "$OUT/$pkg.wasm" "$OUT/$pkg.async.wasm"; emit fail asyncify-failed exe ""; }

@@ -11,3 +11,5 @@ dash
 mksh
 yash
 zsh
+# openssh: ssh-agent daemonizes (fork, no exec); sshd-session forks the session child
+openssh

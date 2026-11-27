@@ -1,1 +1,1 @@
-{"pkgs":"openssh","max":1,"chunk":1,"publish":true,"base":"farm-2026-11-27-95","note":"R87c openssh only, deps from farm-2026-11-27-95's overlays (new base key); build-one drops --with-ssl-engine on the no-engine sysroot OpenSSL"}
+{"pkgs":"openssh","max":1,"chunk":1,"publish":true,"base":"farm-2026-11-27-95","note":"R87d openssh with real fork (asyncify-fork.txt; every installed program asyncified) for ssh-agent and sshd"}
