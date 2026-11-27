@@ -4,7 +4,12 @@
 //
 //   node farm/e2e/x11-spike.mjs --index <farm index.json URL> --base <full farm index.json URL> \
 //        --kernel <dir: wali-worker.js wali-proc-worker.js opfs-worker.js> --rt <dir: busybox.wasm rootfs.tar.gz> \
-//        [--cache dir] [--out root.png] [--engine coi|nocoi] [--cmd 'extra shell']
+//        [--cache dir] [--out root.png] [--engine coi|nocoi] [--cmd 'extra shell'] [--display walios-x11.js]
+//
+// --display <sandpie modules/walios-x11.js>: the P1 display test. The page opens the X server
+// itself (kernel 'tcp-open': a MessagePort into 127.0.0.1:6000), draws it on a canvas with that
+// client, moves the pointer (xeyes must follow), types and clicks into x11-keyprobe.py's
+// window (it logs what arrives), and the canvas is compared with xwd's dump of the same screen.
 //
 // Programs come from --index (the canary) first, then --base; data packages (xkeyboard-config,
 // fonts) are mounted as tars like `apk add` does.
@@ -57,6 +62,16 @@ for (const pkg of DATA) {
 }
 
 files['/f/x11-probe.py'] = path.join(HERE, 'x11-probe.py');
+const DISPLAY_JS = arg('display');
+if (DISPLAY_JS) { files['/f/walios-x11.js'] = path.resolve(DISPLAY_JS); files['/f/x11-keyprobe.py'] = path.join(HERE, 'x11-keyprobe.py'); }
+const DISPLAY_CMD = `xeyes -geometry 300x200+20+20 >/tmp/xeyes.log 2>&1 &
+xclock -geometry 200x200+360+20 >/tmp/xclock.log 2>&1 &
+python3 /tmp/x11-keyprobe.py /tmp/keys.log >/tmp/keyprobe.log 2>&1 &
+i=0; until grep -q __KEYPROBE /tmp/keys.log 2>/dev/null || [ $i -ge 60 ]; do sleep 1; i=$((i+1)); done
+sleep 3; echo __READY
+i=0; until grep -q __KEYDONE /tmp/keys.log 2>/dev/null || [ $i -ge 120 ]; do sleep 1; i=$((i+1)); done
+echo __KEYS; cat /tmp/keys.log; cat /tmp/keyprobe.log
+sleep 2`;
 const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.wasm': 'application/wasm', '.gz': 'application/gzip', '.json': 'application/json' };
 const server = http.createServer((req, res) => {
   const u = decodeURIComponent(req.url.split('?')[0]);
@@ -79,7 +94,7 @@ XP=$!
 export DISPLAY=127.0.0.1:0
 echo __PROBE; python3 /tmp/x11-probe.py 0 2>&1; echo __probe_rc=$?
 if command -v xdpyinfo >/dev/null; then xdpyinfo >/tmp/dpy 2>&1; echo __xdpyinfo_rc=$?; head -40 /tmp/dpy; fi
-${arg('cmd', `xeyes -geometry 300x200+20+20 >/tmp/xeyes.log 2>&1 &
+${arg('cmd', DISPLAY_JS ? DISPLAY_CMD : `xeyes -geometry 300x200+20+20 >/tmp/xeyes.log 2>&1 &
 xclock -geometry 200x200+360+20 -update 1 >/tmp/xclock.log 2>&1 &
 xterm -geometry 60x10+20+260 -e sh -c 'echo hello from walios; sleep 30' >/tmp/xterm.log 2>&1 &
 sleep 8`)}
@@ -93,7 +108,7 @@ const msg = {
     python3: '/rt/python_cxx.wasm' }, manifest),
   tars: [['/rt/rootfs.tar.gz', '/'], ...tars],
   lazyTars: { '/rt/python_cxx.wasm': [['/rt/pylib.tar.gz', '/py']] },
-  blobUrls: { '/tmp/x11-probe.py': '/f/x11-probe.py' },
+  blobUrls: Object.assign({ '/tmp/x11-probe.py': '/f/x11-probe.py' }, DISPLAY_JS ? { '/tmp/x11-keyprobe.py': '/f/x11-keyprobe.py' } : {}),
   env: { HOME: '/root', PATH: '/bin:/usr/bin', TERM: 'dumb', LC_ALL: 'C.UTF-8', PYTHONHOME: '/py', PYTHONPATH: '/py/Lib', PYTHONDONTWRITEBYTECODE: '1' }, cwd: '/',
   argv: ['busybox', 'sh', '-c', SCRIPT], appletLinks: LINKS,
 };
@@ -107,13 +122,92 @@ page.on('console', (m) => { if (process.env.X11_VERBOSE) console.log('[page]', m
 await page.goto(`http://127.0.0.1:${server.address().port}/harness.html`);
 console.log('engine', await page.evaluate(() => window.walEngine));
 const t0 = Date.now();
-const r = await page.evaluate(([m]) => window.walRun(m, 150000), [msg]);
+const runP = page.evaluate(([m]) => window.walRun(m, 240000), [msg]);
+const disp = DISPLAY_JS ? await page.evaluate(displayTest).catch((e) => ({ error: String(e) })) : null;
+const r = await runP;
 await browser.close(); server.close();
 console.log(`run: code ${r.code}${r.timeout ? ' TIMEOUT' : ''} in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
 const out = r.out || '';
 const m = /__XWD\n([A-Za-z0-9+/=]*)\n__END/.exec(out);
 console.log(out.replace(/__XWD\n[A-Za-z0-9+/=]*\n__END/, `__XWD <${m ? m[1].length : 0} base64 chars>`).slice(0, 12000));
+if (disp) {
+  console.log('--- display test (page side) ---\n' + (disp.log || []).join('\n') + (disp.error ? '\nERROR ' + disp.error : ''));
+  if (disp.png) fs.writeFileSync(OUT.replace(/.png$/, '') + '-canvas.png', Buffer.from(disp.png.split(',')[1], 'base64'));
+  const keys = (/__KEYS\n([\s\S]*?)(?:\n== |$)/.exec(out) || [])[1] || '';
+  const ok = [];
+  ok.push(['canvas painted by DAMAGE + GetImage', disp.frames > 0]);
+  ok.push(['xeyes followed the injected pointer', disp.eyesDiff > 50]);
+  const kc = disp.expect || {};
+  ok.push(['key a arrived', new RegExp('__KEY ' + kc.a + ' 0\\b').test(keys)]);
+  ok.push(['key A arrived as Shift + a', new RegExp('__KEY ' + kc.a + ' 1\\b').test(keys)]);
+  ok.push(['Return arrived', new RegExp('__KEY ' + kc.Return + ' ').test(keys)]);
+  ok.push(['left click arrived at (100,70) in the window', /__BTN 1 100 70/.test(keys)]);
+  if (m && m[1].length && disp.rgba) {
+    const x = xwdPixels(Buffer.from(m[1], 'base64')), c = Buffer.from(disp.rgba, 'base64');
+    let same = 0; for (let i = 0, n = x.w * x.h; i < n; i++) if (c[i * 4] === x.px[i * 3] && c[i * 4 + 1] === x.px[i * 3 + 1] && c[i * 4 + 2] === x.px[i * 3 + 2]) same++;
+    const frac = same / (x.w * x.h);
+    ok.push([`canvas matches xwd's dump (${(frac * 100).toFixed(2)}% of pixels identical)`, frac > 0.99]);
+  }
+  for (const [what, pass] of ok) console.log((pass ? 'PASS ' : 'FAIL ') + what);
+  console.log(ok.every((x) => x[1]) ? '__DISPLAY_OK' : '__DISPLAY_FAIL');
+}
 if (m && m[1].length) { fs.writeFileSync(OUT.replace(/.png$/, '') + '.xwd', Buffer.from(m[1], 'base64')); const png = xwdToPng(Buffer.from(m[1], 'base64')); fs.writeFileSync(OUT, png); console.log('wrote', OUT, png.length, 'bytes'); }
+
+// ---- the display test, run in the page (needs harness.html's walWorker / walOutText) ----
+async function displayTest() {
+  const log = [], L = (s) => log.push(s), sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  await new Promise((res, rej) => { const s = document.createElement('script'); s.src = '/f/walios-x11.js'; s.onload = res; s.onerror = rej; document.head.appendChild(s); });
+  const t0 = performance.now();
+  while (!(window.walOutText || '').includes('__READY')) { if (performance.now() - t0 > 180000) return { log, error: 'the X clients never came up' }; await sleep(300); }
+  const w = window.walWorker;
+  const ports = await new Promise((res) => { const id = Math.random(); const h = (e) => { if (e.data && e.data.t === 'listening' && e.data.id === id) { w.removeEventListener('message', h); res(e.data.ports); } }; w.addEventListener('message', h); w.postMessage({ t: 'listening', id }); });
+  L('kernel loopback listeners: ' + ports.join(' '));
+  const ch = new MessageChannel();
+  w.postMessage({ t: 'tcp-open', dport: 6000, mp: ch.port2 }, [ch.port2]);
+  const canvas = document.createElement('canvas'); document.body.appendChild(canvas);
+  const sess = SandpieX11.attach(ch.port1, canvas, { raf: false, log: L });
+  const tc = performance.now();
+  const info = await sess.ready;
+  L('connected in ' + Math.round(performance.now() - tc) + ' ms: ' + JSON.stringify(info));
+  await sleep(2000);
+  L('first picture: ' + JSON.stringify(sess.stats));
+  const ctx = canvas.getContext('2d'), snap = () => ctx.getImageData(20, 20, 300, 200).data;
+  sess.fake(6, 0, 2, 120); await sleep(1500); const a = snap();
+  sess.fake(6, 0, 638, 120); await sleep(1500); const b = snap();
+  let eyesDiff = 0; for (let i = 0; i < a.length; i += 4) if (a[i] !== b[i] || a[i + 1] !== b[i + 1] || a[i + 2] !== b[i + 2]) eyesDiff++;
+  L('xeyes pixels changed by the pointer moving left -> right: ' + eyesDiff);
+  // real DOM events on the canvas, through the same handlers a user's mouse and keyboard hit
+  const r = canvas.getBoundingClientRect(), at = (x, y) => ({ clientX: r.left + x * r.width / canvas.width, clientY: r.top + y * r.height / canvas.height });
+  canvas.dispatchEvent(new MouseEvent('mousemove', { ...at(460, 330), bubbles: true })); await sleep(300);
+  canvas.focus();
+  const key = (k, code, shiftKey) => { canvas.dispatchEvent(new KeyboardEvent('keydown', { key: k, code, shiftKey, bubbles: true, cancelable: true })); canvas.dispatchEvent(new KeyboardEvent('keyup', { key: k, code, shiftKey, bubbles: true, cancelable: true })); };
+  key('a', 'KeyA'); key('A', 'KeyA', true); key('Enter', 'Enter');
+  canvas.dispatchEvent(new MouseEvent('mousedown', { ...at(460, 330), button: 0, bubbles: true, cancelable: true }));
+  canvas.dispatchEvent(new MouseEvent('mouseup', { ...at(460, 330), button: 0, bubbles: true, cancelable: true }));
+  const expect = { a: (sess.keysym(0x61) || {}).code, A: sess.keysym(0x41), Return: (sess.keysym(0xff0d) || {}).code };
+  L('keymap: a -> ' + expect.a + ', A -> ' + JSON.stringify(expect.A) + ', Return -> ' + expect.Return);
+  await sleep(1500);
+  canvas.dispatchEvent(new MouseEvent('mousedown', { ...at(460, 330), button: 2, bubbles: true, cancelable: true }));
+  canvas.dispatchEvent(new MouseEvent('mouseup', { ...at(460, 330), button: 2, bubbles: true, cancelable: true }));
+  await sleep(1500);
+  L('stats: ' + JSON.stringify(sess.stats));
+  const all = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+  let s = ''; for (let i = 0; i < all.length; i += 32768) s += String.fromCharCode.apply(null, all.subarray(i, i + 32768));
+  const png = canvas.toDataURL('image/png');
+  sess.close();
+  return { log, frames: sess.stats.frames, eyesDiff, expect, rgba: btoa(s), png };
+}
+function xwdPixels(b) {   // -> { w, h, px: RGB bytes }
+  const u = (i) => b.readUInt32BE(i * 4);
+  const hsize = u(0), w = u(4), h = u(5), byteOrder = u(7), bpp = u(11), bpl = u(12), ncolors = u(19), rm = u(14), gm = u(15), bm = u(16);
+  const sh = (mask) => { let s = 0; while (mask && !(mask & 1)) { mask >>>= 1; s++; } return s; };
+  const px = Buffer.alloc(w * h * 3), data = hsize + ncolors * 12;
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const o = data + y * bpl + x * (bpp / 8), p = bpp === 32 ? (byteOrder ? b.readUInt32BE(o) : b.readUInt32LE(o)) : b[o], d = (y * w + x) * 3;
+    px[d] = (p & rm) >>> sh(rm); px[d + 1] = (p & gm) >>> sh(gm); px[d + 2] = (p & bm) >>> sh(bm);
+  }
+  return { w, h, px };
+}
 
 // ---- XWD (X11 window dump, version 7, ZPixmap TrueColor) -> PNG ----
 function xwdToPng(b) {

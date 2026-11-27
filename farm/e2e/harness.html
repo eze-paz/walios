@@ -38,6 +38,7 @@ window.walRun = async (msg, ms = 30000) => {
 };
 const walRun1 = (msg, ms) => new Promise((resolve) => {
   const w = new Worker('wali-worker.js');
+  window.walWorker = w; window.walOutText = '';   // x11-spike --display: the page talks to this kernel while it runs
   let out = '', stats = null;
   // On a timeout the kernel's last stats snapshot (it posts one every few seconds) is appended:
   // which processes were alive, their threads and CPU -- what a hung script was waiting on.
@@ -47,7 +48,7 @@ const walRun1 = (msg, ms) => new Promise((resolve) => {
   w.onmessage = (ev) => {
     const m = ev.data;
     if (m.t === 'stats') stats = m;
-    else if (m.t === 'out') out += m.s;
+    else if (m.t === 'out') { out += m.s; window.walOutText += m.s; }
     else if (m.t === 'exit') { clearTimeout(timer); w.terminate(); resolve({ out, code: m.code }); }
   };
   w.onerror = (e) => { clearTimeout(timer); w.terminate(); resolve({ out: out + '\n[harness] worker error: ' + (e.message || e), code: -2 }); };
