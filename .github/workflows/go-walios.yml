@@ -41,6 +41,16 @@ jobs:
           for p in */; do p=${p%/}
             GOOS=linux GOARCH=wasm go build -o ../../../out/$p.wasm ./$p > ../../../out/$p.build.log 2>&1 && echo "$p OK" || { echo "$p FAIL"; cat ../../../out/$p.build.log | head -40; }
           done | tee -a ../../../out/summary.txt
+      - name: rclone (linux/wasm)
+        run: |
+          export PATH="$PWD/goroot/bin:$PATH"
+          RV=$(cat farm/go-walios/rclone/VERSION)
+          git clone -q --depth 1 --branch "$RV" https://github.com/rclone/rclone rc
+          mkdir -p rc/cmd/walios && cp farm/go-walios/rclone/cmd-walios/main.go rc/cmd/walios/
+          cd rc && GOOS=linux GOARCH=wasm go mod download
+          python3 ../farm/go-walios/tools/mkpatched.py ../farm/go-walios/rclone/rules.txt "$PWD/../mods" "$(go env GOMODCACHE)" go.mod
+          GOOS=linux GOARCH=wasm go build -mod=mod -trimpath -ldflags "-s -w" -o ../out/rclone.wasm ./cmd/walios 2>&1 | tail -30
+          ls -l ../out/rclone.wasm && echo "rclone OK" >> ../out/summary.txt || echo "rclone FAIL" >> ../out/summary.txt
       - name: Release
         if: always()
         env: { GH_TOKEN: '${{ github.token }}' }
