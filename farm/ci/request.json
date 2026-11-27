@@ -1,1 +1,1 @@
-{"pkgs":"libxfont2 xorg-server xauth xwd xdpyinfo xeyes xclock xterm","max":8,"chunk":1,"publish":true,"base":"farm-2026-11-20-76","note":"R88c (xorg-server: typed no-ops for NoopDDA casts -- wasm signature traps) X11 P0 spike: Xvfb-only xorg-server (farm/ci/aports override) + X client apps, deps from farm-2026-11-20-76's overlays"}
+{"pkgs":"xorg-server twm jwm xsetroot xprop xwininfo","max":6,"chunk":1,"publish":true,"base":"farm-2026-11-20-76","note":"R89 X11 P2: Xvfb runs xkbcomp from /bin; window managers twm + jwm (no rsvg/cairo/pango); xsetroot xprop xwininfo"}

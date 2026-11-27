@@ -1,9 +1,10 @@
 # walios farm override of Alpine's community/xorg-server: builds ONLY Xvfb, the virtual
+# pkgrel 1: xkbcomp from /bin, where walios puts every program (apk add registers /bin/<name>).
 # framebuffer X server (no Xorg/Xephyr/Xnest, no GL, DRM, udev, PCI, SHM, input thread).
 # Clients reach it over TCP 127.0.0.1:6000+N (walios has no AF_UNIX socket() yet).
 pkgname=xorg-server
 pkgver=21.1.26
-pkgrel=0
+pkgrel=1
 pkgdesc="X.Org virtual framebuffer X server (Xvfb) for walios"
 url="https://www.x.org/wiki"
 arch="all"
@@ -63,7 +64,7 @@ build() {
 		-Dlisten_unix=true \
 		-Dlisten_local=false \
 		-Dxkb_dir=/usr/share/X11/xkb \
-		-Dxkb_bin_dir=/usr/bin \
+		-Dxkb_bin_dir=/bin \
 		-Dxkb_output_dir=/tmp \
 		-Ddefault_font_path=/usr/share/fonts/misc,built-ins \
 		. output
