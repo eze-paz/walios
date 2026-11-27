@@ -1,1 +1,1 @@
-{"pkgs":"openssh","max":200,"chunk":3,"publish":true,"note":"R87 openssh canary: wali-cc drops -Wl,--push-state/--pop-state (openssh's libutmps link; every configure link failed -> 'zlib missing')"}
+{"pkgs":"openssh","max":200,"chunk":3,"publish":true,"note":"R87b openssh canary (branch farm/openssh, own queue): wali-cc drops -Wl,--push-state/--pop-state (openssh's libutmps link; every configure link failed -> 'zlib missing')"}
