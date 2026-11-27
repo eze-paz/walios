@@ -1,0 +1,46 @@
+# Go for walios: a GOOS=linux GOARCH=wasm port of Go (syscalls = WALI imports, imported
+# shared memory, single-threaded runtime like wasip1). Applies farm/go-walios/go-walios.patch
+# to Go, builds the toolchain, compiles probes and std for linux/wasm, publishes them.
+# Trigger: push farm/go-walios/** . Plan: sandpie docs/plans/walios-fuse-rclone.md.
+name: go-walios
+on:
+  push:
+    branches: [main]
+    paths: [farm/go-walios/**, .github/workflows/go-walios.yml]
+permissions: { contents: write }
+concurrency: { group: go-walios, cancel-in-progress: true }
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version: stable, cache: false }
+      - name: Patched Go toolchain
+        run: |
+          GOVER=$(cat farm/go-walios/GOVERSION)
+          git clone -q --depth 1 --branch "$GOVER" https://github.com/golang/go.git goroot
+          cd goroot && git apply --whitespace=nowarn ../farm/go-walios/go-walios.patch
+          cd src && GOROOT_BOOTSTRAP=$(go env GOROOT) ./make.bash 2>&1 | tail -40
+          echo "$PWD/../bin" >> "$GITHUB_PATH"
+      - name: std for linux/wasm
+        run: |
+          mkdir -p out
+          export PATH="$PWD/goroot/bin:$PATH"; go version
+          GOOS=linux GOARCH=wasm go build std > out/std.log 2>&1 && echo "std OK" | tee -a out/summary.txt || { echo "std FAIL" | tee -a out/summary.txt; head -150 out/std.log; }
+      - name: Probes
+        run: |
+          export PATH="$PWD/goroot/bin:$PATH"
+          cd farm/go-walios/probes
+          for p in */; do p=${p%/}
+            GOOS=linux GOARCH=wasm go build -o ../../../out/$p.wasm ./$p > ../../../out/$p.build.log 2>&1 && echo "$p OK" || { echo "$p FAIL"; cat ../../../out/$p.build.log | head -40; }
+          done | tee -a ../../../out/summary.txt
+      - name: Release
+        if: always()
+        env: { GH_TOKEN: '${{ github.token }}' }
+        run: |
+          cat out/summary.txt >> "$GITHUB_STEP_SUMMARY" || true
+          find out -size 0 -delete
+          TAG=go-walios-${{ github.run_number }}
+          gh release create "$TAG" --prerelease --title "$TAG" --notes "Go linux/wasm (walios) build" out/*
