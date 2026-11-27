@@ -1,0 +1,103 @@
+# Spike: can Go programs (and rclone) run on walios? Builds small Go probes and rclone for
+# GOOS=wasip1 GOARCH=wasm and publishes them + build logs as a prerelease, to be run in the
+# walios rig. Trigger: push farm/go-spike/request.json. Plan: sandpie docs/plans/walios-fuse-rclone.md.
+name: go-spike
+on:
+  push:
+    branches: [main]
+    paths: [farm/go-spike/request.json, .github/workflows/go-spike.yml]
+permissions: { contents: write }
+concurrency: { group: go-spike, cancel-in-progress: false }
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version: stable, cache: false }
+      - name: Probes
+        run: |
+          set -x
+          go version | tee out-goversion.txt
+          mkdir -p out probes && cd probes
+          go mod init spike >/dev/null 2>&1
+          mkdir hello files gor netdial httpget
+          cat > hello/main.go <<'EOF'
+          package main
+          import ("fmt"; "os"; "runtime")
+          func main() { fmt.Println("hello from go", runtime.Version(), runtime.GOOS, runtime.GOARCH, "args", os.Args[1:], "HOME", os.Getenv("HOME")); wd, err := os.Getwd(); fmt.Println("cwd", wd, err) }
+          EOF
+          cat > files/main.go <<'EOF'
+          package main
+          import ("fmt"; "os"; "path/filepath")
+          func main() {
+            d := os.TempDir(); if len(os.Args) > 1 { d = os.Args[1] }
+            p := filepath.Join(d, "go-spike.txt")
+            fmt.Println("write", os.WriteFile(p, []byte("x"), 0644))
+            fmt.Println("rename", os.Rename(p, p+".2"))
+            es, err := os.ReadDir(d); fmt.Println("readdir", len(es), err)
+            b, err := os.ReadFile(p + ".2"); fmt.Println("read", string(b), err)
+            fmt.Println("remove", os.Remove(p+".2"))
+          }
+          EOF
+          cat > gor/main.go <<'EOF'
+          package main
+          import ("fmt"; "sync"; "time")
+          func main() { var wg sync.WaitGroup; t := time.Now(); for i := 0; i < 8; i++ { wg.Add(1); go func(i int) { defer wg.Done(); time.Sleep(50 * time.Millisecond) }(i) }; wg.Wait(); fmt.Println("8 goroutines x 50ms sleep took", time.Since(t).Round(time.Millisecond)) }
+          EOF
+          cat > netdial/main.go <<'EOF'
+          package main
+          import ("fmt"; "net"; "time")
+          func main() { c, err := net.DialTimeout("tcp", "example.com:80", 10*time.Second); fmt.Println("dial", err); if c == nil { return }; fmt.Fprintf(c, "HEAD / HTTP/1.0\r\nHost: example.com\r\n\r\n"); b := make([]byte, 64); n, err := c.Read(b); fmt.Printf("read %q %v\n", b[:n], err) }
+          EOF
+          cat > httpget/main.go <<'EOF'
+          package main
+          import ("fmt"; "io"; "net/http")
+          func main() { r, err := http.Get("https://api.dropboxapi.com/2/check/app"); fmt.Println("get", err); if r != nil { b, _ := io.ReadAll(r.Body); fmt.Println(r.Status, len(b)) } }
+          EOF
+          for p in hello files gor netdial httpget; do
+            GOOS=wasip1 GOARCH=wasm go build -o ../out/$p.wasm ./$p > ../out/$p.build.log 2>&1 && echo "$p OK" || echo "$p FAIL"
+          done | tee ../out/probes.txt
+      - name: rclone (full and trimmed)
+        run: |
+          TAG=$(git ls-remote --tags --refs https://github.com/rclone/rclone 'v1.*' | sed 's#.*/##' | sort -V | tail -1)
+          echo "rclone $TAG" | tee out/rclone-tag.txt
+          git clone -q --depth 1 --branch "$TAG" https://github.com/rclone/rclone rc
+          cd rc
+          # full binary, as shipped
+          GOOS=wasip1 GOARCH=wasm go build -trimpath -ldflags "-s -w" -o ../out/rclone-full.wasm . > ../out/rclone-full.build.log 2>&1 && echo full OK || echo full FAIL
+          # trimmed: only what the mount plan needs (dropbox + http + local backends, ls/cat/copy/version cmds)
+          mkdir -p cmd/spikemini
+          cat > cmd/spikemini/main.go <<'EOF'
+          package main
+          import (
+            _ "github.com/rclone/rclone/backend/dropbox"
+            _ "github.com/rclone/rclone/backend/http"
+            _ "github.com/rclone/rclone/backend/local"
+            "github.com/rclone/rclone/cmd"
+            _ "github.com/rclone/rclone/cmd/cat"
+            _ "github.com/rclone/rclone/cmd/copy"
+            _ "github.com/rclone/rclone/cmd/ls"
+            _ "github.com/rclone/rclone/cmd/lsf"
+            _ "github.com/rclone/rclone/cmd/version"
+            _ "github.com/rclone/rclone/lib/plugin"
+          )
+          func main() { cmd.Main() }
+          EOF
+          GOOS=wasip1 GOARCH=wasm go build -trimpath -ldflags "-s -w" -o ../out/rclone-mini.wasm ./cmd/spikemini > ../out/rclone-mini.build.log 2>&1 && echo mini OK || echo mini FAIL
+          # the mount command alone, to see what FUSE code needs
+          GOOS=wasip1 GOARCH=wasm go vet ./cmd/mount > ../out/rclone-mount.vet.log 2>&1 || true
+          GOOS=wasip1 GOARCH=wasm go build -o /dev/null ./cmd/mount > ../out/rclone-mount.build.log 2>&1 && echo mount OK || echo mount FAIL
+          # for comparison: linux/amd64 size
+          go build -trimpath -ldflags "-s -w" -o ../out/rclone-linux-amd64 . && ls -l ../out/rclone-linux-amd64 | tee ../out/native-size.txt && rm ../out/rclone-linux-amd64
+      - name: Summary
+        run: |
+          cd out; ls -l | tee sizes.txt
+          for f in *.build.log; do echo "== $f"; head -40 "$f"; done > build-logs.txt
+          cat probes.txt rclone-tag.txt sizes.txt >> "$GITHUB_STEP_SUMMARY"; echo '```' >> "$GITHUB_STEP_SUMMARY"; head -150 build-logs.txt >> "$GITHUB_STEP_SUMMARY"; echo '```' >> "$GITHUB_STEP_SUMMARY"
+      - name: Release
+        env: { GH_TOKEN: '${{ github.token }}' }
+        run: |
+          TAG=go-spike-${{ github.run_number }}
+          gh release create "$TAG" --prerelease --title "$TAG" --notes "Go/rclone wasip1 spike (sandpie docs/plans/walios-fuse-rclone.md)" out/*
