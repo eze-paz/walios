@@ -1401,10 +1401,10 @@ index 1cf146b4..175f103e 100644
  
 diff --git a/src/runtime/lock_linux_wasm.go b/src/runtime/lock_linux_wasm.go
 new file mode 100644
-index 00000000..891408ca
+index 00000000..f76d4d74
 --- /dev/null
 +++ b/src/runtime/lock_linux_wasm.go
-@@ -0,0 +1,117 @@
+@@ -0,0 +1,153 @@
 +// Copyright 2023 The Go Authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style
 +// license that can be found in the LICENSE file.
@@ -1412,6 +1412,8 @@ index 00000000..891408ca
 +//go:build linux && wasm
 +
 +package runtime
++
++import "unsafe"
 +
 +// wasm has no support for threads yet. There is no preemption.
 +// See proposal: https://github.com/WebAssembly/threads
@@ -1481,7 +1483,30 @@ index 00000000..891408ca
 +		throw("notewakeup - double wakeup")
 +	}
 +	n.key = 1
++	// Wake the goroutines parked in notetsleepg(n, -1).
++	for i := 0; i < len(noteWaiters); {
++		if noteWaiters[i].n == uintptr(unsafe.Pointer(n)) {
++			gp := noteWaiters[i].gp.ptr()
++			noteWaiters[i] = noteWaiters[len(noteWaiters)-1]
++			noteWaiters = noteWaiters[:len(noteWaiters)-1]
++			goready(gp, 1)
++			continue
++		}
++		i++
++	}
 +}
++
++// Goroutines waiting in notetsleepg(n, -1). wasip1's version spins with Gosched, which
++// keeps the single-threaded scheduler busy for as long as the wait lasts: os/signal's
++// loop waits like that for the whole life of the program, so the scheduler never idled
++// in netpoll and every socket or /dev/fuse event waited for the next periodic poll
++// (~10 ms per FUSE request under rclone mount). Park instead; notewakeup readies them.
++type noteWaiter struct { // uintptrs: notewakeup may run where write barriers are not allowed
++	n  uintptr // *note
++	gp guintptr
++}
++
++var noteWaiters []noteWaiter
 +
 +func notesleep(n *note) {
 +	throw("notesleep not supported on linux/wasm")
@@ -1497,6 +1522,17 @@ index 00000000..891408ca
 +	gp := getg()
 +	if gp == gp.m.g0 {
 +		throw("notetsleepg on g0")
++	}
++
++	if ns < 0 {
++		if n.key != 0 {
++			return true
++		}
++		var gu guintptr
++		gu.set(gp)
++		noteWaiters = append(noteWaiters, noteWaiter{uintptr(unsafe.Pointer(n)), gu})
++		gopark(nil, nil, waitReasonSleep, traceBlockSleep, 1)
++		return n.key != 0
 +	}
 +
 +	deadline := nanotime() + ns
