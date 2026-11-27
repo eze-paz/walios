@@ -5,7 +5,7 @@
 # docs/plans/walios-fuse-rclone.md, phase 1).
 #   STAGE=libfuse|pjdfstest build.sh <toolchain dir> <out dir>
 set -uo pipefail
-TC=$1; OUT=$(realpath -m "$2"); mkdir -p "$OUT"
+TC=$(realpath "$1"); OUT=$(realpath -m "$2"); mkdir -p "$OUT"
 . "$TC/env.sh"
 export PATH="$TC/bin:$PATH"
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
