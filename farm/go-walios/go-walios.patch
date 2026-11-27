@@ -48,7 +48,7 @@ index 19ed197a..14544971 100644
  	if !*flagAslr && ctxt.BuildMode != BuildModeCShared {
  		Errorf("-aslr=false is only allowed for -buildmode=c-shared")
 diff --git a/src/cmd/link/internal/wasm/asm.go b/src/cmd/link/internal/wasm/asm.go
-index d8f4a3cd..d4f3a8b7 100644
+index d8f4a3cd..76647a48 100644
 --- a/src/cmd/link/internal/wasm/asm.go
 +++ b/src/cmd/link/internal/wasm/asm.go
 @@ -69,7 +69,8 @@ func readWasmImport(ldr *loader.Loader, s loader.Sym) obj.WasmImport {
@@ -61,7 +61,7 @@ index d8f4a3cd..d4f3a8b7 100644
  	"wasm_export__start":      {},                                                         //
  	"wasm_export_run":         {Params: []byte{I32, I32}},                                 // argc, argv
  	"wasm_export_resume":      {Params: []byte{}},                                         //
-@@ -246,10 +247,12 @@ func asmb2(ctxt *ld.Link, ldr *loader.Loader) {
+@@ -246,16 +247,21 @@ func asmb2(ctxt *ld.Link, ldr *loader.Loader) {
  	}
  
  	writeTypeSec(ctxt, types)
@@ -76,7 +76,16 @@ index d8f4a3cd..d4f3a8b7 100644
  	writeGlobalSec(ctxt)
  	writeExportSec(ctxt, ldr, len(hostImports))
  	writeElementSec(ctxt, uint64(len(hostImports)), uint64(len(fns)))
-@@ -316,10 +319,14 @@ func writeTypeSec(ctxt *ld.Link, types []*wasmFuncType) {
+ 	writeCodeSec(ctxt, fns)
+ 	writeDataSec(ctxt)
+ 	writeProducerSec(ctxt)
++	if buildcfg.GOOS == "linux" {
++		writeWaliAbiSec(ctxt)
++	}
+ 	if !*ld.FlagS {
+ 		writeNameSec(ctxt, len(hostImports), fns)
+ 	}
+@@ -316,10 +322,14 @@ func writeTypeSec(ctxt *ld.Link, types []*wasmFuncType) {
  
  // writeImportSec writes the section that lists the functions that get
  // imported from the WebAssembly host, usually JavaScript.
@@ -93,7 +102,7 @@ index d8f4a3cd..d4f3a8b7 100644
  	for _, fn := range hostImports {
  		if fn.Module != "" {
  			writeName(ctxt.Out, fn.Module)
-@@ -330,6 +337,21 @@ func writeImportSec(ctxt *ld.Link, hostImports []*wasmFunc) {
+@@ -330,6 +340,21 @@ func writeImportSec(ctxt *ld.Link, hostImports []*wasmFunc) {
  		ctxt.Out.WriteByte(0x00) // func import
  		writeUleb128(ctxt.Out, uint64(fn.Type))
  	}
@@ -115,7 +124,7 @@ index d8f4a3cd..d4f3a8b7 100644
  
  	writeSecSize(ctxt, sizeOffset)
  }
-@@ -418,12 +440,15 @@ func writeExportSec(ctxt *ld.Link, ldr *loader.Loader, lenHostImports int) {
+@@ -418,12 +443,15 @@ func writeExportSec(ctxt *ld.Link, ldr *loader.Loader, lenHostImports int) {
  	sizeOffset := writeSecHeader(ctxt, sectionExport)
  
  	switch buildcfg.GOOS {
@@ -132,6 +141,23 @@ index d8f4a3cd..d4f3a8b7 100644
  			entryExpName = "_start"
  		case ld.BuildModeCShared:
  			entry = "_rt0_wasm_wasip1_lib"
+@@ -582,6 +610,16 @@ func writeDataSec(ctxt *ld.Link) {
+ 	writeSecSize(ctxt, sizeOffset)
+ }
+ 
++// writeWaliAbiSec marks a linux/wasm binary for the WALI kernel (walios): Go's struct
++// layouts are linux/amd64's, so pointers and size_t occupy 8 bytes inside structs (iovec,
++// msghdr, sigaction, argv arrays). walios reads the same custom section for its ILP32 ABI.
++func writeWaliAbiSec(ctxt *ld.Link) {
++	sizeOffset := writeSecHeader(ctxt, sectionCustom)
++	writeName(ctxt.Out, "wali.abi")
++	ctxt.Out.WriteString("lp64")
++	writeSecSize(ctxt, sizeOffset)
++}
++
+ // writeProducerSec writes an optional section that reports the source language and compiler version.
+ func writeProducerSec(ctxt *ld.Link) {
+ 	sizeOffset := writeSecHeader(ctxt, sectionCustom)
 diff --git a/src/crypto/x509/root_wasm.go b/src/crypto/x509/root_wasm.go
 index 275c9213..dee687ee 100644
 --- a/src/crypto/x509/root_wasm.go
