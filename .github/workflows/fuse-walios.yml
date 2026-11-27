@@ -44,8 +44,8 @@ jobs:
         env: { GH_TOKEN: '${{ github.token }}' }
         run: |
           set -x; mkdir -p out; touch out/summary.txt
-          { echo '## libfuse'; echo '```'; cat out/summary.txt; for l in out/libfuse-setup.log out/libfuse-build.log; do echo "--- $l"; tail -40 "$l" 2>/dev/null; done; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
-          find out -size 0 -delete; ls -la out
+          { echo '## libfuse'; echo '```'; cat out/summary.txt; for l in out/libfuse-setup.log out/libfuse-build.log; do echo "--- $l"; tail -40 "$l" 2>/dev/null || true; done; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          find out -size 0 -delete; ls -la out || true
           gh release create "fuse-walios-${{ github.run_number }}" --prerelease --target "${{ github.sha }}" --title "fuse-walios-${{ github.run_number }}" --notes "FUSE test filesystems for walios: libfuse $(cat farm/fuse-walios/LIBFUSE_VERSION) examples, fusermount3, pjdfstest" out/* \
             || gh release upload "fuse-walios-${{ github.run_number }}" out/* --clobber
       - name: Build pjdfstest
@@ -56,6 +56,6 @@ jobs:
         env: { GH_TOKEN: '${{ github.token }}' }
         run: |
           set -x; mkdir -p out2; touch out2/summary.txt
-          { echo '## pjdfstest'; echo '```'; cat out2/summary.txt; for l in out2/pjdfstest-configure.log out2/pjdfstest-build.log; do echo "--- $l"; tail -40 "$l" 2>/dev/null; done; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          { echo '## pjdfstest'; echo '```'; cat out2/summary.txt; for l in out2/pjdfstest-configure.log out2/pjdfstest-build.log; do echo "--- $l"; tail -40 "$l" 2>/dev/null || true; done; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           find out2 -size 0 -delete
           gh release upload "fuse-walios-${{ github.run_number }}" out2/* --clobber

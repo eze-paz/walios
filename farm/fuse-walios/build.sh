@@ -22,8 +22,12 @@ if [ "$STAGE" = libfuse ]; then
   # abuild-meson's options. Output goes to the job log as it comes (unbuffered).
   export PYTHONUNBUFFERED=1 CFLAGS=-O2 LDFLAGS= CPPFLAGS= PKG_CONFIG_PATH= PKG_CONFIG_ALLOW_SYSTEM_LIBS=1 \
     PKG_CONFIG_LIBDIR="$WALI_SYSROOT/lib/pkgconfig" CC_FOR_BUILD=/usr/bin/gcc
-  timeout 600 abuild-meson -Dexamples=true -Dutils=true -Dtests=false -Dinitscriptdir= . build 2>&1 | tee "$OUT/libfuse-setup.log"
-  [ "${PIPESTATUS[0]}" = 0 ] || { sum "libfuse setup FAIL (rc ${PIPESTATUS[0]})"; exit 1; }
+  echo "PATH=$PATH"; command -v abuild-meson meson ninja wali-cc; meson --version; ls
+  set -x
+  timeout 600 abuild-meson -Dexamples=true -Dutils=true -Dtests=false -Dinitscriptdir= . build > "$OUT/libfuse-setup.log" 2>&1; rc=$?
+  set +x
+  cat "$OUT/libfuse-setup.log" | tail -80
+  [ "$rc" = 0 ] || { sum "libfuse setup FAIL (rc $rc)"; tail -40 build/meson-logs/meson-log.txt 2>/dev/null; exit 1; }
   if timeout 1200 ninja -C build -k 0 > "$OUT/libfuse-build.log" 2>&1; then sum "libfuse build OK"; else sum "libfuse build partial"; grep -B2 -A12 "error:" "$OUT/libfuse-build.log" | head -120; tail -30 "$OUT/libfuse-build.log"; fi
   for x in hello hello_ll passthrough passthrough_ll passthrough_fh null ioctl poll notify_inval_entry notify_inval_inode invalidate_path; do
     if [ -f "build/example/$x" ]; then cp "build/example/$x" "$OUT/fuse-$x.wasm"; sum "example $x OK ($(stat -c %s "build/example/$x") bytes)"; else sum "example $x missing"; fi
