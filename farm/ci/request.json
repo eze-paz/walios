@@ -1,1 +1,1 @@
-{"pkgs":"openssh","max":1,"chunk":1,"publish":true,"base":"farm-2026-11-27-95","note":"R87c openssh only, deps from farm-2026-11-27-95's overlays (new base key); build-one drops --with-ssl-engine on the no-engine sysroot OpenSSL"}
+{"pkgs":"libxfont2 xorg-server xauth xwd xdpyinfo xeyes xclock xterm","max":8,"chunk":1,"publish":true,"base":"farm-2026-11-20-76","note":"R88 X11 P0 spike: Xvfb-only xorg-server (farm/ci/aports override) + X client apps, deps from farm-2026-11-20-76's overlays"}

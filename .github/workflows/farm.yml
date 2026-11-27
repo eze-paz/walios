@@ -71,6 +71,12 @@ jobs:
       - uses: actions/checkout@v4
       - name: Alpine aports (GitHub mirror)
         run: git clone -q --depth 1 https://github.com/alpinelinux/aports.git ../aports && git -C ../aports log -1 --format='aports %h %cs'
+      # farm/ci/aports/<repo>/<pkg>/ replaces Alpine's recipe of the same name (xorg-server:
+      # Xvfb only, no GL/DRM/udev). The plan and the build jobs then see only ours.
+      - name: Farm recipe overrides
+        run: |
+          [ -d farm/ci/aports ] || exit 0
+          for d in farm/ci/aports/*/*/; do r=${d#farm/ci/aports/}; r=${r%/}; rm -rf "../aports/$r"; mkdir -p "../aports/$r"; cp -r "$d." "../aports/$r"; echo "override $r"; done
       - name: Inputs (dispatch form, or farm/ci/request.json on push)
         id: in
         env:
