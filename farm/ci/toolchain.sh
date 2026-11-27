@@ -76,6 +76,15 @@ fi
 if [ ! -f sysroot/lib/libffi.a ]; then
   fetch $REL/$XTAG/libffi-wali$([ "$ABI" = ilp32 ] && echo 32).tar.gz ffi.tgz && tar xzf ffi.tgz -C sysroot --strip-components=1 && rm ffi.tgz
 fi
+# walios Python's python3-dev (runtimes.yml's python-embed.tar.gz, from the CPython recipe that
+# builds python_cxx.wasm): libpython3.14.a + libpython3.14-wali.a (its bundled libraries and
+# walios glue) and include/python3.14, for programs that embed Python -- samba's waf pyembed
+# check links Py_Initialize. python3-config below hands them out. (ILP32 only: the runtimes
+# workflow builds that ABI.)
+PYEMBED_TAG=${WALI_PYEMBED_TAG:-@PYEMBED_TAG@}
+if [ "$ABI" = ilp32 ] && [ ! -f sysroot/lib/libpython3.14.a ]; then
+  fetch $REL/$PYEMBED_TAG/python-embed.tar.gz pe.tgz && tar xzf pe.tgz -C sysroot && rm pe.tgz
+fi
 L=$TC/$P/bin
 S=$TC/sysroot
 # C++ exceptions need the wasm EH tag __cpp_exception defined once per program (libc
@@ -417,6 +426,33 @@ fi
 printf '%s\n' "$out"
 EOF
 chmod +x bin/pkg-config
+# python3-config for the target (python3-dev's, for walios Python 3.14): the headers and, with
+# --embed, the libraries of the interpreter python_cxx.wasm is (sysroot/lib/libpython3.14*.a).
+# The build host's python3-config named its own x86 libpython, and waf's "Testing pyembed
+# configuration" stopped talloc, tdb, tevent and samba (R84). build-one.sh exports it as
+# PYTHON_CONFIG, the variable waf and autoconf's AX_PYTHON_DEVEL read.
+if [ -f $S/lib/libpython3.14.a ]; then
+cat > bin/python3-config <<EOF
+#!/bin/sh
+embed=; for a in "\$@"; do [ "\$a" = --embed ] && embed=1; done
+libs="-lm"; [ -n "\$embed" ] && libs="-lpython3.14 -lpython3.14-wali -lffi -lz -lm"
+out=
+for a in "\$@"; do case "\$a" in
+  --prefix|--exec-prefix) out="\$out $S";;
+  --includes) out="\$out -I$S/include/python3.14";;
+  --cflags) out="\$out -I$S/include/python3.14 -DNDEBUG -O2";;
+  --libs) out="\$out \$libs";;
+  --ldflags) out="\$out -L$S/lib \$libs";;
+  --extension-suffix) out="\$out .cpython-314-x86_64-linux-gnu.so";;
+  --abiflags|--embed) ;;
+  --help) echo "Usage: \$0 --prefix|--exec-prefix|--includes|--libs|--cflags|--ldflags|--extension-suffix|--help|--abiflags|--configdir|--embed"; exit 0;;
+  --configdir) out="\$out $S/lib/python3.14/config-3.14-x86_64-linux-gnu";;
+  *) echo "Usage: \$0 --prefix|--exec-prefix|--includes|--libs|--cflags|--ldflags|--extension-suffix|--help|--abiflags|--configdir|--embed" >&2; exit 2;;
+esac; done
+echo \$out
+EOF
+chmod +x bin/python3-config && ln -sf python3-config bin/python3.14-config
+fi
 # ELF-only assembler directives in C sources: symbol versions (.symver, attr's compat
 # symbols) and glibc-style link warnings (.gnu.warning.* sections, alsa-lib). wasm objects
 # have neither and clang's wasm assembler rejects them. wali-noelfasm <compiler command>:

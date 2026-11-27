@@ -24,25 +24,33 @@ rm -f "$OVERLAY/usr/include/error.h"
 if command -v python3.14 >/dev/null; then
   pinc=$(python3.14 -c 'import sysconfig; print(sysconfig.get_paths()["include"])')
   if grep -q 'define SIZEOF_VOID_P 4' "$pinc/pyconfig.h" 2>/dev/null; then
-    if [ ! -f "$OVERLAY/usr/lib/pkgconfig/python3.pc" ]; then
-      mkdir -p "$OVERLAY/usr/include/python3.14" "$OVERLAY/usr/lib/pkgconfig" && cp -r "$pinc/." "$OVERLAY/usr/include/python3.14/"
-      for n in python3 python-3.14 python-3.13 python-3.12 python-3.11; do for e in "" -embed; do
-        printf 'prefix=/usr
+    [ -f "$OVERLAY/usr/include/python3.14/Python.h" ] ||
+      { mkdir -p "$OVERLAY/usr/include/python3.14" && cp -r "$pinc/." "$OVERLAY/usr/include/python3.14/"; }
+    mkdir -p "$OVERLAY/usr/lib/pkgconfig"
+    # -embed: a program that embeds Python links the interpreter itself, walios python3-dev's
+    # libpython3.14.a in the sysroot (toolchain.sh), as Alpine's python3-embed.pc names its
+    # libpython3.14.so.
+    elibs=; [ -f "${WALI_SYSROOT:-/nonexistent}/lib/libpython3.14.a" ] && elibs="-lpython3.14 -lpython3.14-wali -lffi -lz -lm"
+    for n in python3 python-3.14 python-3.13 python-3.12 python-3.11; do for e in "" -embed; do
+      l=; [ -n "$e" ] && l=$elibs
+      printf 'prefix=/usr
 includedir=${prefix}/include/python3.14
 Name: Python
 Description: walios Python
 Version: 3.14
-Libs:
+Libs: %s
 Cflags: -I${includedir}
-' > "$OVERLAY/usr/lib/pkgconfig/$n$e.pc"
-      done; done
-    fi
+' "$l" > "$OVERLAY/usr/lib/pkgconfig/$n$e.pc"
+    done; done
     # meson's python module reads the interpreter's own python-3.14.pc (its LIBPC dir), whose
     # includedir is the runner's path -- which PKG_CONFIG_SYSROOT_DIR then puts under the
     # overlay ("Cannot compile `Python.h`", numpy). The same headers, at that path.
     [ -e "$OVERLAY$pinc" ] || { mkdir -p "$(dirname "$OVERLAY$pinc")" && ln -s "$pinc" "$OVERLAY$pinc"; }
   fi
 fi
+# python3-config of walios Python (toolchain.sh), where the build host's would answer for its
+# own x86 interpreter: waf (talloc, samba) and AX_PYTHON_DEVEL read PYTHON_CONFIG.
+[ -x "$WALI_TC/bin/python3-config" ] && export PYTHON_CONFIG="$WALI_TC/bin/python3-config"
 log="$OUT/$pkg.log"; : > "$log"
 [ -n "${FARM_CROSS:-}" ] && echo "farm: native configure (cross_compiling=$FARM_CROSS): the cross build stopped on a check it cannot answer ($pkg.cross.log)" >> "$log"
 [ -n "${FARM_SHARED:-}" ] && echo "farm: shared libraries on: libtool could not build a module with them off ($pkg.static.log)" >> "$log"
