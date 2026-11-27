@@ -107,6 +107,16 @@ while (queue.length && Object.keys(meta).length < MAX) {
 }
 if (process.env.ALIASES_OUT) fs.writeFileSync(process.env.ALIASES_OUT, JSON.stringify(aliases));
 const set = new Set(Object.keys(meta).filter(p => !meta[p].missing));
+// A canary on a base release (BASE) builds only the set, but links against base packages too:
+// read the rest of the closure (not built) so deps.json names them -- libX11.a needs libxcb's
+// archive, which the base's overlays have but a set-only closure never listed (R88: xcb_disconnect).
+if (process.env.BASE) while (queue.length) {
+  const p = queue.shift(), txt = apkbuild(p);
+  if (!txt) { meta[p] = { missing: true, deps: [] }; continue; }
+  meta[p] = { deps: [...new Set(depsOf(txt).map(canon))].filter(d => d !== p) };
+  for (const d of meta[p].deps) if (!seen.has(d)) { seen.add(d); queue.push(d); }
+}
+const known = (d) => meta[d] && !meta[d].missing && (set.has(d) || process.env.BASE);
 const wave = {};
 const level = (p, stack = new Set()) => {
   if (wave[p] !== undefined) return wave[p];
@@ -128,7 +138,7 @@ console.log(JSON.stringify({ count: out.count, seeds: out.seeds, missing: missin
 // archives from the overlay, not every library built so far (unrelated archives clashed).
 if (process.env.DEPS_OUT) {
   const closure = {};
-  const walk = (p, acc) => { for (const d of meta[p].deps) if (set.has(d) && !acc.has(d)) { acc.add(d); walk(d, acc); } return acc; };
+  const walk = (p, acc) => { for (const d of meta[p].deps) if (known(d) && !acc.has(d)) { acc.add(d); walk(d, acc); } return acc; };
   for (const p of set) closure[p] = [...walk(p, new Set())].filter(d => d !== p).sort();
   fs.writeFileSync(process.env.DEPS_OUT, JSON.stringify(closure));
 }

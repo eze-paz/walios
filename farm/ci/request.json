@@ -1,1 +1,1 @@
-{"pkgs":"libxfont2 xorg-server xauth xwd xdpyinfo xeyes xclock xterm","max":8,"chunk":1,"publish":true,"base":"farm-2026-11-20-76","note":"R88 X11 P0 spike: Xvfb-only xorg-server (farm/ci/aports override) + X client apps, deps from farm-2026-11-20-76's overlays"}
+{"pkgs":"libxfont2 xorg-server xauth xwd xdpyinfo xeyes xclock xterm","max":8,"chunk":1,"publish":true,"base":"farm-2026-11-20-76","note":"R88b (plan: base-mode closure includes base packages) X11 P0 spike: Xvfb-only xorg-server (farm/ci/aports override) + X client apps, deps from farm-2026-11-20-76's overlays"}
