@@ -25,10 +25,12 @@ jobs:
       - if: steps.tc.outputs.cache-hit != 'true'
         run: bash farm/ci/toolchain.sh "$TC"
       - run: bash farm/ci/libc-envpatch.sh "$TC"
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.14' }
       - name: Build tools
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq autoconf automake libtool pkgconf ninja-build >/dev/null
-          sudo pip3 install -q --break-system-packages --upgrade meson
+          python3 -m pip install -q meson; meson --version
           printf '#!/bin/sh\nWALI_HOST_ENV=1 exec timeout -k 5 120 node %s "$@"\n' "$PWD/host/host.js" | sudo tee /usr/local/bin/wali-run >/dev/null
           sudo chmod +x /usr/local/bin/wali-run
       # stdin is /dev/null: a build step that reads stdin (a configure probe run through
@@ -41,7 +43,7 @@ jobs:
         if: always()
         env: { GH_TOKEN: '${{ github.token }}' }
         run: |
-          mkdir -p out; touch out/summary.txt
+          set -x; mkdir -p out; touch out/summary.txt
           { echo '## libfuse'; echo '```'; cat out/summary.txt; for l in out/libfuse-setup.log out/libfuse-build.log; do echo "--- $l"; tail -40 "$l" 2>/dev/null; done; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           find out -size 0 -delete; ls -la out
           gh release create "fuse-walios-${{ github.run_number }}" --prerelease --target "${{ github.sha }}" --title "fuse-walios-${{ github.run_number }}" --notes "FUSE test filesystems for walios: libfuse $(cat farm/fuse-walios/LIBFUSE_VERSION) examples, fusermount3, pjdfstest" out/* \
@@ -53,7 +55,7 @@ jobs:
         if: always()
         env: { GH_TOKEN: '${{ github.token }}' }
         run: |
-          mkdir -p out2; touch out2/summary.txt
+          set -x; mkdir -p out2; touch out2/summary.txt
           { echo '## pjdfstest'; echo '```'; cat out2/summary.txt; for l in out2/pjdfstest-configure.log out2/pjdfstest-build.log; do echo "--- $l"; tail -40 "$l" 2>/dev/null; done; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           find out2 -size 0 -delete
           gh release upload "fuse-walios-${{ github.run_number }}" out2/* --clobber

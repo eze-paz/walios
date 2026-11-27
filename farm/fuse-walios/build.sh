@@ -18,10 +18,13 @@ if [ "$STAGE" = libfuse ]; then
   ( cd "$W" && curl -sSfL --retry 8 -o fuse.tgz "https://github.com/libfuse/libfuse/releases/download/fuse-$FUSEVER/fuse-$FUSEVER.tar.gz" && tar xzf fuse.tgz ) || { sum "libfuse download FAIL"; exit 1; }
   cd "$W/fuse-$FUSEVER"
   for p in "$HERE"/patches/libfuse-*.patch; do [ -f "$p" ] && { patch -p1 < "$p" || sum "patch $p FAIL"; }; done
-  timeout 600 meson setup --cross-file "$TC/wali.meson" --prefix=/usr --default-library=static \
-    -Dexamples=true -Dutils=true -Dtests=false -Dinitscriptdir= build > "$OUT/libfuse-setup.log" 2>&1 \
-    || { sum "libfuse setup FAIL"; tail -60 "$OUT/libfuse-setup.log"; exit 1; }
-  if timeout 1200 ninja -C build -k 0 > "$OUT/libfuse-build.log" 2>&1; then sum "libfuse build OK"; else sum "libfuse build partial"; grep -B2 -A12 "error:" "$OUT/libfuse-build.log" | head -120; fi
+  # The farm's environment for a meson recipe (farm/ci/build-one.sh): its pkg-config dirs,
+  # abuild-meson's options. Output goes to the job log as it comes (unbuffered).
+  export PYTHONUNBUFFERED=1 CFLAGS=-O2 LDFLAGS= CPPFLAGS= PKG_CONFIG_PATH= PKG_CONFIG_ALLOW_SYSTEM_LIBS=1 \
+    PKG_CONFIG_LIBDIR="$WALI_SYSROOT/lib/pkgconfig" CC_FOR_BUILD=/usr/bin/gcc
+  timeout 600 abuild-meson -Dexamples=true -Dutils=true -Dtests=false -Dinitscriptdir= . build 2>&1 | tee "$OUT/libfuse-setup.log"
+  [ "${PIPESTATUS[0]}" = 0 ] || { sum "libfuse setup FAIL (rc ${PIPESTATUS[0]})"; exit 1; }
+  if timeout 1200 ninja -C build -k 0 > "$OUT/libfuse-build.log" 2>&1; then sum "libfuse build OK"; else sum "libfuse build partial"; grep -B2 -A12 "error:" "$OUT/libfuse-build.log" | head -120; tail -30 "$OUT/libfuse-build.log"; fi
   for x in hello hello_ll passthrough passthrough_ll passthrough_fh null ioctl poll notify_inval_entry notify_inval_inode invalidate_path; do
     if [ -f "build/example/$x" ]; then cp "build/example/$x" "$OUT/fuse-$x.wasm"; sum "example $x OK ($(stat -c %s "build/example/$x") bytes)"; else sum "example $x missing"; fi
   done
