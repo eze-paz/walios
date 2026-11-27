@@ -240,6 +240,7 @@ if [ \$link = 1 ] && [ \$shared = 1 ] && [ -n "\${WALI_SIDE:-}" ]; then
   X2=(); for a in $S/lib/libssl.a $S/lib/libcrypto.a; do [ -f "\$a" ] && X2+=("\$a"); done
   grep -qx pthread_create "\$WALI_SIDE" || X2+=($S/lib/libwali-sidenothreads.a)
   grep -qx dladdr "\$WALI_SIDE" || X2+=($S/lib/libwali-sidedladdr.a)   # lua-cqueues, lua-ossl
+  grep -qx getprogname "\$WALI_SIDE" || X2+=($S/lib/libwali-sideprogname.a)   # perl-gd (fontconfig)
   exec $L/clang "\${F[@]}" "\${LP[@]}" "\${S2[@]}" "\${LATE[@]}" "\${D2[@]}" "\${X2[@]}" $S/lib/libwali-sideunwind.a $S/lib/libclang_rt.builtins.a -nostdlib -Wl,--no-entry,--experimental-pic,--shared-memory,--allow-undefined-file=\$WALI_SIDE,--export-if-defined=__wasm_call_ctors,--export-if-defined=__wasm_init_tls,--export-if-defined=__tls_size,--export-if-defined=__tls_align $SIDEOBJ
 fi
 if [ \$link = 1 ] && [ \$shared = 1 ]; then
@@ -683,6 +684,10 @@ if [ ! -f $S/lib/libwali-sidedladdr.a ]; then
   $L/clang $TGT --sysroot=$S -nostdlibinc -isystem $S/include -O2 -fPIC -matomics -mbulk-memory -pthread \
     -c "$HERE"/shim-side/dladdr-side.c -o $S/lib/dladdr-side.o
   $L/llvm-ar rcs $S/lib/libwali-sidedladdr.a $S/lib/dladdr-side.o
+fi
+if [ ! -f $S/lib/libwali-sideprogname.a ]; then
+  $L/clang $TGT --sysroot=$S -nostdlibinc -isystem $S/include -O2 -fPIC -matomics -mbulk-memory -pthread     -c "$HERE"/shim-side/progname-side.c -o $S/lib/progname-side.o
+  $L/llvm-ar rcs $S/lib/libwali-sideprogname.a $S/lib/progname-side.o
 fi
 # closefrom(), glibc 2.34+'s declaration (libwali-farm.a defines it): xapian-core calls it once
 # configure's link test finds it.

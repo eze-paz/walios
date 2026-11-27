@@ -349,20 +349,25 @@ done
 # contain tcl.h", R85), not through the compiler that also sees the overlay.
 for f in "$OVERLAY"/usr/lib/*Config.sh; do
   [ -f "$f" ] || continue; n=$(basename "$f")
-  [ -e "/usr/lib/$n" ] || { sed -e "s|/usr/include|$OVERLAY/usr/include|g" -e "s|-L/usr/lib|-L$OVERLAY/usr/lib|g" "$f" | sudo -n tee "/usr/lib/$n" >/dev/null 2>&1 && echo "farm: /usr/lib/$n from overlay" >> "$log"; }
+  # TCL_SHARED_BUILD=1: a module linking the static tcl archive is a side module that carries
+  # it, which postgresql's PL/Tcl refused ("Tcl is not a shared library", R85).
+  [ -e "/usr/lib/$n" ] || { sed -e "s|/usr/include|$OVERLAY/usr/include|g" -e "s|-L/usr/lib|-L$OVERLAY/usr/lib|g" -e "s|^TCL_SHARED_BUILD=0|TCL_SHARED_BUILD=1|" "$f" | sudo -n tee "/usr/lib/$n" >/dev/null 2>&1 && echo "farm: /usr/lib/$n from overlay" >> "$log"; }
 done
 # apr's build tree (libtool, make_exports.awk, apr_rules.mk) sits at /usr/share/build-1 on
 # Alpine and apr-1-config --installbuilddir names that path: apr-util ran "/usr/share/build-1/
 # libtool: No such file" (R85). Symlinked like the lib dirs above.
-for d in "$OVERLAY"/usr/share/build-*/; do
-  [ -d "$d" ] || continue; n=$(basename "$d")
-  [ -e "/usr/share/$n" ] || { sudo -n ln -s "$OVERLAY/usr/share/$n" "/usr/share/$n" 2>/dev/null && echo "farm: /usr/share/$n -> overlay" >> "$log"; }
+# Apache's (rules.mk, config_vars.mk at /usr/share/apache2/build; headers apxs -q INCLUDEDIR
+# names as /usr/include/apache2): apache-mod-fcgid "rules.mk: No such file" (R85). And com_err's
+# et/ awk scripts, which the overlay's compile_et reads from /usr/share/et (krb5, R85).
+for d in "$OVERLAY"/usr/share/build-*/ "$OVERLAY"/usr/share/apache2/ "$OVERLAY"/usr/include/apache2/ "$OVERLAY"/usr/share/et/; do
+  [ -d "$d" ] || continue; n=${d#"$OVERLAY"/usr/}; n=${n%/}
+  [ -e "/usr/$n" ] || { sudo -n ln -s "$OVERLAY/usr/$n" "/usr/$n" 2>/dev/null && echo "farm: /usr/$n -> overlay" >> "$log"; }
 done
 # A dep's *-config script where recipes name it by its Alpine path: --with-apr=/usr is
 # /usr/bin/apr-1-config (apr-util, apache2 and its modules: "the --with-apr parameter is
 # incorrect"). A wrapper, not a symlink: apr-1-config finds its tree from its own path ($0),
 # so it must run from the overlay. Only shell scripts, and only where the host has none.
-for c in "$OVERLAY"/usr/bin/*-config; do
+for c in "$OVERLAY"/usr/bin/*-config "$OVERLAY"/usr/bin/apxs; do   # apxs: mod_wsgi "apxs is required"
   [ -f "$c" ] && head -c2 "$c" | grep -q '#!' || continue; n=$(basename "$c")
   if [ ! -e "/usr/bin/$n" ]; then
     printf '#!/bin/sh\nexec "%s" "$@"\n' "$c" | sudo -n tee "/usr/bin/$n" >/dev/null 2>&1 && sudo -n chmod 755 "/usr/bin/$n" 2>/dev/null
@@ -452,6 +457,12 @@ _t0=$(date +%s)
 # hang a job until its timeout.
 ABIFLAGS="$ABIFLAGS" LUAMOD="$LUAMOD" LUASUB="$LUASUB" PERLXS="$PERLXS" PERLXS_MAKE="$PERLXS_MAKE" OVERLAY="$OVERLAY" HERE="$HERE" BDIR="$bdir" SRC="$SRC" PKGDIR="$pkgdir"   PERL_MM_USE_DEFAULT=1 AUTOMATED_TESTING=1 NONINTERACTIVE_TESTING=1 DEBIAN_FRONTEND=noninteractive   fakeroot -- bash "$bdir/.farm-build.sh" >>"$log" 2>&1 </dev/null
 BUILD_SECS=$(( $(date +%s) - _t0 ))
+# A Makefile that asks pkg-config where Lua modules go (lua5.4.pc's INSTALL_LMOD) gets the
+# overlay's path, so DESTDIR held $OVERLAY/usr/... (lua-curl, R85): those files belong at /usr.
+if [ -d "$pkgdir$OVERLAY" ]; then
+  cp -a "$pkgdir$OVERLAY/." "$pkgdir/" && rm -rf "${pkgdir:?}${OVERLAY:?}" && echo "farm: install under the overlay path moved to /" >> "$log"
+  d="$pkgdir${OVERLAY%/*}"; while [ "$d" != "$pkgdir" ] && rmdir "$d" 2>/dev/null; do d="${d%/*}"; done
+fi
 
 # Only wasm archives may reach the overlay: every later link pulls all overlay archives into
 # one group, and a native one (a recipe that built a helper library with the host gcc) made
