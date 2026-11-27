@@ -18,3 +18,11 @@ mirror golang.org/x/net@v0.62.0/internal/socket
 mirror golang.org/x/net@v0.62.0/ipv4
 mirror golang.org/x/net@v0.62.0/ipv6
 copy   github.com/shirou/gopsutil/v4@v4.26.9/host host_linux_amd64.go
+# bazil.org/fuse (rclone mount): mount(2) directly (no fusermount3), /dev/fuse through the netpoller
+notwasm bazil.org/fuse@v0.0.0-20230120002735-62a210ff1fd5 mount_linux.go
+notwasm bazil.org/fuse@v0.0.0-20230120002735-62a210ff1fd5 unmount_linux.go
+add     bazil.org/fuse@v0.0.0-20230120002735-62a210ff1fd5 bazil_mount_walios.go
+add     bazil.org/fuse@v0.0.0-20230120002735-62a210ff1fd5 bazil_devio_walios.go
+add     bazil.org/fuse@v0.0.0-20230120002735-62a210ff1fd5 bazil_devio_std.go
+subst   bazil.org/fuse@v0.0.0-20230120002735-62a210ff1fd5 fuse.go n, err := syscall.Read(c.fd(), m.buf) => n, err := devRead(c, m.buf)
+subst   bazil.org/fuse@v0.0.0-20230120002735-62a210ff1fd5 fuse.go nn, err := syscall.Write(c.fd(), msg) => nn, err := devWrite(c, msg)
