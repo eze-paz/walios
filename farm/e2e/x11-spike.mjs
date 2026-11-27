@@ -89,7 +89,7 @@ const SCRIPT = `
 for p in xkbcomp Xvfb; do [ -e /usr/bin/$p ] || ln -s /bin/$p /usr/bin/$p 2>/dev/null; done
 ls /usr/share/X11/xkb 2>&1 | head -3; ls /usr/share/fonts/misc 2>&1 | head -3
 echo __START $(date +%s)
-Xvfb :0 -screen 0 640x480x24 -nolisten unix -listen tcp -ac -nolock >/tmp/xvfb.log 2>&1 &
+Xvfb :0 -screen 0 640x480x24 ${arg('xvfb', '-nolisten unix -listen tcp')} -ac -nolock >/tmp/xvfb.log 2>&1 &
 XP=$!
 export DISPLAY=127.0.0.1:0
 echo __PROBE; python3 /tmp/x11-probe.py 0 2>&1; echo __probe_rc=$?

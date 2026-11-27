@@ -1,1 +1,1 @@
-{"pkgs":"xorg-server twm jwm xsetroot xprop xwininfo","max":6,"chunk":1,"publish":true,"base":"farm-2026-11-20-76","note":"R89 X11 P2: Xvfb runs xkbcomp from /bin; window managers twm + jwm (no rsvg/cairo/pango); xsetroot xprop xwininfo"}
+{"pkgs":"libxfont2 xorg-server xbitmaps libxcursor xsetroot","max":5,"chunk":1,"publish":true,"base":"farm-2026-11-20-76","note":"R90 X11 P2: R89's xorg-server (pkgrel 1, xkbcomp from /bin) and xsetroot again, with libxfont2 / xbitmaps / libxcursor beside them (not in the base)"}

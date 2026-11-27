@@ -27,6 +27,10 @@ root = struct.unpack('<I', body[off:off + 4])[0]
 win = rid_base + 1
 # CreateWindow: CWBackPixel (0x2) | CWEventMask (0x800); event mask KeyPress|ButtonPress|Exposure
 s.sendall(struct.pack('<BBHIIhhHHHHII', 1, 0, 10, win, root, 360, 260, 200, 150, 0, 1, 0, 0x802) + struct.pack('<II', 0x3366cc, 0x8005))
+# WM_NORMAL_HINTS (atom 40, type WM_SIZE_HINTS 41): USPosition|USSize|PPosition|PSize, so a
+# window manager keeps it where the test clicks
+hints = struct.pack('<18I', 1 | 2 | 4 | 8, 360, 260, 200, 150, *([0] * 13))
+s.sendall(struct.pack('<BBHIIIB3xI', 18, 0, 6 + 18, win, 40, 41, 32, 18) + hints)
 s.sendall(struct.pack('<BxHI', 8, 2, win))   # MapWindow
 log('__KEYPROBE up')
 while True:
