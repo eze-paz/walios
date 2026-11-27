@@ -1,5 +1,6 @@
-# FUSE test filesystems for walios: libfuse 3 examples (hello, passthrough, ...) and pjdfstest,
-# built with the farm toolchain (farm/ci/toolchain.sh), published as release fuse-walios-N.
+# FUSE test filesystems for walios: libfuse 3 examples (hello, passthrough, ...), fusermount3
+# and pjdfstest, built with the farm toolchain (farm/ci/toolchain.sh), published as release
+# fuse-walios-N (libfuse first, pjdfstest added when it is built).
 # They test FUSE in the walios kernel (sandpie docs/plans/walios-fuse-rclone.md, phase 1).
 # Trigger: push of farm/fuse-walios/** on branch walios-fuse.
 name: fuse-walios
@@ -15,7 +16,7 @@ env:
 jobs:
   build:
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
       - uses: actions/cache/restore@v4
@@ -30,15 +31,23 @@ jobs:
           sudo pip3 install -q --break-system-packages --upgrade meson
           printf '#!/bin/sh\nWALI_HOST_ENV=1 exec timeout -k 5 120 node %s "$@"\n' "$PWD/host/host.js" | sudo tee /usr/local/bin/wali-run >/dev/null
           sudo chmod +x /usr/local/bin/wali-run
-          [ -e /proc/sys/fs/binfmt_misc/register ] || sudo mount -t binfmt_misc binfmt_misc /proc/sys/fs/binfmt_misc
-          echo ':wasm:M::\x00asm::/usr/local/bin/wali-run:' | sudo tee /proc/sys/fs/binfmt_misc/register >/dev/null || true
-      - name: Build
-        run: bash farm/fuse-walios/build.sh "$TC" out
-      - name: Release
+      - name: Build libfuse
+        timeout-minutes: 40
+        run: STAGE=libfuse bash farm/fuse-walios/build.sh "$TC" out
+      - name: Release (libfuse)
         if: always()
         env: { GH_TOKEN: '${{ github.token }}' }
         run: |
           cat out/summary.txt >> "$GITHUB_STEP_SUMMARY" || true
           find out -size 0 -delete
-          TAG=fuse-walios-${{ github.run_number }}
-          gh release create "$TAG" --prerelease --target "${{ github.sha }}" --title "$TAG" --notes "FUSE test filesystems for walios (libfuse $(cat farm/fuse-walios/LIBFUSE_VERSION) examples, pjdfstest)" out/*
+          gh release create "fuse-walios-${{ github.run_number }}" --prerelease --target "${{ github.sha }}" --title "fuse-walios-${{ github.run_number }}" --notes "FUSE test filesystems for walios: libfuse $(cat farm/fuse-walios/LIBFUSE_VERSION) examples, fusermount3, pjdfstest" out/*
+      - name: Build pjdfstest
+        timeout-minutes: 50
+        run: STAGE=pjdfstest bash farm/fuse-walios/build.sh "$TC" out2
+      - name: Release (pjdfstest)
+        if: always()
+        env: { GH_TOKEN: '${{ github.token }}' }
+        run: |
+          cat out2/summary.txt >> "$GITHUB_STEP_SUMMARY" || true
+          find out2 -size 0 -delete
+          gh release upload "fuse-walios-${{ github.run_number }}" out2/* --clobber
