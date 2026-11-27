@@ -1710,10 +1710,10 @@ index d7e1ea06..373a8196 100644
  
 diff --git a/src/runtime/os_linux_wasm.go b/src/runtime/os_linux_wasm.go
 new file mode 100644
-index 00000000..d1dc3a96
+index 00000000..681a57a8
 --- /dev/null
 +++ b/src/runtime/os_linux_wasm.go
-@@ -0,0 +1,182 @@
+@@ -0,0 +1,174 @@
 +// Copyright 2026 The Go Authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style
 +// license that can be found in the LICENSE file.
@@ -1879,14 +1879,6 @@ index 00000000..d1dc3a96
 +//go:linkname syscall_runtime_doAllThreadsSyscall syscall.runtime_doAllThreadsSyscall
 +func syscall_runtime_doAllThreadsSyscall(trap, a1, a2, a3, a4, a5, a6 uintptr) (r1, r2, err uintptr) {
 +	return linux.Syscall6(trap, a1, a2, a3, a4, a5, a6)
-+}
-+
-+//go:linkname syscall_runtimeClearenv syscall.runtimeClearenv
-+func syscall_runtimeClearenv(env map[string]int) {
-+	if _, ok := env["GODEBUG"]; ok {
-+		godebugEnv.Store(nil)
-+		godebugNotify(true)
-+	}
 +}
 +
 +// No signal handling on linux/wasm yet (like wasip1): nothing to ignore or restore.

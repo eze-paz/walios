@@ -24,6 +24,11 @@ jobs:
           cd goroot && git apply --whitespace=nowarn ../farm/go-walios/go-walios.patch
           cd src && GOROOT_BOOTSTRAP=$(go env GOROOT) ./make.bash 2>&1 | tail -40
           echo "$PWD/../bin" >> "$GITHUB_PATH"
+      - name: Windows toolchain (for local iteration)
+        run: |
+          export PATH="$PWD/goroot/bin:$PATH"
+          cd goroot && GOOS=windows GOARCH=amd64 go install cmd/go cmd/compile cmd/link cmd/asm cmd/cgo cmd/buildid cmd/vet cmd/gofmt 2>&1 | tail -5
+          mkdir -p ../out && tar czf ../out/go-walios-windows-amd64-tools.tar.gz bin/windows_amd64 pkg/tool/windows_amd64
       - name: std for linux/wasm
         run: |
           mkdir -p out
