@@ -251,6 +251,13 @@ fi
 if grep -q '^_luaversions=' "$bdir/APKBUILD"; then
   LUASUB=1; sed -i 's/^_luaversions=.*/_luaversions="5.4"/' "$bdir/APKBUILD"
 fi
+# The walios sysroot's OpenSSL 3 is built no-engine (ENGINE is deprecated and its engines are
+# ELF modules loaded by dlopen). A recipe that asks for it outright stops at configure:
+# openssh's --with-ssl-engine -> "OpenSSL ENGINE support not found" (R87). Without the flag
+# openssh builds as on any no-engine OpenSSL.
+if grep -q '^# *define OPENSSL_NO_ENGINE' "$WALI_SYSROOT/include/openssl/configuration.h" 2>/dev/null; then
+  sed -i 's/[[:space:]]*--with-ssl-engine\b//' "$bdir/APKBUILD"
+fi
 # Perl XS modules (perl-*, not noarch): side modules perl.wasm's DynaLoader dlopen()s,
 # importing only its exports (perl-exports.txt, from walios/build/perl in sandpie). The
 # recipe's `perl Makefile.PL` runs on the runner's perl and writes the host's Config into

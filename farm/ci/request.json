@@ -1,1 +1,1 @@
-{"pkgs":"openssh","max":200,"chunk":3,"publish":true,"note":"R87b openssh canary (branch farm/openssh, own queue): wali-cc drops -Wl,--push-state/--pop-state (openssh's libutmps link; every configure link failed -> 'zlib missing')"}
+{"pkgs":"openssh","max":1,"chunk":1,"publish":true,"base":"farm-2026-11-27-95","note":"R87c openssh only, deps from farm-2026-11-27-95's overlays (new base key); build-one drops --with-ssl-engine on the no-engine sysroot OpenSSL"}

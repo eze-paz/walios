@@ -36,6 +36,7 @@ jobs:
   plan:
     runs-on: ubuntu-24.04
     outputs:
+      base: ${{ steps.in.outputs.base }}
       w0: ${{ steps.p.outputs.w0 }}
       w1: ${{ steps.p.outputs.w1 }}
       w2: ${{ steps.p.outputs.w2 }}
@@ -80,9 +81,9 @@ jobs:
             const ev = process.env.EV, i = ev === "push" ? require("./farm/ci/request.json") : JSON.parse(process.env.IN || "{}");
             const v = (k, d) => (i[k] === undefined || i[k] === "" ? d : String(i[k]));
             const out = { PKGS: v("pkgs", ""), SAMPLE: v("sample", "50"), ALL: (i.all === true || i.all === "true") ? "1" : "",
-                          MAX: v("max", "400"), CHUNK: v("chunk", "4"), PUBLISH: (i.publish === false || i.publish === "false") ? "" : "1" };
+                          MAX: v("max", "400"), CHUNK: v("chunk", "4"), PUBLISH: (i.publish === false || i.publish === "false") ? "" : "1", BASE: v("base", "") };
             require("fs").appendFileSync(process.env.GITHUB_ENV, Object.entries(out).map(([k, x]) => k + "=" + x).join("\n") + "\n");
-            require("fs").appendFileSync(process.env.GITHUB_OUTPUT, "publish=" + out.PUBLISH + "\n");
+            require("fs").appendFileSync(process.env.GITHUB_OUTPUT, "publish=" + out.PUBLISH + "\nbase=" + out.BASE + "\n");
             console.log(out);'
       - id: p
         env:
@@ -188,142 +189,142 @@ jobs:
     needs: plan
     if: needs.plan.outputs.w0 != '[]'
     uses: ./.github/workflows/farm-wave.yml
-    with: { wave: 0, chunks: '${{ needs.plan.outputs.w0 }}' }
+    with: { wave: 0, chunks: '${{ needs.plan.outputs.w0 }}', base: '${{ needs.plan.outputs.base }}' }
   wave1:
     needs: [plan, wave0]
     if: always() && needs.plan.outputs.w1 != '[]'
     uses: ./.github/workflows/farm-wave.yml
-    with: { wave: 1, chunks: '${{ needs.plan.outputs.w1 }}' }
+    with: { wave: 1, chunks: '${{ needs.plan.outputs.w1 }}', base: '${{ needs.plan.outputs.base }}' }
   wave2:
     needs: [plan, wave1]
     if: always() && needs.plan.outputs.w2 != '[]'
     uses: ./.github/workflows/farm-wave.yml
-    with: { wave: 2, chunks: '${{ needs.plan.outputs.w2 }}' }
+    with: { wave: 2, chunks: '${{ needs.plan.outputs.w2 }}', base: '${{ needs.plan.outputs.base }}' }
   wave3:
     needs: [plan, wave2]
     if: always() && needs.plan.outputs.w3 != '[]'
     uses: ./.github/workflows/farm-wave.yml
-    with: { wave: 3, chunks: '${{ needs.plan.outputs.w3 }}' }
+    with: { wave: 3, chunks: '${{ needs.plan.outputs.w3 }}', base: '${{ needs.plan.outputs.base }}' }
   wave4:
     needs: [plan, wave3]
     if: always() && needs.plan.outputs.w4 != '[]'
     uses: ./.github/workflows/farm-wave.yml
-    with: { wave: 4, chunks: '${{ needs.plan.outputs.w4 }}' }
+    with: { wave: 4, chunks: '${{ needs.plan.outputs.w4 }}', base: '${{ needs.plan.outputs.base }}' }
   wave5:
     needs: [plan, wave4]
     if: always() && needs.plan.outputs.w5 != '[]'
     uses: ./.github/workflows/farm-wave.yml
-    with: { wave: 5, chunks: '${{ needs.plan.outputs.w5 }}' }
+    with: { wave: 5, chunks: '${{ needs.plan.outputs.w5 }}', base: '${{ needs.plan.outputs.base }}' }
   wave6:
     needs: [plan, wave5]
     if: always() && needs.plan.outputs.w6 != '[]'
     uses: ./.github/workflows/farm-wave.yml
-    with: { wave: 6, chunks: '${{ needs.plan.outputs.w6 }}' }
+    with: { wave: 6, chunks: '${{ needs.plan.outputs.w6 }}', base: '${{ needs.plan.outputs.base }}' }
   wave7:
     needs: [plan, wave6]
     if: always() && needs.plan.outputs.w7 != '[]'
     uses: ./.github/workflows/farm-wave.yml
-    with: { wave: 7, chunks: '${{ needs.plan.outputs.w7 }}' }
+    with: { wave: 7, chunks: '${{ needs.plan.outputs.w7 }}', base: '${{ needs.plan.outputs.base }}' }
   wave8:
     needs: [plan, wave7]
     if: always() && needs.plan.outputs.w8 != '[]'
     uses: ./.github/workflows/farm-wave.yml
-    with: { wave: 8, chunks: '${{ needs.plan.outputs.w8 }}' }
+    with: { wave: 8, chunks: '${{ needs.plan.outputs.w8 }}', base: '${{ needs.plan.outputs.base }}' }
   wave9:
     needs: [plan, wave8]
     if: always() && needs.plan.outputs.w9 != '[]'
     uses: ./.github/workflows/farm-wave.yml
-    with: { wave: 9, chunks: '${{ needs.plan.outputs.w9 }}' }
+    with: { wave: 9, chunks: '${{ needs.plan.outputs.w9 }}', base: '${{ needs.plan.outputs.base }}' }
   wave10:
     needs: [plan, wave9]
     if: always() && needs.plan.outputs.w10 != '[]'
     uses: ./.github/workflows/farm-wave.yml
-    with: { wave: 10, chunks: '${{ needs.plan.outputs.w10 }}' }
+    with: { wave: 10, chunks: '${{ needs.plan.outputs.w10 }}', base: '${{ needs.plan.outputs.base }}' }
   wave11:
     needs: [plan, wave10]
     if: always() && needs.plan.outputs.w11 != '[]'
     uses: ./.github/workflows/farm-wave.yml
-    with: { wave: 11, chunks: '${{ needs.plan.outputs.w11 }}' }
+    with: { wave: 11, chunks: '${{ needs.plan.outputs.w11 }}', base: '${{ needs.plan.outputs.base }}' }
   wave12:
     needs: [plan, wave11]
     if: always() && needs.plan.outputs.w12 != '[]'
     uses: ./.github/workflows/farm-wave.yml
-    with: { wave: 12, chunks: '${{ needs.plan.outputs.w12 }}' }
+    with: { wave: 12, chunks: '${{ needs.plan.outputs.w12 }}', base: '${{ needs.plan.outputs.base }}' }
   wave13:
     needs: [plan, wave12]
     if: always() && needs.plan.outputs.w13 != '[]'
     uses: ./.github/workflows/farm-wave.yml
-    with: { wave: 13, chunks: '${{ needs.plan.outputs.w13 }}' }
+    with: { wave: 13, chunks: '${{ needs.plan.outputs.w13 }}', base: '${{ needs.plan.outputs.base }}' }
   wave14:
     needs: [plan, wave13]
     if: always() && needs.plan.outputs.w14 != '[]'
     uses: ./.github/workflows/farm-wave.yml
-    with: { wave: 14, chunks: '${{ needs.plan.outputs.w14 }}' }
+    with: { wave: 14, chunks: '${{ needs.plan.outputs.w14 }}', base: '${{ needs.plan.outputs.base }}' }
   wave15:
     needs: [plan, wave14]
     if: always() && needs.plan.outputs.w15 != '[]'
     uses: ./.github/workflows/farm-wave.yml
-    with: { wave: 15, chunks: '${{ needs.plan.outputs.w15 }}' }
+    with: { wave: 15, chunks: '${{ needs.plan.outputs.w15 }}', base: '${{ needs.plan.outputs.base }}' }
   wave16:
     needs: [plan, wave15]
     if: always() && needs.plan.outputs.w16 != '[]'
     uses: ./.github/workflows/farm-wave.yml
-    with: { wave: 16, chunks: '${{ needs.plan.outputs.w16 }}' }
+    with: { wave: 16, chunks: '${{ needs.plan.outputs.w16 }}', base: '${{ needs.plan.outputs.base }}' }
   wave17:
     needs: [plan, wave16]
     if: always() && needs.plan.outputs.w17 != '[]'
     uses: ./.github/workflows/farm-wave.yml
-    with: { wave: 17, chunks: '${{ needs.plan.outputs.w17 }}' }
+    with: { wave: 17, chunks: '${{ needs.plan.outputs.w17 }}', base: '${{ needs.plan.outputs.base }}' }
   wave18:
     needs: [plan, wave17]
     if: always() && needs.plan.outputs.w18 != '[]'
     uses: ./.github/workflows/farm-wave.yml
-    with: { wave: 18, chunks: '${{ needs.plan.outputs.w18 }}' }
+    with: { wave: 18, chunks: '${{ needs.plan.outputs.w18 }}', base: '${{ needs.plan.outputs.base }}' }
   wave19:
     needs: [plan, wave18]
     if: always() && needs.plan.outputs.w19 != '[]'
     uses: ./.github/workflows/farm-wave.yml
-    with: { wave: 19, chunks: '${{ needs.plan.outputs.w19 }}' }
+    with: { wave: 19, chunks: '${{ needs.plan.outputs.w19 }}', base: '${{ needs.plan.outputs.base }}' }
   wave20:
     needs: [plan, wave19]
     if: always() && needs.plan.outputs.w20 != '[]'
     uses: ./.github/workflows/farm-wave.yml
-    with: { wave: 20, chunks: '${{ needs.plan.outputs.w20 }}' }
+    with: { wave: 20, chunks: '${{ needs.plan.outputs.w20 }}', base: '${{ needs.plan.outputs.base }}' }
   wave21:
     needs: [plan, wave20]
     if: always() && needs.plan.outputs.w21 != '[]'
     uses: ./.github/workflows/farm-wave.yml
-    with: { wave: 21, chunks: '${{ needs.plan.outputs.w21 }}' }
+    with: { wave: 21, chunks: '${{ needs.plan.outputs.w21 }}', base: '${{ needs.plan.outputs.base }}' }
   wave22:
     needs: [plan, wave21]
     if: always() && needs.plan.outputs.w22 != '[]'
     uses: ./.github/workflows/farm-wave.yml
-    with: { wave: 22, chunks: '${{ needs.plan.outputs.w22 }}' }
+    with: { wave: 22, chunks: '${{ needs.plan.outputs.w22 }}', base: '${{ needs.plan.outputs.base }}' }
   wave23:
     needs: [plan, wave22]
     if: always() && needs.plan.outputs.w23 != '[]'
     uses: ./.github/workflows/farm-wave.yml
-    with: { wave: 23, chunks: '${{ needs.plan.outputs.w23 }}' }
+    with: { wave: 23, chunks: '${{ needs.plan.outputs.w23 }}', base: '${{ needs.plan.outputs.base }}' }
   wave24:
     needs: [plan, wave23]
     if: always() && needs.plan.outputs.w24 != '[]'
     uses: ./.github/workflows/farm-wave.yml
-    with: { wave: 24, chunks: '${{ needs.plan.outputs.w24 }}' }
+    with: { wave: 24, chunks: '${{ needs.plan.outputs.w24 }}', base: '${{ needs.plan.outputs.base }}' }
   wave25:
     needs: [plan, wave24]
     if: always() && needs.plan.outputs.w25 != '[]'
     uses: ./.github/workflows/farm-wave.yml
-    with: { wave: 25, chunks: '${{ needs.plan.outputs.w25 }}' }
+    with: { wave: 25, chunks: '${{ needs.plan.outputs.w25 }}', base: '${{ needs.plan.outputs.base }}' }
   wave26:
     needs: [plan, wave25]
     if: always() && needs.plan.outputs.w26 != '[]'
     uses: ./.github/workflows/farm-wave.yml
-    with: { wave: 26, chunks: '${{ needs.plan.outputs.w26 }}' }
+    with: { wave: 26, chunks: '${{ needs.plan.outputs.w26 }}', base: '${{ needs.plan.outputs.base }}' }
   wave27:
     needs: [plan, wave26]
     if: always() && needs.plan.outputs.w27 != '[]'
     uses: ./.github/workflows/farm-wave.yml
-    with: { wave: 27, chunks: '${{ needs.plan.outputs.w27 }}' }
+    with: { wave: 27, chunks: '${{ needs.plan.outputs.w27 }}', base: '${{ needs.plan.outputs.base }}' }
 
   publish:
     needs: [plan, wave0, wave1, wave2, wave3, wave4, wave5, wave6, wave7, wave8, wave9, wave10, wave11, wave12, wave13, wave14, wave15, wave16, wave17, wave18, wave19, wave20, wave21, wave22, wave23, wave24, wave25, wave26, wave27]
