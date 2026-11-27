@@ -125,6 +125,7 @@ jobs:
           P="$RUNNER_TEMP/py"; mkdir -p dist
           cp "$P/python_cxx.wasm" "$P/_sysconfigdata__linux_x86_64-linux-gnu.py" dist/
           cp "$P/cross-py/pyconfig.h" dist/python-pyconfig.h
+          cp "$P/python-embed.tar.gz" dist/   # python3-dev: libpython + headers for embedders
           if [ -d "$P/ext" ]; then cp "$P/ext-obj/python-exports.txt" dist/; tar czf dist/python-ext.tar.gz -C "$P/ext" .; fi
           ls -la dist
       - uses: actions/upload-artifact@v4

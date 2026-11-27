@@ -166,6 +166,26 @@ make -j"$(nproc)" python >../cross-build.log 2>&1
 $L/llvm-strip --strip-debug -o ../python_cxx.wasm python
 echo "built $R/python_cxx.wasm ($(stat -c %s ../python_cxx.wasm) bytes)"
 
+# ---- python3-dev: libpython for programs that embed walios Python ----
+# (samba's talloc/tdb/tevent: waf's pyembed check links Py_Initialize against python3-config
+# --embed.) The same interpreter as python_cxx.wasm: libpython3.14.a, and in
+# libpython3.14-wali.a the rest of its link -- the bundled libraries (mpdec, expat, HACL*)
+# and the walios glue, minus wali_start.o (which wraps the program's main). Headers as
+# `make inclinstall` lays them out. -> <workdir>/python-embed.tar.gz {lib,include}
+E=$R/embed; rm -rf "$E" && mkdir -p "$E/lib" "$E/x" "$E/d"
+cp libpython3.14.a "$E/lib/"
+i=0
+for a in $(find . -name '*.a' ! -name 'libpython*.a'); do
+  i=$((i + 1)); mkdir "$E/x/$i"; (cd "$E/x/$i" && $L/llvm-ar x "$R/cross-py/$a")
+  for o in "$E/x/$i"/*; do mv "$o" "$E/x/$i-${o##*/}"; done; rmdir "$E/x/$i"
+done
+$L/llvm-ar rcs "$E/lib/libpython3.14-wali.a" $(ls "$E"/x/* 2>/dev/null) $R/wali_dlfcn.o $R/wali_nofork.o $R/wali_spawn.o $R/wali_trampoline.o $R/cpp_exc.o
+make DESTDIR="$E/d" inclinstall >../inclinstall.log 2>&1
+mv "$E/d/py/include" "$E/include"
+[ -f "$E/include/python3.14/Python.h" ] && [ -f "$E/include/python3.14/pyconfig.h" ] || { echo "python-embed: headers missing" >&2; exit 1; }
+tar czf ../python-embed.tar.gz -C "$E" lib include
+echo "built $R/python-embed.tar.gz ($(stat -c %s ../python-embed.tar.gz) bytes; $i bundled archives)"
+
 # sysconfig data for the guest (ships in pylib.tar.gz as Lib/<name>.py): without it
 # sysconfig.get_config_var() raises ModuleNotFoundError, which pip, setuptools and
 # pandas all hit. The toolchain variables are rewritten to the in-tab cc/ar.

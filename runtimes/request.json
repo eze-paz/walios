@@ -1,1 +1,1 @@
-{ "abi": "ilp32", "only": "perl", "why": "perl: real fork() via asyncify on ILP32 (Net::DNS: Can not fork: Function not implemented)", "try": 1 }
+{ "abi": "ilp32", "only": "cpython", "why": "python3-dev: python-embed.tar.gz (libpython3.14.a + headers) for programs that embed walios Python (samba's waf pyembed)", "try": 1 }
