@@ -113,13 +113,13 @@ console.log(`run: code ${r.code}${r.timeout ? ' TIMEOUT' : ''} in ${((Date.now()
 const out = r.out || '';
 const m = /__XWD\n([A-Za-z0-9+/=]*)\n__END/.exec(out);
 console.log(out.replace(/__XWD\n[A-Za-z0-9+/=]*\n__END/, `__XWD <${m ? m[1].length : 0} base64 chars>`).slice(0, 12000));
-if (m && m[1].length) { const png = xwdToPng(Buffer.from(m[1], 'base64')); fs.writeFileSync(OUT, png); console.log('wrote', OUT, png.length, 'bytes'); }
+if (m && m[1].length) { fs.writeFileSync(OUT.replace(/.png$/, '') + '.xwd', Buffer.from(m[1], 'base64')); const png = xwdToPng(Buffer.from(m[1], 'base64')); fs.writeFileSync(OUT, png); console.log('wrote', OUT, png.length, 'bytes'); }
 
 // ---- XWD (X11 window dump, version 7, ZPixmap TrueColor) -> PNG ----
 function xwdToPng(b) {
   const u = (i) => b.readUInt32BE(i * 4);
   const hsize = u(0), w = u(4), h = u(5), byteOrder = u(7), bpp = u(11), bpl = u(12), ncolors = u(19);
-  const rm = u(15), gm = u(16), bm = u(17);
+  const rm = u(14), gm = u(15), bm = u(16);   // header: ... bits_per_pixel 11, bytes_per_line 12, visual_class 13, masks 14-16
   const data = hsize + ncolors * 12;
   const sh = (mask) => { let s = 0; while (mask && !(mask & 1)) { mask >>>= 1; s++; } return s; };
   const rs = sh(rm), gs = sh(gm), bs = sh(bm);
