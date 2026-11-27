@@ -1,1 +1,1 @@
-{"pkgs":"openssh","max":1,"chunk":1,"publish":true,"base":"farm-2026-11-27-95","note":"R87e openssh as kind pkg (farm/ci/pkg/openssh: every program + sshd wrapper)"}
+{"pkgs":"openssh","max":1,"chunk":1,"publish":true,"base":"farm-2026-11-27-95","note":"R87f openssh as kind pkg (farm/ci/pkg/openssh: every program, sshd wrapper, ssh links)"}
