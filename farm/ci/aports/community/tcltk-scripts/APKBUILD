@@ -1,0 +1,29 @@
+# walios farm: Tcl's and Tk's script libraries (init.tcl, tk.tcl, msgcat, encodings, tzdata...)
+# as data. A farm program package is its wasm alone, so tclsh/wish/_tkinter found no init.tcl
+# ("application-specific initialization failed"). Installed where Alpine's tcl/tk put them.
+pkgname=tcltk-scripts
+pkgver=8.6.18
+pkgrel=0
+pkgdesc="Tcl and Tk script libraries for walios (tcl_library, tk_library)"
+url="https://www.tcl-lang.org/"
+arch="noarch"
+license="TCL"
+options="!check"
+source="https://downloads.sourceforge.net/sourceforge/tcl/tcl$pkgver-src.tar.gz
+	https://downloads.sourceforge.net/sourceforge/tcl/tk$pkgver-src.tar.gz
+	"
+builddir="$srcdir"
+
+build() { :; }
+
+package() {
+	mkdir -p "$pkgdir"/usr/lib
+	cp -r "$srcdir"/tcl$pkgver/library "$pkgdir"/usr/lib/tcl8.6
+	cp -r "$srcdir"/tk$pkgver/library "$pkgdir"/usr/lib/tk8.6
+	rm -rf "$pkgdir"/usr/lib/tk8.6/demos
+}
+
+sha512sums="
+949a66a6db613f85fc84f1f60b1034812c15f6549786aca8143d938feaa81e7d84a155757d5a4e83671b148870dc67fea8435c3dbb14b6c94973c7a63358a001  tcl8.6.18-src.tar.gz
+117993f8b7130d8c6cebffc49578f17eb6e8986f7bb165a8e541c4791f3091328acd61dd48dc57516607b02c321511a984fc4f17ad09fc06338db2b6d44e6f74  tk8.6.18-src.tar.gz
+"

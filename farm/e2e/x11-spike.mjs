@@ -42,8 +42,8 @@ async function fetchTo(href) {
 }
 
 // Programs: name on PATH -> package. Data: tars mounted at /.
-const PROGS = { Xvfb: 'xorg-server', xkbcomp: 'xkbcomp', xdpyinfo: 'xdpyinfo', xwd: 'xwd', xeyes: 'xeyes', xclock: 'xclock', xterm: 'xterm', xauth: 'xauth' };
-const DATA = ['xkeyboard-config', 'font-misc-misc', 'font-cursor-misc'];
+const PROGS = { Xvfb: 'xorg-server', xkbcomp: 'xkbcomp', xdpyinfo: 'xdpyinfo', xwd: 'xwd', xeyes: 'xeyes', xclock: 'xclock', xterm: 'xterm', xauth: 'xauth', wish: 'tk', tclsh: 'tcl', jwm: 'jwm' };
+const DATA = ['xkeyboard-config', 'font-misc-misc', 'font-cursor-misc', 'font-dejavu'];
 const manifest = {}, tars = [], files = {};
 // --local Xvfb=/path/xorg-server.wasm,xwd=/path/xwd.wasm: a build artifact instead of an index's file
 const LOCAL = Object.fromEntries((arg('local', '') || '').split(',').filter(Boolean).map((kv) => kv.split('=')));
@@ -62,6 +62,8 @@ for (const pkg of DATA) {
 }
 
 files['/f/x11-probe.py'] = path.join(HERE, 'x11-probe.py');
+// --data-tars a.tar.gz,b.tar.gz: local tarballs mounted at / (e.g. a script library not yet packaged)
+for (const t of (arg('data-tars', '') || '').split(',').filter(Boolean)) { const name = '/f/data-' + path.basename(t); files[name] = path.resolve(t); tars.push([name, '/']); console.log('data tar ' + t); }
 const DISPLAY_JS = arg('display');
 if (DISPLAY_JS) { files['/f/walios-x11.js'] = path.resolve(DISPLAY_JS); files['/f/x11-keyprobe.py'] = path.join(HERE, 'x11-keyprobe.py'); }
 const DISPLAY_CMD = `xeyes -geometry 300x200+20+20 >/tmp/xeyes.log 2>&1 &

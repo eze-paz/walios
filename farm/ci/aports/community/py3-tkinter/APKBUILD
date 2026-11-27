@@ -1,0 +1,41 @@
+# walios farm: tkinter for walios Python -- CPython 3.14.7's Lib/tkinter and Modules/_tkinter.c
+# as a side module (python_cxx.wasm dlopen()s it) with Tk and Tcl linked in statically. Alpine
+# builds _tkinter inside its python3 aport; walios' Python is its own build, so this is a
+# separate package. The Tcl/Tk script libraries come from tcltk-scripts.
+pkgname=py3-tkinter
+pkgver=3.14.7
+pkgrel=0
+pkgdesc="tkinter (Tk GUI toolkit bindings) for walios Python"
+url="https://docs.python.org/3/library/tkinter.html"
+arch="all"
+license="PSF-2.0"
+options="!check"
+depends="tcltk-scripts"
+makedepends="python3-dev tcl-dev tk-dev libx11-dev libxft-dev fontconfig-dev py3-setuptools"
+source="https://www.python.org/ftp/python/$pkgver/Python-$pkgver.tar.xz"
+builddir="$srcdir/Python-$pkgver"
+
+build() {
+	cat > setup.py <<'PY'
+import os, shlex, subprocess, sysconfig
+from setuptools import setup, Extension
+def pc(*a):
+    try: return shlex.split(subprocess.check_output(['pkg-config', *a, 'tk']).decode())
+    except Exception: return []
+inc = sysconfig.get_paths()['include']
+libs = pc('--static', '--libs') or ['-ltk8.6', '-ltcl8.6', '-lXft', '-lfontconfig', '-lfreetype', '-lexpat', '-lXrender', '-lX11', '-lxcb', '-lXau', '-lXdmcp', '-lz', '-lm']
+setup(name='tkinter', version='3.14.7', package_dir={'': 'Lib'}, packages=['tkinter'],
+      ext_modules=[Extension('_tkinter', ['Modules/_tkinter.c'],
+                             include_dirs=['Modules', os.path.join(inc, 'internal')],
+                             extra_compile_args=pc('--cflags'), extra_link_args=libs)])
+PY
+	python3 setup.py build
+}
+
+package() {
+	python3 setup.py install --root="$pkgdir" --prefix=/usr --skip-build
+}
+
+sha512sums="
+3d4e2e2f983b320dec47005c408d7178d3656a6de0c4430ce21514797174b972f461200898b25d3dfac2a455019ef87e45d0fb2bb6ec2ca887124d10037a2a07  Python-3.14.7.tar.xz
+"

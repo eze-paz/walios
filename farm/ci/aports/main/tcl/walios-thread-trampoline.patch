@@ -1,0 +1,52 @@
+--- a/unix/tclUnixThrd.c	2026-11-27 23:53:48.242330300 +0100
++++ b/unix/tclUnixThrd.c	2026-11-27 23:53:52.057484500 +0100
+@@ -54,6 +54,28 @@
+ #endif /* TCL_THREADS */
+ 
+ /*
++ * walios (wasm): proc is a void (ClientData) function. Started through a cast to the
++ * void *(*)(void *) pthread_create wants, the wasm call_indirect traps ("function signature
++ * mismatch") -- the notifier thread of every threaded Tcl died that way. A trampoline of the
++ * right type calls it instead.
++ */
++typedef struct {
++    Tcl_ThreadCreateProc *proc;
++    ClientData clientData;
++} WaliThreadStart;
++
++static void *
++WaliThreadTrampoline(
++    void *arg)
++{
++    WaliThreadStart ws = *(WaliThreadStart *) arg;
++
++    free(arg);
++    ws.proc(ws.clientData);
++    return NULL;
++}
++
++/*
+  *----------------------------------------------------------------------
+  *
+  * TclpThreadCreate --
+@@ -118,10 +140,16 @@
+ 	pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+     }
+ 
+-    if (pthread_create(&theThread, &attr,
+-	    (void * (*)(void *))(void *)proc, (void *)clientData) &&
+-	    pthread_create(&theThread, NULL,
+-		    (void * (*)(void *))(void *)proc, (void *)clientData)) {
++    WaliThreadStart *ws = (WaliThreadStart *) malloc(sizeof(WaliThreadStart));
++
++    if (ws == NULL) {
++	return TCL_ERROR;
++    }
++    ws->proc = proc;
++    ws->clientData = clientData;
++    if (pthread_create(&theThread, &attr, WaliThreadTrampoline, ws) &&
++	    pthread_create(&theThread, NULL, WaliThreadTrampoline, ws)) {
++	free(ws);
+ 	result = TCL_ERROR;
+     } else {
+ 	*idPtr = (Tcl_ThreadId)theThread;
