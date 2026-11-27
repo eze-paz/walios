@@ -214,7 +214,7 @@ for a in "\$@"; do case "\$a" in
       if [ \$skip = 1 ]; then skip=0; continue; fi
       case "\$x" in
         -z|-soname|-h|-rpath|-rpath-link|--version-script|-Map) skip=1;;
-        --start-group|--end-group|--as-needed|--no-as-needed|--gc-sections|--warn-common|--sort-common|-O1|-O2|--hash-style=*|-soname=*|--version-script=*|-Bsymbolic*|--cref|--no-undefined|--fatal-warnings|--enable-new-dtags|--disable-new-dtags|-rpath=*|-rpath-link=*|--build-id*|-Map=*|-E|--export-dynamic|--icf=*|-znoexecstack|-zrelro|-znow|-zdefs|-warn-common|-stats|--stats|--no-copy-dt-needed-entries) ;;
+        --start-group|--end-group|--as-needed|--no-as-needed|--gc-sections|--warn-common|--sort-common|-O1|-O2|--hash-style=*|-soname=*|--version-script=*|-Bsymbolic*|--cref|--no-undefined|--fatal-warnings|--enable-new-dtags|--disable-new-dtags|-rpath=*|-rpath-link=*|--build-id*|-Map=*|-E|--export-dynamic|--icf=*|-znoexecstack|-zrelro|-znow|-zdefs|-warn-common|-stats|--stats|--no-copy-dt-needed-entries|--push-state|--pop-state) ;;   # push/pop-state: openssh's "-Wl,--push-state,-Bstatic -lutmps -Wl,--pop-state" (R86: every configure link failed -> "zlib missing")
         *) k+=("\$x");;
       esac
     done

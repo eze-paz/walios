@@ -1,1 +1,1 @@
-{"pkgs":"lua-curl perl-gd apache-mod-fcgid apache2-mod-wsgi apache-mod-auth-kerb krb5 libtirpc conntrack-tools rpcbind unfs3 postgresql17 lua-sql expect dpkg ortp","max":800,"chunk":3,"publish":true,"note":"R86: install-under-overlay relocation, apache build/apxs exposed, getprogname side stub, TCL_SHARED_BUILD, /usr/share/et"}
+{"pkgs":"openssh","max":200,"chunk":3,"publish":true,"note":"R87 openssh canary: wali-cc drops -Wl,--push-state/--pop-state (openssh's libutmps link; every configure link failed -> 'zlib missing')"}
