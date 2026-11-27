@@ -47,8 +47,8 @@ upload() {  # upload <release> <files...>: only the missing ones, 10 at a time
 }
 ensure "$TAG" --title "walios farm $TAG" --notes-file summary.md --prerelease || exit 1
 mkdir -p spill; while read -r f; do [ -n "$f" ] && [ -f "res/$f" ] && mv "res/$f" spill/; done < res/spill.txt
-# runnable packages (.wasm) and pure-Perl/Lua modules (.mod.tar.gz)
-pk=$(ls res/*.wasm res/*.mod.tar.gz 2>/dev/null || true)
+# runnable packages (.wasm), pure-Perl/Lua modules (.mod.tar.gz), whole packages (.pkg.tar.gz)
+pk=$(ls res/*.wasm res/*.mod.tar.gz res/*.pkg.tar.gz 2>/dev/null || true)
 [ -n "$pk" ] && { upload "$TAG" $pk || exit 1; }
 sp=$(ls spill/* 2>/dev/null || true)
 if [ -n "$sp" ]; then

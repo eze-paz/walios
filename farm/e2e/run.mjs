@@ -100,6 +100,16 @@ function buildCase(pkg) {
     return { pkg, kind: 'exe', manifest: { [prog]: '/f/' + loc(r.file) }, tars: [], expect, prog,
       cmd: `/bin/${prog} --version >/tmp/o 2>&1 </dev/null; echo "__rc=$?"; head -c 600 /tmp/o` };
   }
+  if (r.kind === 'pkg') {
+    // A whole package (farm/ci/pkg/<pkg>/): mounted at / as `apk add` does; the program the
+    // farm smoke-tested runs from where the package installs it, judged like an exe.
+    const m = /^([^:\s]+): ?([\s\S]*)$/.exec(r.smoke || '');
+    const prog = m ? m[1] : pkg, expect = m ? m[2] : '';
+    const bin = tarNames(path.join(FARM, loc(r.file))).find((n) => /^(usr\/(local\/)?)?s?bin\/[^/]+$/.test(n) && path.posix.basename(n) === prog);
+    if (!bin) return { pkg, kind: 'pkg', fail: `no ${prog} in the package` };
+    return { pkg, kind: 'exe', manifest: {}, tars: [['/f/' + loc(r.file), '/']], expect, prog,
+      cmd: `/${bin} --version >/tmp/o 2>&1 </dev/null; echo "__rc=$?"; head -c 600 /tmp/o` };
+  }
   if (r.kind !== 'mod') return null;
   const tars = [pkg, ...modDeps(pkg)].filter((d) => P[d].file).map((d) => ['/f/' + loc(P[d].file), '/']);
   const progs = Object.fromEntries([...exeDeps(pkg)].map((d) => [progOf(d), '/f/' + loc(P[d].file)]));
@@ -210,7 +220,7 @@ const runMsg = (c) => ({
 });
 const SYSCFG = '_sysconfigdata__linux_x86_64-linux-gnu.py';
 
-let pkgs = Object.keys(P).filter((k) => ['exe', 'mod', ...(LIBTEST ? ['lib'] : [])].includes(P[k].kind) && (!CATALOG || CATALOG.has(k)) && (!ONLY || ONLY.has(k))).sort();
+let pkgs = Object.keys(P).filter((k) => ['exe', 'mod', 'pkg', ...(LIBTEST ? ['lib'] : [])].includes(P[k].kind) && (!CATALOG || CATALOG.has(k)) && (!ONLY || ONLY.has(k))).sort();
 pkgs = pkgs.filter((_, i) => i % NSHARD === SHARD);
 // --fetch <base url>: download only this shard's files (and its modules' deps) from the
 // release's public download URLs -- the Releases API rate-limits a dozen shards pulling ~700 assets.

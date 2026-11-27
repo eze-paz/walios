@@ -1,0 +1,7 @@
+#!/bin/sh
+# walios: sshd must be started by absolute path and needs its privilege-separation user and
+# host keys. Create both on first use (what Alpine's init script does), then run it.
+grep -q '^sshd:' /etc/passwd 2>/dev/null || echo 'sshd:x:22:22:sshd:/var/empty:/sbin/nologin' >> /etc/passwd
+mkdir -p /var/empty /run
+ls /etc/ssh/ssh_host_*_key >/dev/null 2>&1 || /usr/bin/ssh-keygen -A >/dev/null
+exec /usr/sbin/sshd "$@"

@@ -14,12 +14,13 @@ const rows = fs.readdirSync(dir).filter(f => f.endsWith('.json')).map(f => JSON.
 const SPILL = +(process.env.SPILL || 950); let nexe = 0; const spill = [];
 const index = { tag, built: new Date().toISOString(), toolchain: 'LLVM 22.1.3 + wali-sysroot (pkgs-2026-10-31)', packages: {}, failed: {} };
 for (const r of rows.sort((a, b) => a.pkg.localeCompare(b.pkg))) {
-  if (r.status === 'pass' && (r.kind === 'exe' || r.kind === 'mod')) {
-    // exe = <pkg>.wasm; mod = <pkg>.mod.tar.gz (pure-Perl/Lua module files + its deps list)
-    const name = r.kind === 'exe' ? `${r.pkg}.wasm` : `${r.pkg}.mod.tar.gz`, buf = fs.readFileSync(path.join(dir, name));
+  if (r.status === 'pass' && (r.kind === 'exe' || r.kind === 'mod' || r.kind === 'pkg')) {
+    // exe = <pkg>.wasm; mod = <pkg>.mod.tar.gz (pure-Perl/Lua module files + its deps list);
+    // pkg = <pkg>.pkg.tar.gz (every program the package installs, farm/ci/pkg/<pkg>/; bins lists them)
+    const name = r.kind === 'exe' ? `${r.pkg}.wasm` : `${r.pkg}.${r.kind}.tar.gz`, buf = fs.readFileSync(path.join(dir, name));
     let file = name; if (++nexe > SPILL) { file = `../${tag}-b/${name}`; spill.push(name); }
     index.packages[r.pkg] = { ver: r.ver, kind: r.kind, file, size: buf.length, sha256: crypto.createHash('sha256').update(buf).digest('hex'), secs: r.secs,
-      ...(r.kind === 'exe' ? { smoke: r.smoke } : { deps: r.deps || [] }),
+      ...(r.kind === 'exe' ? { smoke: r.smoke } : r.kind === 'pkg' ? { smoke: r.smoke, deps: r.deps || [], bins: r.bins || [] } : { deps: r.deps || [] }),
       ...(r.abiwarn ? { abiwarn: r.abiwarn } : {}) };  // format calls that print garbage (abiwarn.js)
   } else if (r.status === 'pass') index.packages[r.pkg] = { ver: r.ver, kind: r.kind, secs: r.secs };
   else if (r.status === 'skip') (index.skipped = index.skipped || {})[r.pkg] = { ver: r.ver, reason: r.reason };
@@ -29,7 +30,7 @@ for (const r of rows.sort((a, b) => a.pkg.localeCompare(b.pkg))) {
 try { index.aliases = JSON.parse(fs.readFileSync('aliases.json', 'utf8')); } catch {}
 process.stdout.write(JSON.stringify(index, null, 1) + '\n');
 fs.writeFileSync(path.join(dir, 'spill.txt'), spill.join('\n') + (spill.length ? '\n' : ''));
-const exe = Object.values(index.packages).filter(p => p.kind === 'exe').length;
+const exe = Object.values(index.packages).filter(p => p.kind === 'exe' || p.kind === 'pkg').length;
 const mods = Object.values(index.packages).filter(p => p.kind === 'mod').length;
 const lib = Object.keys(index.packages).length - exe - mods, nf = Object.keys(index.failed).length;
 const reasons = {}; for (const f of Object.values(index.failed)) { const k = String(f.reason).split(':')[0]; reasons[k] = (reasons[k] || 0) + 1; }

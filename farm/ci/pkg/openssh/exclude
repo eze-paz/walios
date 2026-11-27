@@ -1,0 +1,10 @@
+# tar --exclude patterns: what walios cannot use (no PAM, no Kerberos, no nftables)
+usr/bin/ssh.krb5
+usr/bin/findssl.sh
+usr/sbin/sshd.pam
+usr/lib/ssh/*.pam
+usr/lib/pam.d
+etc/pam.d
+usr/share/nftables.avail
+etc/init.d
+etc/conf.d
