@@ -24,7 +24,7 @@ jobs:
         if: always()
         env: { GH_TOKEN: '${{ github.token }}' }
         run: |
-          sudo chown -R "$(id -u)" out || true; touch out/summary.txt
+          sudo chown -R "$(id -u)" out || true; touch out/summary.txt; find out -size 0 -delete
           { echo '## pjdfstest on Linux'; echo '```'; cat out/summary.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           gh release create "pjdfstest-linux-${{ github.run_number }}" --prerelease --target "${{ github.sha }}" --title "pjdfstest-linux-${{ github.run_number }}" --notes "pjdfstest on Linux (tmpfs and libfuse passthrough): reference for walios" out/* \
             || gh release upload "pjdfstest-linux-${{ github.run_number }}" out/* --clobber
