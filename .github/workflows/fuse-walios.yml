@@ -1,0 +1,61 @@
+# FUSE test filesystems for walios: libfuse 3 examples (hello, passthrough, ...), fusermount3
+# and pjdfstest, built with the farm toolchain (farm/ci/toolchain.sh), published as release
+# fuse-walios-N (libfuse first, pjdfstest added when it is built).
+# They test FUSE in the walios kernel (sandpie docs/plans/walios-fuse-rclone.md, phase 1).
+# Trigger: push of farm/fuse-walios/** on branch walios-fuse.
+name: fuse-walios
+on:
+  push:
+    branches: [walios-fuse]
+    paths: [farm/fuse-walios/**, .github/workflows/fuse-walios.yml]
+permissions: { contents: write }
+concurrency: { group: fuse-walios, cancel-in-progress: true }
+env:
+  TC: ${{ github.workspace }}/../wali-tc
+  TC_KEY: wali-tc-llvm22.1.3-pkgs-2026-10-31-x1-v57o-ilp32
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache/restore@v4
+        id: tc
+        with: { path: '${{ env.TC }}', key: '${{ env.TC_KEY }}' }
+      - if: steps.tc.outputs.cache-hit != 'true'
+        run: bash farm/ci/toolchain.sh "$TC"
+      - run: bash farm/ci/libc-envpatch.sh "$TC"
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.14' }
+      - name: Build tools
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq autoconf automake libtool pkgconf ninja-build >/dev/null
+          python3 -m pip install -q meson; meson --version
+          printf '#!/bin/sh\nWALI_HOST_ENV=1 exec timeout -k 5 120 node %s "$@"\n' "$PWD/host/host.js" | sudo tee /usr/local/bin/wali-run >/dev/null
+          sudo chmod +x /usr/local/bin/wali-run
+      # stdin is /dev/null: a build step that reads stdin (a configure probe run through
+      # wali-run) otherwise waits for ever -- run 2 sat 40 minutes in "Build libfuse".
+      - name: Build libfuse
+        timeout-minutes: 40
+        run: STAGE=libfuse bash farm/fuse-walios/build.sh "$TC" out < /dev/null
+      # The job summary is public (logs need a login): log tails go there.
+      - name: Release (libfuse)
+        if: always()
+        env: { GH_TOKEN: '${{ github.token }}' }
+        run: |
+          set -x; mkdir -p out; touch out/summary.txt
+          { echo '## libfuse'; echo '```'; cat out/summary.txt; for l in out/libfuse-setup.log out/libfuse-build.log; do echo "--- $l"; tail -40 "$l" 2>/dev/null || true; done; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          find out -size 0 -delete; ls -la out || true
+          gh release create "fuse-walios-${{ github.run_number }}" --prerelease --target "${{ github.sha }}" --title "fuse-walios-${{ github.run_number }}" --notes "FUSE test filesystems for walios: libfuse $(cat farm/fuse-walios/LIBFUSE_VERSION) examples, fusermount3, pjdfstest" out/* \
+            || gh release upload "fuse-walios-${{ github.run_number }}" out/* --clobber
+      - name: Build pjdfstest
+        timeout-minutes: 50
+        run: STAGE=pjdfstest bash farm/fuse-walios/build.sh "$TC" out2 < /dev/null
+      - name: Release (pjdfstest)
+        if: always()
+        env: { GH_TOKEN: '${{ github.token }}' }
+        run: |
+          set -x; mkdir -p out2; touch out2/summary.txt
+          { echo '## pjdfstest'; echo '```'; cat out2/summary.txt; for l in out2/pjdfstest-configure.log out2/pjdfstest-build.log; do echo "--- $l"; tail -40 "$l" 2>/dev/null || true; done; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          find out2 -size 0 -delete
+          gh release upload "fuse-walios-${{ github.run_number }}" out2/* --clobber

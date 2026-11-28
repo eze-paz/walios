@@ -3,6 +3,12 @@ set -e
 S=/tmp/walios-rootfs; rm -rf "$S"; mkdir -p "$S"/{root,home,tmp,bin,usr/bin,etc,var/log,dev}
 cat > "$S/etc/passwd" <<EOF
 root:x:0:0:root:/root:/bin/sh
+nobody:x:65534:65534:nobody:/nonexistent:/sbin/nologin
+EOF
+# groups: root, and nogroup for nobody (65534) -- as Debian; `id -g nobody`, pjdfstest
+cat > "$S/etc/group" <<EOF
+root:x:0:
+nogroup:x:65534:
 EOF
 echo walios > "$S/etc/hostname"
 cat > "$S/etc/motd" <<'EOF'
