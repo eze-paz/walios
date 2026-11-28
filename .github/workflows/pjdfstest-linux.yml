@@ -1,0 +1,30 @@
+# pjdfstest on real Linux (tmpfs, and libfuse passthrough over it): the reference walios'
+# results are compared with (sandpie tests/walios/e2e-pjdfstest.mjs). Published as release
+# pjdfstest-linux-N (linux-ram.txt, linux-fuse.txt, summary.txt).
+# Trigger: push of farm/fuse-walios/linux-ref.sh or this file on branch walios-fuse.
+name: pjdfstest-linux
+on:
+  push:
+    branches: [walios-fuse]
+    paths: [farm/fuse-walios/linux-ref.sh, .github/workflows/pjdfstest-linux.yml]
+  workflow_dispatch:
+permissions: { contents: write }
+concurrency: { group: pjdfstest-linux, cancel-in-progress: true }
+jobs:
+  run:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tools
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq autoconf automake libtool pkgconf meson ninja-build fuse3 >/dev/null
+      - name: pjdfstest (root)
+        run: sudo -E env "PATH=$PATH" GITHUB_WORKSPACE="$GITHUB_WORKSPACE" bash farm/fuse-walios/linux-ref.sh fuse-walios-7 out < /dev/null
+      - name: Release
+        if: always()
+        env: { GH_TOKEN: '${{ github.token }}' }
+        run: |
+          sudo chown -R "$(id -u)" out || true; touch out/summary.txt
+          { echo '## pjdfstest on Linux'; echo '```'; cat out/summary.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          gh release create "pjdfstest-linux-${{ github.run_number }}" --prerelease --target "${{ github.sha }}" --title "pjdfstest-linux-${{ github.run_number }}" --notes "pjdfstest on Linux (tmpfs and libfuse passthrough): reference for walios" out/* \
+            || gh release upload "pjdfstest-linux-${{ github.run_number }}" out/* --clobber
