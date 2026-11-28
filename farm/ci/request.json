@@ -1,1 +1,1 @@
-{"pkgs":"libepoxy gdk-pixbuf gtk+3.0 gtk3-hello","max":4,"chunk":1,"publish":true,"base":"farm-2026-11-20-76","note":"R102 X11 P3: gtk3-hello without the -DG_LOG_DOMAIN=atspi from gtk+-3.0.pc (gtk+3.0 itself built in R101b, smoke of its tools trapped)"}
+{"pkgs":"libepoxy gdk-pixbuf gtk+3.0 gtk3-hello","max":4,"chunk":1,"publish":true,"base":"farm-2026-11-20-76","note":"R103 X11 P3: gtk3-hello through fpcast-emu (GObject class_init via GClassInitFunc traps on wasm, R102)"}

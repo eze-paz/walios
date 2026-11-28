@@ -2,7 +2,7 @@
 # text on stdout. Built against the farm's gtk+3.0 (X11 backend).
 pkgname=gtk3-hello
 pkgver=1
-pkgrel=1
+pkgrel=2
 pkgdesc="GTK3 demo window for walios"
 url="https://github.com/eze-paz/walios"
 arch="all"
@@ -18,6 +18,12 @@ build() {
 	#  static libs may be named by full path as -l/abs/x.a, as in sdl2.pc)
 	$CC $CFLAGS hello.c $(pkg-config --cflags gtk+-3.0 | sed 's/ *-DG_LOG_DOMAIN=[^ ]*//g') \
 		$(pkg-config --static --libs gtk+-3.0 | sed 's#-l/#/#g') -o gtk3-hello
+	# GObject calls every class_init/instance_init through GClassInitFunc (2 params) while
+	# G_DEFINE_TYPE's are declared with fewer; a wasm call_indirect traps on that ("function
+	# signature mismatch" in type_class_init_Wm, R102). binaryen's fpcast-emu, as the farm does
+	# for programs whose smoke traps -- GTK only reaches class_init once it opens a display.
+	"${TC:?}"/binaryen/bin/wasm-opt --fpcast-emu --pass-arg=max-func-params@16 -O2 gtk3-hello -o gtk3-hello.fpc
+	mv gtk3-hello.fpc gtk3-hello
 }
 
 package() {
