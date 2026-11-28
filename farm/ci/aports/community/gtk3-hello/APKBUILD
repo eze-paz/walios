@@ -2,7 +2,7 @@
 # text on stdout. Built against the farm's gtk+3.0 (X11 backend).
 pkgname=gtk3-hello
 pkgver=1
-pkgrel=3
+pkgrel=4
 pkgdesc="GTK3 demo window for walios"
 url="https://github.com/eze-paz/walios"
 arch="all"
@@ -16,7 +16,17 @@ builddir="$srcdir"
 build() {
 	# (at-spi2's .pc injects -DG_LOG_DOMAIN=atspi unquoted: "undeclared identifier 'atspi'", R101b;
 	#  static libs may be named by full path as -l/abs/x.a, as in sdl2.pc)
-	$CC $CFLAGS hello.c $(pkg-config --cflags gtk+-3.0 | sed 's/ *-DG_LOG_DOMAIN=[^ ]*//g') \
+	# Constructors once, before main. crt1 never calls __wasm_call_ctors, so wasm-ld links a WASI
+	# "command" and wraps EVERY export to re-run the constructors -- the thread entry included:
+	# pango's fontconfig thread ran GObject's constructor again ("cannot register existing
+	# fundamental type 'gchar'", R104). The cure CPython's runtime uses (walios
+	# runtimes/cpython/wali_start.c): reference __wasm_call_ctors, run it from __main_void.
+	cat > walistart.c <<'C'
+extern void __wasm_call_ctors(void);
+extern int __real___main_void(void);
+int __wrap___main_void(void) { __wasm_call_ctors(); return __real___main_void(); }
+C
+	$CC $CFLAGS hello.c walistart.c -Wl,--wrap=__main_void $(pkg-config --cflags gtk+-3.0 | sed 's/ *-DG_LOG_DOMAIN=[^ ]*//g') \
 		$(pkg-config --static --libs gtk+-3.0 | sed 's#-l/#/#g') -o gtk3-hello
 	# GObject calls every class_init/instance_init through GClassInitFunc (2 params) while
 	# G_DEFINE_TYPE's are declared with fewer; a wasm call_indirect traps on that ("function

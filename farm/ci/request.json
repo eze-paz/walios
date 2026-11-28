@@ -1,1 +1,1 @@
-{"pkgs":"libepoxy gdk-pixbuf gtk+3.0 gtk3-hello","max":4,"chunk":1,"publish":true,"base":"farm-2026-11-20-76","note":"R104 X11 P3: gtk3-hello fpcast-emu with max-func-params 32 (R103: needs at least 17, the pass did not run)"}
+{"pkgs":"libepoxy gdk-pixbuf gtk+3.0 gtk3-hello","max":4,"chunk":1,"publish":true,"base":"farm-2026-11-20-76","note":"R105 X11 P3: gtk3-hello runs constructors once from __main_void (a command module re-ran them on the thread entry: GObject registered gchar twice)"}
