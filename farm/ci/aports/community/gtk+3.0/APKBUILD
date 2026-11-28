@@ -3,7 +3,7 @@
 # .so to dlopen), no demos/tests/man. Static library; programs link it (gtk3-hello).
 pkgname=gtk+3.0
 pkgver=3.24.52
-pkgrel=3
+pkgrel=4
 pkgdesc="The GTK+ Toolkit (v3), X11 backend, for walios"
 url="https://www.gtk.org/"
 arch="all"
@@ -55,6 +55,14 @@ build() {
 				rm -f "$v"; mkdir -p "$(dirname "$v")" && ln -s "$h" "$v" && echo "gtk: $v -> $h" >&2; fi;;
 		esac
 	done
+	# The overlay's glib-compile-resources is wasm (run through the build host) and traps in glib's
+	# g_slist_free_full -- a call through a cast function pointer (R96). The farm's cure for such
+	# programs: binaryen's fpcast-emu, which gives every table entry one signature.
+	v=$($pc --variable=glib_compile_resources gio-2.0 2>/dev/null)
+	if [ -f "$v" ] && [ "$(head -c4 "$v" | od -An -tx1 | tr -d ' \n')" = 0061736d ] && [ -x "${TC:-}/binaryen/bin/wasm-opt" ]; then
+		"$TC"/binaryen/bin/wasm-opt --fpcast-emu --pass-arg=max-func-params@16 -O2 "$v" -o "$T/bin/glib-compile-resources.fpc" &&
+			rm -f "$v" && cp "$T/bin/glib-compile-resources.fpc" "$v" && chmod +x "$v" && echo "gtk: $v with fpcast-emu" >&2
+	fi
 	abuild-meson \
 		-Dx11_backend=true -Dwayland_backend=false -Dbroadway_backend=false \
 		-Dintrospection=false -Dman=false -Dgtk_doc=false \
