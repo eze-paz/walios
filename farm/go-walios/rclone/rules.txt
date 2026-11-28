@@ -1,4 +1,4 @@
-# Dependency patches for building rclone (v1.76.0) for linux/wasm (Go on walios).
+﻿# Dependency patches for building rclone (v1.76.0) for linux/wasm (Go on walios).
 # Applied by ../tools/mkpatched.py to copies of the modules, wired in with go.mod `replace`.
 # golang.org/x/sys: linux/wasm = linux/amd64's generated tables; syscall entry points in Go
 copy   golang.org/x/sys@v0.49.0/unix syscall_linux_amd64.go
@@ -26,3 +26,13 @@ add     bazil.org/fuse@v0.0.0-20230120002735-62a210ff1fd5 bazil_devio_walios.go
 add     bazil.org/fuse@v0.0.0-20230120002735-62a210ff1fd5 bazil_devio_std.go
 subst   bazil.org/fuse@v0.0.0-20230120002735-62a210ff1fd5 fuse.go n, err := syscall.Read(c.fd(), m.buf) => n, err := devRead(c, m.buf)
 subst   bazil.org/fuse@v0.0.0-20230120002735-62a210ff1fd5 fuse.go nn, err := syscall.Write(c.fd(), msg) => nn, err := devWrite(c, msg)
+
+# --- full-command build (cmd/all) additions for linux/wasm ---
+# bbolt (cache backend): no bolt_wasm.go upstream; give it the 32-bit (2 GiB) constants
+add    go.etcd.io/bbolt@v1.5.0/internal/common bbolt_wasm.go
+# tcell (ncdu): tty_unix.go/stdin_unix.go match GOOS=linux even on GOARCH=wasm and
+# redeclare what tty_wasm.go already provides
+tag    github.com/gdamore/tcell/v3@v3.6.0/tty tty_unix.go && !wasm
+tag    github.com/gdamore/tcell/v3@v3.6.0/tty stdin_unix.go && !wasm
+# go-nfs (serve nfs): file_unix.go + file_wasm.go both match linux/wasm
+tag    github.com/willscott/go-nfs@v0.0.4/file file_unix.go && !wasm
