@@ -3,7 +3,7 @@
 # .so to dlopen), no demos/tests/man. Static library; programs link it (gtk3-hello).
 pkgname=gtk+3.0
 pkgver=3.24.52
-pkgrel=1
+pkgrel=2
 pkgdesc="The GTK+ Toolkit (v3), X11 backend, for walios"
 url="https://www.gtk.org/"
 arch="all"
@@ -40,14 +40,20 @@ build() {
 	sed -e 's|@PYTHON@|python3|' -e "s/@VERSION@/$_glibver/" "$G"/gobject/glib-genmarshal.in > "$T/bin/glib-genmarshal"
 	chmod +x "$T"/bin/*
 	export PATH="$T/bin:$PATH"
-	local t v h
+	# (the same pkg-config meson asks; the Python tools are always replaced: the overlay's copy
+	#  exists but meson reported it "found: NO" in R94 -- not runnable here)
+	local t v h pc="${PKG_CONFIG:-pkg-config}"
 	for t in gdbus_codegen:gio-2.0 glib_mkenums:glib-2.0 glib_genmarshal:glib-2.0 glib_compile_resources:gio-2.0 glib_compile_schemas:gio-2.0; do
-		v=$(pkg-config --variable=${t%%:*} ${t#*:} 2>/dev/null)
-		h=$(command -v $(printf %s "${t%%:*}" | tr _ -) 2>/dev/null)
-		[ -n "$v" ] && [ -n "$h" ] || continue
-		if [ ! -e "$v" ] || [ "$(head -c4 "$v" | od -An -tx1 | tr -d ' \n')" = 0061736d ]; then
-			mkdir -p "$(dirname "$v")" && ln -sf "$h" "$v" && echo "gtk: $v -> $h"
-		fi
+		v=$($pc --variable=${t%%:*} ${t#*:} 2>/dev/null)
+		case "${t%%:*}" in gdbus_codegen|glib_mkenums|glib_genmarshal) h="$T/bin/$(printf %s "${t%%:*}" | tr _ -)";;
+			*) h=$(command -v $(printf %s "${t%%:*}" | tr _ -) 2>/dev/null);; esac
+		echo "gtk: ${t%%:*}: pc=[$v] tool=[$h] $(ls -la "$v" 2>&1 | head -1)" >&2
+		[ -n "$v" ] && [ -n "$h" ] && [ "$h" != "$v" ] || continue
+		case "${t%%:*}" in
+			gdbus_codegen|glib_mkenums|glib_genmarshal) rm -f "$v"; mkdir -p "$(dirname "$v")" && ln -s "$h" "$v" && echo "gtk: $v -> $h" >&2;;
+			*) if [ ! -e "$v" ] || [ "$(head -c4 "$v" | od -An -tx1 | tr -d ' \n')" = 0061736d ]; then
+				rm -f "$v"; mkdir -p "$(dirname "$v")" && ln -s "$h" "$v" && echo "gtk: $v -> $h" >&2; fi;;
+		esac
 	done
 	abuild-meson \
 		-Dx11_backend=true -Dwayland_backend=false -Dbroadway_backend=false \
