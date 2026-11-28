@@ -3,7 +3,7 @@
 # .so to dlopen), no demos/tests/man. Static library; programs link it (gtk3-hello).
 pkgname=gtk+3.0
 pkgver=3.24.52
-pkgrel=5
+pkgrel=6
 pkgdesc="The GTK+ Toolkit (v3), X11 backend, for walios"
 url="https://www.gtk.org/"
 arch="all"
@@ -58,7 +58,7 @@ build() {
 	# xml-stripblanks makes glib-compile-resources spawn xmllint, and the build host's wasm
 	# process cannot read a child's pipe ("Failed to read from child pipe", R97): the UI files go
 	# in with their whitespace (a few KB more), no child process.
-	sed -i "s/ preprocess=\\\\'xml-stripblanks\\\\'//g" gtk/gen-gtk-gresources-xml.py
+	sed -i 's/ preprocess=[^>]*xml-stripblanks[^ >]*//g' gtk/gen-gtk-gresources-xml.py
 	echo "gtk: xml-stripblanks left: $(grep -c xml-stripblanks gtk/gen-gtk-gresources-xml.py)" >&2
 	# The overlay's glib-compile-resources is wasm (run through the build host) and traps in glib's
 	# g_slist_free_full -- a call through a cast function pointer (R96). The farm's cure for such
