@@ -2,7 +2,7 @@
 # text on stdout. Built against the farm's gtk+3.0 (X11 backend).
 pkgname=gtk3-hello
 pkgver=1
-pkgrel=0
+pkgrel=1
 pkgdesc="GTK3 demo window for walios"
 url="https://github.com/eze-paz/walios"
 arch="all"
@@ -14,7 +14,10 @@ source="hello.c"
 builddir="$srcdir"
 
 build() {
-	$CC $CFLAGS hello.c $(pkg-config --cflags gtk+-3.0) $(pkg-config --static --libs gtk+-3.0) -o gtk3-hello
+	# (at-spi2's .pc injects -DG_LOG_DOMAIN=atspi unquoted: "undeclared identifier 'atspi'", R101b;
+	#  static libs may be named by full path as -l/abs/x.a, as in sdl2.pc)
+	$CC $CFLAGS hello.c $(pkg-config --cflags gtk+-3.0 | sed 's/ *-DG_LOG_DOMAIN=[^ ]*//g') \
+		$(pkg-config --static --libs gtk+-3.0 | sed 's#-l/#/#g') -o gtk3-hello
 }
 
 package() {
