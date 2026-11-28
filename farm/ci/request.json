@@ -1,1 +1,1 @@
-{"pkgs":"libepoxy gdk-pixbuf gtk+3.0 gtk3-hello","max":4,"chunk":1,"publish":true,"base":"farm-2026-11-20-76","note":"R99 X11 P3: libepoxy with GLX headers (gdk x11 includes epoxy/glx.h), no EGL; gtk+3.0; gtk3-hello"}
+{"pkgs":"libepoxy gdk-pixbuf gtk+3.0 gtk3-hello","max":4,"chunk":1,"publish":true,"base":"farm-2026-11-20-76","note":"R100 X11 P3: gtk+3.0 builtin_immodules=all (a name list: yes built every im-*.so module, which failed); gtk3-hello"}
