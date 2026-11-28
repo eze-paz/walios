@@ -30,9 +30,10 @@ subst   bazil.org/fuse@v0.0.0-20230120002735-62a210ff1fd5 fuse.go nn, err := sys
 # --- full-command build (cmd/all) additions for linux/wasm ---
 # bbolt (cache backend): no bolt_wasm.go upstream; give it the 32-bit (2 GiB) constants
 add    go.etcd.io/bbolt@v1.5.0/internal/common bbolt_wasm.go
-# tcell (ncdu): tty_unix.go/stdin_unix.go match GOOS=linux even on GOARCH=wasm and
-# redeclare what tty_wasm.go already provides
-tag    github.com/gdamore/tcell/v3@v3.6.0/tty tty_unix.go && !wasm
-tag    github.com/gdamore/tcell/v3@v3.6.0/tty stdin_unix.go && !wasm
+# tcell (ncdu): tcell assumes wasm == GOOS=js (tscreen.go is (!js && !wasm)), so on
+# GOOS=linux GOARCH=wasm the unix files stay in while their wasm counterparts vanish.
+# mirror makes the wasm file set equal the linux/amd64 one (pure Go, no assembly).
+mirror github.com/gdamore/tcell/v3@v3.6.0
+mirror github.com/gdamore/tcell/v3@v3.6.0/tty
 # go-nfs (serve nfs): file_unix.go + file_wasm.go both match linux/wasm
 tag    github.com/willscott/go-nfs@v0.0.4/file file_unix.go && !wasm
