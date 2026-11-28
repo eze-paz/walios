@@ -4,7 +4,7 @@
 # separate package. The Tcl/Tk script libraries come from tcltk-scripts.
 pkgname=py3-tkinter
 pkgver=3.14.7
-pkgrel=2
+pkgrel=3
 pkgdesc="tkinter (Tk GUI toolkit bindings) for walios Python"
 url="https://docs.python.org/3/library/tkinter.html"
 arch="all"

@@ -3,7 +3,7 @@
 # .so to dlopen), no demos/tests/man. Static library; programs link it (gtk3-hello).
 pkgname=gtk+3.0
 pkgver=3.24.52
-pkgrel=0
+pkgrel=1
 pkgdesc="The GTK+ Toolkit (v3), X11 backend, for walios"
 url="https://www.gtk.org/"
 arch="all"
@@ -16,17 +16,30 @@ makedepends="
 	libxcomposite-dev libxcursor-dev libxdamage-dev libxfixes-dev libxrandr-dev
 	pango-dev zlib-dev hicolor-icon-theme meson
 	"
+_glibver=2.90.2
 source="https://download.gnome.org/sources/gtk/${pkgver%.*}/gtk-$pkgver.tar.xz
 	5628.patch
 	events-Compress-touch-update-events.patch
+	https://download.gnome.org/sources/glib/${_glibver%.*}/glib-$_glibver.tar.xz
 	"
 builddir="$srcdir/gtk-$pkgver"
 
 build() {
 	# glib's code generators run on the build machine: gio-2.0.pc / glib-2.0.pc name them at
 	# overlay paths where they are missing (gdbus-codegen: "tool variable 'gdbus_codegen'
-	# contains erroneous value", R92) or are wasm. The runner's own glib tools stand in.
-	command -v gdbus-codegen >/dev/null || { sudo -n apt-get update -qq >/dev/null 2>&1; sudo -n apt-get install -y -qq libglib2.0-dev-bin >/dev/null 2>&1; } || true
+	# contains erroneous value", R92/R93) or are wasm. The Python ones (gdbus-codegen,
+	# glib-mkenums, glib-genmarshal) come from glib's source, installed into a scratch prefix;
+	# glib-compile-resources/-schemas from the runner when it has them.
+	local G="$srcdir/glib-$_glibver" T="$srcdir/glibtools"
+	mkdir -p "$T/bin" "$T/share/glib-2.0/codegen"
+	cp "$G"/gio/gdbus-2.0/codegen/*.py "$T/share/glib-2.0/codegen/"
+	sed -e "s/@VERSION@/$_glibver/" -e 's/@MAJOR_VERSION@/2/' -e 's/@MINOR_VERSION@/90/' \
+		"$G"/gio/gdbus-2.0/codegen/config.py.in > "$T/share/glib-2.0/codegen/config.py"
+	sed -e 's|@PYTHON@|python3|' -e "s|@DATADIR@|$T/share|" "$G"/gio/gdbus-2.0/codegen/gdbus-codegen.in > "$T/bin/gdbus-codegen"
+	sed -e 's|@PYTHON@|python3|' -e "s/@VERSION@/$_glibver/" "$G"/gobject/glib-mkenums.in > "$T/bin/glib-mkenums"
+	sed -e 's|@PYTHON@|python3|' -e "s/@VERSION@/$_glibver/" "$G"/gobject/glib-genmarshal.in > "$T/bin/glib-genmarshal"
+	chmod +x "$T"/bin/*
+	export PATH="$T/bin:$PATH"
 	local t v h
 	for t in gdbus_codegen:gio-2.0 glib_mkenums:glib-2.0 glib_genmarshal:glib-2.0 glib_compile_resources:gio-2.0 glib_compile_schemas:gio-2.0; do
 		v=$(pkg-config --variable=${t%%:*} ${t#*:} 2>/dev/null)
@@ -54,4 +67,5 @@ sha512sums="
 20c119cf1a8c390c9d572729f36215fe034731d9e741a0a30c96671f4606ef8b7cdbe5d5ebe986f6f6c9ac03b3ba5cddd8d63da0ebfc5341d179ec9dea5e82eb  gtk-3.24.52.tar.xz
 b592559177c60e627940b8894aace41b058fe738d47ebb8bccdb4c9c35dd1750e1db7e153a6e5db61d2d4e95ddefd712fd734a1bbc4230a79c889f8adac96e1f  5628.patch
 74e38bbdf8d8f84bd07c10b1d879d2ef5cc80ffcfc6bcbc3d916c4c4e9a10686e20c77bed4abb56d1eed463c644873ddd2500ef3028beb7db3b10cba3a658909  events-Compress-touch-update-events.patch
+a696dff41555d67fba4dd9f9105253886394852b2f4f654e016da87d3c0986592c6994dee3ba6c788c73769814dc5a22fec507145d54612298215144f3397dbf  glib-2.90.2.tar.xz
 "
