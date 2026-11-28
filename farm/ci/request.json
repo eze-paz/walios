@@ -1,1 +1,1 @@
-{"pkgs":"libepoxy gdk-pixbuf gtk+3.0 gtk3-hello","max":4,"chunk":1,"publish":true,"base":"farm-2026-11-20-76","note":"R103 X11 P3: gtk3-hello through fpcast-emu (GObject class_init via GClassInitFunc traps on wasm, R102)"}
+{"pkgs":"libepoxy gdk-pixbuf gtk+3.0 gtk3-hello","max":4,"chunk":1,"publish":true,"base":"farm-2026-11-20-76","note":"R104 X11 P3: gtk3-hello fpcast-emu with max-func-params 32 (R103: needs at least 17, the pass did not run)"}

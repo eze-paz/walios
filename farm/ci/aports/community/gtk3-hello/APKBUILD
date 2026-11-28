@@ -2,7 +2,7 @@
 # text on stdout. Built against the farm's gtk+3.0 (X11 backend).
 pkgname=gtk3-hello
 pkgver=1
-pkgrel=2
+pkgrel=3
 pkgdesc="GTK3 demo window for walios"
 url="https://github.com/eze-paz/walios"
 arch="all"
@@ -22,7 +22,8 @@ build() {
 	# G_DEFINE_TYPE's are declared with fewer; a wasm call_indirect traps on that ("function
 	# signature mismatch" in type_class_init_Wm, R102). binaryen's fpcast-emu, as the farm does
 	# for programs whose smoke traps -- GTK only reaches class_init once it opens a display.
-	"${TC:?}"/binaryen/bin/wasm-opt --fpcast-emu --pass-arg=max-func-params@16 -O2 gtk3-hello -o gtk3-hello.fpc
+	# (max-func-params: GTK has a 17-parameter function, R103; a failure here must fail the build)
+	"${TC:?}"/binaryen/bin/wasm-opt --fpcast-emu --pass-arg=max-func-params@32 -O2 gtk3-hello -o gtk3-hello.fpc || return 1
 	mv gtk3-hello.fpc gtk3-hello
 }
 
