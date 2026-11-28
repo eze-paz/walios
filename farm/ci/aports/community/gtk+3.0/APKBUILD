@@ -3,7 +3,7 @@
 # .so to dlopen), no demos/tests/man. Static library; programs link it (gtk3-hello).
 pkgname=gtk+3.0
 pkgver=3.24.52
-pkgrel=2
+pkgrel=3
 pkgdesc="The GTK+ Toolkit (v3), X11 backend, for walios"
 url="https://www.gtk.org/"
 arch="all"
@@ -35,9 +35,9 @@ build() {
 	cp "$G"/gio/gdbus-2.0/codegen/*.py "$T/share/glib-2.0/codegen/"
 	sed -e "s/@VERSION@/$_glibver/" -e 's/@MAJOR_VERSION@/2/' -e 's/@MINOR_VERSION@/90/' \
 		"$G"/gio/gdbus-2.0/codegen/config.py.in > "$T/share/glib-2.0/codegen/config.py"
-	sed -e 's|@PYTHON@|python3|' -e "s|@DATADIR@|$T/share|" "$G"/gio/gdbus-2.0/codegen/gdbus-codegen.in > "$T/bin/gdbus-codegen"
-	sed -e 's|@PYTHON@|python3|' -e "s/@VERSION@/$_glibver/" "$G"/gobject/glib-mkenums.in > "$T/bin/glib-mkenums"
-	sed -e 's|@PYTHON@|python3|' -e "s/@VERSION@/$_glibver/" "$G"/gobject/glib-genmarshal.in > "$T/bin/glib-genmarshal"
+	sed -e "s|@PYTHON@|$(command -v python3)|" -e "s|@DATADIR@|$T/share|" "$G"/gio/gdbus-2.0/codegen/gdbus-codegen.in > "$T/bin/gdbus-codegen"
+	sed -e "s|@PYTHON@|$(command -v python3)|" -e "s/@VERSION@/$_glibver/" "$G"/gobject/glib-mkenums.in > "$T/bin/glib-mkenums"
+	sed -e "s|@PYTHON@|$(command -v python3)|" -e "s/@VERSION@/$_glibver/" "$G"/gobject/glib-genmarshal.in > "$T/bin/glib-genmarshal"
 	chmod +x "$T"/bin/*
 	export PATH="$T/bin:$PATH"
 	# (the same pkg-config meson asks; the Python tools are always replaced: the overlay's copy

@@ -1,1 +1,1 @@
-{"pkgs":"libepoxy gdk-pixbuf gtk+3.0 gtk3-hello","max":4,"chunk":1,"publish":true,"base":"farm-2026-11-20-76","note":"R95 X11 P3: gtk+3.0 always links glib's Python code generators (from glib 2.90.2 source) over the overlay's unusable copies, logging each tool; gtk3-hello"}
+{"pkgs":"libepoxy gdk-pixbuf gtk+3.0 gtk3-hello","max":4,"chunk":1,"publish":true,"base":"farm-2026-11-20-76","note":"R96 X11 P3: glib code generator wrappers with an absolute python3 shebang (#!@PYTHON@ needs a path: genmarshal not found, R95)"}
