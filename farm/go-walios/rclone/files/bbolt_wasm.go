@@ -1,4 +1,4 @@
-﻿package common
+package common
 
 // MaxMapSize represents the largest mmap size supported by Bolt.
 // linux/wasm has a 2 GiB address space, so the 32-bit values apply.

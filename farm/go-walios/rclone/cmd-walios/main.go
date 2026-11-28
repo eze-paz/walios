@@ -1,4 +1,4 @@
-﻿// rclone for walios: full build. cmd/all registers every stock command and backend
+// rclone for walios: full build. cmd/all registers every stock command and backend
 // (bisync, check, config, sync, lsjson, serve, s3/webdav/sftp/... backends); the wasm
 // build tags keep the cgo ones (cmount) out on their own. Kept from the trimmed build:
 // the dropbox/http/local imports are redundant under cmd/all but pin the sandpie backends.

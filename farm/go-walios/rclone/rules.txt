@@ -1,4 +1,4 @@
-﻿# Dependency patches for building rclone (v1.76.0) for linux/wasm (Go on walios).
+# Dependency patches for building rclone (v1.76.0) for linux/wasm (Go on walios).
 # Applied by ../tools/mkpatched.py to copies of the modules, wired in with go.mod `replace`.
 # golang.org/x/sys: linux/wasm = linux/amd64's generated tables; syscall entry points in Go
 copy   golang.org/x/sys@v0.49.0/unix syscall_linux_amd64.go
