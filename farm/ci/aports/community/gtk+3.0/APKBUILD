@@ -3,7 +3,7 @@
 # .so to dlopen), no demos/tests/man. Static library; programs link it (gtk3-hello).
 pkgname=gtk+3.0
 pkgver=3.24.52
-pkgrel=7
+pkgrel=8
 pkgdesc="The GTK+ Toolkit (v3), X11 backend, for walios"
 url="https://www.gtk.org/"
 arch="all"
