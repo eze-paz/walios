@@ -55,6 +55,13 @@ build() {
 				rm -f "$v"; mkdir -p "$(dirname "$v")" && ln -s "$h" "$v" && echo "gtk: $v -> $h" >&2; fi;;
 		esac
 	done
+	# A dependency's .pc (at-spi2's) carries -DG_LOG_DOMAIN=atspi in its Cflags: every GTK target
+	# that does not set its own log domain (libgail-util, the print backends, the doc tools)
+	# failed with "use of undeclared identifier 'atspi'" (R99/R100). Not a flag a user of a
+	# library should get: dropped from the overlay's .pc files for this build.
+	local f; for f in $(grep -l 'G_LOG_DOMAIN' "$OVERLAY"/usr/lib/pkgconfig/*.pc "$OVERLAY"/usr/share/pkgconfig/*.pc 2>/dev/null); do
+		sed -i 's/ *-DG_LOG_DOMAIN=[^ ]*//g' "$f" && echo "gtk: G_LOG_DOMAIN dropped from $f" >&2
+	done
 	# xml-stripblanks makes glib-compile-resources spawn xmllint, and the build host's wasm
 	# process cannot read a child's pipe ("Failed to read from child pipe", R97): the UI files go
 	# in with their whitespace (a few KB more), no child process.
