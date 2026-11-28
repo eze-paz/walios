@@ -1,8 +1,9 @@
 # walios farm override of Alpine's main/libepoxy: no EGL and no GLX (walios has no OpenGL;
-# GTK3 needs epoxy linked but never makes a GL context on its software X11 path).
+# GTK3 needs epoxy linked and its GLX headers (gdkglcontext-x11.h), but never makes a GL context on
+# its software X11 path: GLX on (headers + lazy dispatch; libGL is only looked for on first use), no EGL.
 pkgname=libepoxy
 pkgver=1.5.10
-pkgrel=1
+pkgrel=2
 pkgdesc="OpenGL function pointer management library (no EGL/GLX: walios)"
 url="https://github.com/anholt/libepoxy"
 arch="all"
@@ -12,7 +13,7 @@ makedepends="libx11-dev meson"
 source="$pkgname-$pkgver.tar.gz::https://github.com/anholt/libepoxy/archive/refs/tags/$pkgver.tar.gz"
 
 build() {
-	abuild-meson -Ddocs=false -Degl=no -Dglx=no -Dx11=false -Dtests=false . output
+	abuild-meson -Ddocs=false -Degl=no -Dglx=yes -Dx11=true -Dtests=false . output
 	meson compile -C output
 }
 

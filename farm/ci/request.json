@@ -1,1 +1,1 @@
-{"pkgs":"libepoxy gdk-pixbuf gtk+3.0 gtk3-hello","max":4,"chunk":1,"publish":true,"base":"farm-2026-11-20-76","note":"R98b X11 P3: GTK resources without xml-stripblanks (no xmllint child under the build host); glib-compile-resources fpcast-emu"}
+{"pkgs":"libepoxy gdk-pixbuf gtk+3.0 gtk3-hello","max":4,"chunk":1,"publish":true,"base":"farm-2026-11-20-76","note":"R99 X11 P3: libepoxy with GLX headers (gdk x11 includes epoxy/glx.h), no EGL; gtk+3.0; gtk3-hello"}
